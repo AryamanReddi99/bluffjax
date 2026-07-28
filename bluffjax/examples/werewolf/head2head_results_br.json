@@ -1,0 +1,340 @@
+{
+  "game": "werewolf",
+  "env_kwargs": {
+    "num_agents": 6,
+    "num_werewolves": 2,
+    "horizon": 200
+  },
+  "agent_types": [
+    "ppo_full",
+    "ppo_half",
+    "pqn_full",
+    "pqn_half",
+    "random"
+  ],
+  "num_episodes_per_matchup": 1000,
+  "checkpoints_used": {
+    "ppo_full": [
+      "ppo_nfsp_2026-07-26_17-34-11_s0",
+      "ppo_nfsp_2026-07-26_17-39-06_s0",
+      "ppo_nfsp_2026-07-26_17-43-54_s0"
+    ],
+    "ppo_half": [
+      "ppo_nfsp_2026-07-26_17-34-11_s0",
+      "ppo_nfsp_2026-07-26_17-39-06_s0",
+      "ppo_nfsp_2026-07-26_17-43-54_s0"
+    ],
+    "pqn_full": [
+      "pqn_nfsp_2026-07-26_17-34-59_s0",
+      "pqn_nfsp_2026-07-26_17-39-43_s0",
+      "pqn_nfsp_2026-07-26_17-44-26_s0"
+    ],
+    "pqn_half": [
+      "pqn_nfsp_2026-07-26_17-34-59_s0",
+      "pqn_nfsp_2026-07-26_17-39-43_s0",
+      "pqn_nfsp_2026-07-26_17-44-26_s0"
+    ]
+  },
+  "matchups": [
+    {
+      "agent_a": "ppo_full",
+      "agent_b": "ppo_full",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.47,
+        "std_deviation": 0.4993489254512813,
+        "std_error": 0.015790799515836722
+      },
+      "win_rate_b": {
+        "avg": 0.53,
+        "std_deviation": 0.4993489254512813,
+        "std_error": 0.015790799515836722
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_full",
+      "agent_b": "ppo_half",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.53,
+        "std_deviation": 0.4993489254512813,
+        "std_error": 0.015790799515836722
+      },
+      "win_rate_b": {
+        "avg": 0.47,
+        "std_deviation": 0.4993489254512813,
+        "std_error": 0.015790799515836722
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_full",
+      "agent_b": "pqn_full",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.602,
+        "std_deviation": 0.4897303705467283,
+        "std_error": 0.015486634102859014
+      },
+      "win_rate_b": {
+        "avg": 0.398,
+        "std_deviation": 0.4897303705467283,
+        "std_error": 0.015486634102859014
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_full",
+      "agent_b": "pqn_half",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.596,
+        "std_deviation": 0.49094299569810046,
+        "std_error": 0.015524980677122439
+      },
+      "win_rate_b": {
+        "avg": 0.404,
+        "std_deviation": 0.49094299569810046,
+        "std_error": 0.015524980677122439
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_full",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.578,
+        "std_deviation": 0.49412565219806204,
+        "std_error": 0.015625625112620622
+      },
+      "win_rate_b": {
+        "avg": 0.422,
+        "std_deviation": 0.49412565219806215,
+        "std_error": 0.015625625112620625
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_half",
+      "agent_b": "ppo_half",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.518,
+        "std_deviation": 0.49992592043814443,
+        "std_error": 0.01580904569940659
+      },
+      "win_rate_b": {
+        "avg": 0.482,
+        "std_deviation": 0.49992592043814443,
+        "std_error": 0.01580904569940659
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_half",
+      "agent_b": "pqn_full",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.602,
+        "std_deviation": 0.4897303705467283,
+        "std_error": 0.015486634102859014
+      },
+      "win_rate_b": {
+        "avg": 0.398,
+        "std_deviation": 0.4897303705467283,
+        "std_error": 0.015486634102859014
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_half",
+      "agent_b": "pqn_half",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.565,
+        "std_deviation": 0.4960050614873007,
+        "std_error": 0.015685057252717346
+      },
+      "win_rate_b": {
+        "avg": 0.435,
+        "std_deviation": 0.4960050614873007,
+        "std_error": 0.015685057252717346
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_half",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.571,
+        "std_deviation": 0.495180981262613,
+        "std_error": 0.01565899754787018
+      },
+      "win_rate_b": {
+        "avg": 0.429,
+        "std_deviation": 0.49518098126261295,
+        "std_error": 0.015658997547870177
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_full",
+      "agent_b": "pqn_full",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.493,
+        "std_deviation": 0.5002011607355596,
+        "std_error": 0.01581774956184353
+      },
+      "win_rate_b": {
+        "avg": 0.507,
+        "std_deviation": 0.5002011607355596,
+        "std_error": 0.01581774956184353
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_full",
+      "agent_b": "pqn_half",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.463,
+        "std_deviation": 0.4988786223921405,
+        "std_error": 0.015775927227262426
+      },
+      "win_rate_b": {
+        "avg": 0.537,
+        "std_deviation": 0.4988786223921405,
+        "std_error": 0.015775927227262426
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_full",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.452,
+        "std_deviation": 0.49793969910416264,
+        "std_error": 0.015746235865880583
+      },
+      "win_rate_b": {
+        "avg": 0.548,
+        "std_deviation": 0.49793969910416264,
+        "std_error": 0.015746235865880583
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_half",
+      "agent_b": "pqn_half",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.501,
+        "std_deviation": 0.500249187155011,
+        "std_error": 0.015819268290576817
+      },
+      "win_rate_b": {
+        "avg": 0.499,
+        "std_deviation": 0.500249187155011,
+        "std_error": 0.015819268290576817
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_half",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.49,
+        "std_deviation": 0.5001501276118503,
+        "std_error": 0.015816135752773183
+      },
+      "win_rate_b": {
+        "avg": 0.51,
+        "std_deviation": 0.5001501276118503,
+        "std_error": 0.015816135752773183
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "random",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.478,
+        "std_deviation": 0.4997657108743713,
+        "std_error": 0.01580397942816194
+      },
+      "win_rate_b": {
+        "avg": 0.522,
+        "std_deviation": 0.4997657108743713,
+        "std_error": 0.01580397942816194
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    }
+  ]
+}

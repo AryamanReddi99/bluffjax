@@ -1,0 +1,967 @@
+{
+  "game": "kemps",
+  "env_kwargs": {
+    "num_agents": 4,
+    "num_ranks": 13,
+    "hand_size": 4,
+    "num_suits": 4,
+    "comm_dim": 2,
+    "horizon": 200
+  },
+  "agent_types": [
+    "ppo_10e7",
+    "ppo_5e7",
+    "ppo_1e7",
+    "ppo_5e6",
+    "pqn_10e7",
+    "pqn_5e7",
+    "pqn_1e7",
+    "pqn_5e6",
+    "random"
+  ],
+  "num_episodes_per_matchup": 1000,
+  "checkpoints_used": {
+    "ppo_10e7": [
+      "checkpoints/10e7/ppo_nfsp_2026-07-28_03-37-22_s0",
+      "checkpoints/10e7/ppo_nfsp_2026-07-28_05-21-21_s0",
+      "checkpoints/10e7/ppo_nfsp_2026-07-28_07-04-55_s0"
+    ],
+    "ppo_5e7": [
+      "checkpoints/10e7/ppo_nfsp_2026-07-28_03-37-22_s0",
+      "checkpoints/10e7/ppo_nfsp_2026-07-28_05-21-21_s0",
+      "checkpoints/10e7/ppo_nfsp_2026-07-28_07-04-55_s0"
+    ],
+    "ppo_1e7": [
+      "checkpoints/ppo_nfsp_2026-07-26_17-34-15_s0",
+      "checkpoints/ppo_nfsp_2026-07-26_17-48-02_s0",
+      "checkpoints/ppo_nfsp_2026-07-26_18-01-47_s0"
+    ],
+    "ppo_5e6": [
+      "checkpoints/ppo_nfsp_2026-07-26_17-34-15_s0",
+      "checkpoints/ppo_nfsp_2026-07-26_17-48-02_s0",
+      "checkpoints/ppo_nfsp_2026-07-26_18-01-47_s0"
+    ],
+    "pqn_10e7": [
+      "checkpoints/10e7/pqn_nfsp_2026-07-28_03-37-23_s0",
+      "checkpoints/10e7/pqn_nfsp_2026-07-28_05-25-54_s0",
+      "checkpoints/10e7/pqn_nfsp_2026-07-28_07-14-06_s0"
+    ],
+    "pqn_5e7": [
+      "checkpoints/10e7/pqn_nfsp_2026-07-28_03-37-23_s0",
+      "checkpoints/10e7/pqn_nfsp_2026-07-28_05-25-54_s0",
+      "checkpoints/10e7/pqn_nfsp_2026-07-28_07-14-06_s0"
+    ],
+    "pqn_1e7": [
+      "checkpoints/pqn_nfsp_2026-07-26_16-48-40_s0",
+      "checkpoints/pqn_nfsp_2026-07-26_17-01-30_s0",
+      "checkpoints/pqn_nfsp_2026-07-26_17-16-31_s0"
+    ],
+    "pqn_5e6": [
+      "checkpoints/pqn_nfsp_2026-07-26_16-48-40_s0",
+      "checkpoints/pqn_nfsp_2026-07-26_17-01-30_s0",
+      "checkpoints/pqn_nfsp_2026-07-26_17-16-31_s0"
+    ]
+  },
+  "matchups": [
+    {
+      "agent_a": "ppo_10e7",
+      "agent_b": "ppo_10e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.262,
+        "std_deviation": 0.43994266620725647,
+        "std_error": 0.013912208651021213
+      },
+      "win_rate_b": {
+        "avg": 0.238,
+        "std_deviation": 0.4260722210348118,
+        "std_error": 0.013473586661967091
+      },
+      "draw_rate": {
+        "avg": 0.5,
+        "std_deviation": 0.5002501876563868,
+        "std_error": 0.015819299929208316
+      }
+    },
+    {
+      "agent_a": "ppo_10e7",
+      "agent_b": "ppo_5e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.582,
+        "std_deviation": 0.49347696959383985,
+        "std_error": 0.015605111967541904
+      },
+      "win_rate_b": {
+        "avg": 0.187,
+        "std_deviation": 0.39010663052963246,
+        "std_error": 0.012336254828074166
+      },
+      "draw_rate": {
+        "avg": 0.231,
+        "std_deviation": 0.42168331341993703,
+        "std_error": 0.013334797216936478
+      }
+    },
+    {
+      "agent_a": "ppo_10e7",
+      "agent_b": "ppo_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.894,
+        "std_deviation": 0.30799165387857325,
+        "std_error": 0.00973955126578524
+      },
+      "win_rate_b": {
+        "avg": 0.087,
+        "std_deviation": 0.2819760814510878,
+        "std_error": 0.008916866630745944
+      },
+      "draw_rate": {
+        "avg": 0.019,
+        "std_deviation": 0.1365930366367834,
+        "std_error": 0.004319451082910612
+      }
+    },
+    {
+      "agent_a": "ppo_10e7",
+      "agent_b": "ppo_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.938,
+        "std_deviation": 0.2412762197445372,
+        "std_error": 0.007629823996280268
+      },
+      "win_rate_b": {
+        "avg": 0.06,
+        "std_deviation": 0.23760567429347404,
+        "std_error": 0.007513751157474971
+      },
+      "draw_rate": {
+        "avg": 0.002,
+        "std_deviation": 0.04469897088298564,
+        "std_error": 0.0014135055705578234
+      }
+    },
+    {
+      "agent_a": "ppo_10e7",
+      "agent_b": "pqn_10e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.935,
+        "std_deviation": 0.2466492161670818,
+        "std_error": 0.007799733061832043
+      },
+      "win_rate_b": {
+        "avg": 0.065,
+        "std_deviation": 0.2466492161670818,
+        "std_error": 0.007799733061832043
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_10e7",
+      "agent_b": "pqn_5e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.95,
+        "std_deviation": 0.21805400144814485,
+        "std_error": 0.006895472974897919
+      },
+      "win_rate_b": {
+        "avg": 0.05,
+        "std_deviation": 0.2180540014481448,
+        "std_error": 0.006895472974897917
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_10e7",
+      "agent_b": "pqn_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.907,
+        "std_deviation": 0.290577761426155,
+        "std_error": 0.009188875634996669
+      },
+      "win_rate_b": {
+        "avg": 0.07,
+        "std_deviation": 0.2552746857116176,
+        "std_error": 0.008072494358323525
+      },
+      "draw_rate": {
+        "avg": 0.023,
+        "std_deviation": 0.1499783100768024,
+        "std_error": 0.004742730594656784
+      }
+    },
+    {
+      "agent_a": "ppo_10e7",
+      "agent_b": "pqn_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.96,
+        "std_deviation": 0.19605723255834875,
+        "std_error": 0.006199874066337029
+      },
+      "win_rate_b": {
+        "avg": 0.04,
+        "std_deviation": 0.19605723255834875,
+        "std_error": 0.006199874066337029
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_10e7",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.982,
+        "std_deviation": 0.13301764429463367,
+        "std_error": 0.00420638724961144
+      },
+      "win_rate_b": {
+        "avg": 0.018,
+        "std_deviation": 0.13301764429463367,
+        "std_error": 0.00420638724961144
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e7",
+      "agent_b": "ppo_5e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.459,
+        "std_deviation": 0.49856550980544934,
+        "std_error": 0.015766025737882314
+      },
+      "win_rate_b": {
+        "avg": 0.447,
+        "std_deviation": 0.49743184300810345,
+        "std_error": 0.0157301760460091
+      },
+      "draw_rate": {
+        "avg": 0.094,
+        "std_deviation": 0.29197474077263813,
+        "std_error": 0.009233052000787672
+      }
+    },
+    {
+      "agent_a": "ppo_5e7",
+      "agent_b": "ppo_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.798,
+        "std_deviation": 0.4016931134054421,
+        "std_error": 0.01270265158765513
+      },
+      "win_rate_b": {
+        "avg": 0.199,
+        "std_deviation": 0.39944781706570703,
+        "std_error": 0.01263164908309911
+      },
+      "draw_rate": {
+        "avg": 0.003,
+        "std_deviation": 0.054717401199198,
+        "std_error": 0.0017303161543469432
+      }
+    },
+    {
+      "agent_a": "ppo_5e7",
+      "agent_b": "ppo_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.845,
+        "std_deviation": 0.36208577175319395,
+        "std_error": 0.01145015747079952
+      },
+      "win_rate_b": {
+        "avg": 0.155,
+        "std_deviation": 0.36208577175319395,
+        "std_error": 0.01145015747079952
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e7",
+      "agent_b": "pqn_10e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.833,
+        "std_deviation": 0.37316249845107724,
+        "std_error": 0.011800434324644591
+      },
+      "win_rate_b": {
+        "avg": 0.166,
+        "std_deviation": 0.37226681638655706,
+        "std_error": 0.011772110370812133
+      },
+      "draw_rate": {
+        "avg": 0.001,
+        "std_deviation": 0.03162277660168379,
+        "std_error": 0.001
+      }
+    },
+    {
+      "agent_a": "ppo_5e7",
+      "agent_b": "pqn_5e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.885,
+        "std_deviation": 0.31918157352340515,
+        "std_error": 0.010093407594904551
+      },
+      "win_rate_b": {
+        "avg": 0.115,
+        "std_deviation": 0.31918157352340515,
+        "std_error": 0.010093407594904551
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e7",
+      "agent_b": "pqn_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.791,
+        "std_deviation": 0.40679784228100874,
+        "std_error": 0.012864077288499337
+      },
+      "win_rate_b": {
+        "avg": 0.2,
+        "std_deviation": 0.40020015012510957,
+        "std_error": 0.012655439943366657
+      },
+      "draw_rate": {
+        "avg": 0.009,
+        "std_deviation": 0.09448771310560929,
+        "std_error": 0.0029879638431426726
+      }
+    },
+    {
+      "agent_a": "ppo_5e7",
+      "agent_b": "pqn_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.904,
+        "std_deviation": 0.2947386484173239,
+        "std_error": 0.009320454434783257
+      },
+      "win_rate_b": {
+        "avg": 0.096,
+        "std_deviation": 0.2947386484173239,
+        "std_error": 0.009320454434783257
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e7",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.962,
+        "std_deviation": 0.19129190414806527,
+        "std_error": 0.0060491811505849775
+      },
+      "win_rate_b": {
+        "avg": 0.038,
+        "std_deviation": 0.19129190414806527,
+        "std_error": 0.0060491811505849775
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_1e7",
+      "agent_b": "ppo_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.504,
+        "std_deviation": 0.5002341793942456,
+        "std_error": 0.015818793703510844
+      },
+      "win_rate_b": {
+        "avg": 0.496,
+        "std_deviation": 0.5002341793942456,
+        "std_error": 0.015818793703510844
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_1e7",
+      "agent_b": "ppo_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.636,
+        "std_deviation": 0.4813893805805605,
+        "std_error": 0.015222868840522005
+      },
+      "win_rate_b": {
+        "avg": 0.364,
+        "std_deviation": 0.4813893805805605,
+        "std_error": 0.015222868840522005
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_1e7",
+      "agent_b": "pqn_10e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.564,
+        "std_deviation": 0.4961352135760474,
+        "std_error": 0.015689173023144022
+      },
+      "win_rate_b": {
+        "avg": 0.436,
+        "std_deviation": 0.49613521357604745,
+        "std_error": 0.015689173023144026
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_1e7",
+      "agent_b": "pqn_5e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.705,
+        "std_deviation": 0.4562709536921929,
+        "std_error": 0.014428554438445427
+      },
+      "win_rate_b": {
+        "avg": 0.295,
+        "std_deviation": 0.4562709536921929,
+        "std_error": 0.014428554438445427
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_1e7",
+      "agent_b": "pqn_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.6,
+        "std_deviation": 0.49014308139587187,
+        "std_error": 0.015499685165842573
+      },
+      "win_rate_b": {
+        "avg": 0.4,
+        "std_deviation": 0.49014308139587187,
+        "std_error": 0.015499685165842573
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_1e7",
+      "agent_b": "pqn_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.718,
+        "std_deviation": 0.45019848809017415,
+        "std_error": 0.01423652621529138
+      },
+      "win_rate_b": {
+        "avg": 0.282,
+        "std_deviation": 0.45019848809017415,
+        "std_error": 0.01423652621529138
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_1e7",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.882,
+        "std_deviation": 0.3227695465501357,
+        "std_error": 0.010206869264381718
+      },
+      "win_rate_b": {
+        "avg": 0.118,
+        "std_deviation": 0.3227695465501357,
+        "std_error": 0.010206869264381718
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e6",
+      "agent_b": "ppo_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.482,
+        "std_deviation": 0.49992592043814443,
+        "std_error": 0.01580904569940659
+      },
+      "win_rate_b": {
+        "avg": 0.518,
+        "std_deviation": 0.49992592043814443,
+        "std_error": 0.01580904569940659
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e6",
+      "agent_b": "pqn_10e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.419,
+        "std_deviation": 0.4936422618482768,
+        "std_error": 0.015610338967577953
+      },
+      "win_rate_b": {
+        "avg": 0.581,
+        "std_deviation": 0.4936422618482768,
+        "std_error": 0.015610338967577953
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e6",
+      "agent_b": "pqn_5e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.541,
+        "std_deviation": 0.49856550980544934,
+        "std_error": 0.015766025737882314
+      },
+      "win_rate_b": {
+        "avg": 0.459,
+        "std_deviation": 0.49856550980544934,
+        "std_error": 0.015766025737882314
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e6",
+      "agent_b": "pqn_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.44,
+        "std_deviation": 0.49663532561291557,
+        "std_error": 0.015704987954361718
+      },
+      "win_rate_b": {
+        "avg": 0.56,
+        "std_deviation": 0.49663532561291557,
+        "std_error": 0.015704987954361718
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e6",
+      "agent_b": "pqn_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.573,
+        "std_deviation": 0.4948898017901722,
+        "std_error": 0.01564978964446219
+      },
+      "win_rate_b": {
+        "avg": 0.427,
+        "std_deviation": 0.4948898017901722,
+        "std_error": 0.01564978964446219
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "ppo_5e6",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.854,
+        "std_deviation": 0.35328290194801226,
+        "std_error": 0.011171786285496553
+      },
+      "win_rate_b": {
+        "avg": 0.146,
+        "std_deviation": 0.35328290194801215,
+        "std_error": 0.01117178628549655
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_10e7",
+      "agent_b": "pqn_10e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.482,
+        "std_deviation": 0.49992592043814443,
+        "std_error": 0.01580904569940659
+      },
+      "win_rate_b": {
+        "avg": 0.518,
+        "std_deviation": 0.49992592043814443,
+        "std_error": 0.01580904569940659
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_10e7",
+      "agent_b": "pqn_5e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.652,
+        "std_deviation": 0.4765743626372731,
+        "std_error": 0.015070604603768327
+      },
+      "win_rate_b": {
+        "avg": 0.348,
+        "std_deviation": 0.4765743626372731,
+        "std_error": 0.015070604603768327
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_10e7",
+      "agent_b": "pqn_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.491,
+        "std_deviation": 0.5001691405606399,
+        "std_error": 0.015816736995005295
+      },
+      "win_rate_b": {
+        "avg": 0.449,
+        "std_deviation": 0.4976410821532389,
+        "std_error": 0.015736792768752044
+      },
+      "draw_rate": {
+        "avg": 0.06,
+        "std_deviation": 0.23760567429347407,
+        "std_error": 0.007513751157474972
+      }
+    },
+    {
+      "agent_a": "pqn_10e7",
+      "agent_b": "pqn_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.646,
+        "std_deviation": 0.4784484433174727,
+        "std_error": 0.015129868238451812
+      },
+      "win_rate_b": {
+        "avg": 0.353,
+        "std_deviation": 0.47814184048211006,
+        "std_error": 0.015120172605483696
+      },
+      "draw_rate": {
+        "avg": 0.001,
+        "std_deviation": 0.0316227766016838,
+        "std_error": 0.0010000000000000002
+      }
+    },
+    {
+      "agent_a": "pqn_10e7",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.882,
+        "std_deviation": 0.3227695465501357,
+        "std_error": 0.010206869264381718
+      },
+      "win_rate_b": {
+        "avg": 0.118,
+        "std_deviation": 0.3227695465501357,
+        "std_error": 0.010206869264381718
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_5e7",
+      "agent_b": "pqn_5e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.494,
+        "std_deviation": 0.5002141683461336,
+        "std_error": 0.015818160898606833
+      },
+      "win_rate_b": {
+        "avg": 0.506,
+        "std_deviation": 0.5002141683461336,
+        "std_error": 0.015818160898606833
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_5e7",
+      "agent_b": "pqn_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.399,
+        "std_deviation": 0.489937790988855,
+        "std_error": 0.015493193313163008
+      },
+      "win_rate_b": {
+        "avg": 0.583,
+        "std_deviation": 0.49330959280593184,
+        "std_error": 0.015599819048769581
+      },
+      "draw_rate": {
+        "avg": 0.018,
+        "std_deviation": 0.13301764429463367,
+        "std_error": 0.00420638724961144
+      }
+    },
+    {
+      "agent_a": "pqn_5e7",
+      "agent_b": "pqn_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.492,
+        "std_deviation": 0.5001861515337926,
+        "std_error": 0.015817274929209084
+      },
+      "win_rate_b": {
+        "avg": 0.507,
+        "std_deviation": 0.5002011607355596,
+        "std_error": 0.01581774956184353
+      },
+      "draw_rate": {
+        "avg": 0.001,
+        "std_deviation": 0.0316227766016838,
+        "std_error": 0.0010000000000000002
+      }
+    },
+    {
+      "agent_a": "pqn_5e7",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.798,
+        "std_deviation": 0.4016931134054421,
+        "std_error": 0.01270265158765513
+      },
+      "win_rate_b": {
+        "avg": 0.202,
+        "std_deviation": 0.4016931134054421,
+        "std_error": 0.01270265158765513
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_1e7",
+      "agent_b": "pqn_1e7",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.492,
+        "std_deviation": 0.5001861515337926,
+        "std_error": 0.015817274929209084
+      },
+      "win_rate_b": {
+        "avg": 0.498,
+        "std_deviation": 0.5002461856388775,
+        "std_error": 0.01581917337430266
+      },
+      "draw_rate": {
+        "avg": 0.01,
+        "std_deviation": 0.0995485304256668,
+        "std_error": 0.0031480009386767836
+      }
+    },
+    {
+      "agent_a": "pqn_1e7",
+      "agent_b": "pqn_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.574,
+        "std_deviation": 0.49474111287497496,
+        "std_error": 0.01564508768811376
+      },
+      "win_rate_b": {
+        "avg": 0.405,
+        "std_deviation": 0.4911376754192416,
+        "std_error": 0.015531136990452962
+      },
+      "draw_rate": {
+        "avg": 0.021,
+        "std_deviation": 0.14345584540052586,
+        "std_error": 0.0045364721513065165
+      }
+    },
+    {
+      "agent_a": "pqn_1e7",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.852,
+        "std_deviation": 0.3552776691859794,
+        "std_error": 0.011234866364235145
+      },
+      "win_rate_b": {
+        "avg": 0.148,
+        "std_deviation": 0.3552776691859794,
+        "std_error": 0.011234866364235145
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "pqn_5e6",
+      "agent_b": "pqn_5e6",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.509,
+        "std_deviation": 0.5001691405606399,
+        "std_error": 0.015816736995005295
+      },
+      "win_rate_b": {
+        "avg": 0.486,
+        "std_deviation": 0.5000540511325291,
+        "std_error": 0.01581309754773093
+      },
+      "draw_rate": {
+        "avg": 0.005,
+        "std_deviation": 0.07056897321046965,
+        "std_error": 0.00223158687484489
+      }
+    },
+    {
+      "agent_a": "pqn_5e6",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.803,
+        "std_deviation": 0.3979313374809144,
+        "std_error": 0.012583693787968198
+      },
+      "win_rate_b": {
+        "avg": 0.197,
+        "std_deviation": 0.39793133748091436,
+        "std_error": 0.012583693787968196
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    },
+    {
+      "agent_a": "random",
+      "agent_b": "random",
+      "num_episodes": 1000,
+      "win_rate_a": {
+        "avg": 0.477,
+        "std_deviation": 0.4997206426802086,
+        "std_error": 0.015802554246726087
+      },
+      "win_rate_b": {
+        "avg": 0.523,
+        "std_deviation": 0.4997206426802086,
+        "std_error": 0.015802554246726087
+      },
+      "draw_rate": {
+        "avg": 0.0,
+        "std_deviation": 0.0,
+        "std_error": 0.0
+      }
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+num_timesteps: 1e7
+num_envs: 1024
+num_steps_per_env_per_update: 64
+num_epochs: 2
+num_minibatches: 2
+
+# BR (PPO) optimizer
+lr: 2.5e-4
+gamma: 0.99
+gae_lambda: 0.95
+clip_eps: 0.2
+vf_clip: 0.2
+ent_coef: 0.01
+vf_coef: 1.0
+max_grad_norm: 0.5
+
+# Shared network architecture
+fc_dim_size: 128
+
+# NFSP-specific
+anticipatory_eta: 0.1
+sl_reservoir_capacity: 100000
+sl_batch_size: 256
+sl_num_steps_per_update: 2
+sl_lr: 3e-4
+
+# comparison
+compare: true
+compare_mode: random # "random" or "checkpoint"
+compare_with: ""
+compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
+compare_episodes: 1
+compare_interval: 1
+
+project: bluffjax
+env_name: kemps
+algorithm: ppo_nfsp
+seed: 0
+num_seeds: 1
+custom_name: "_simple"
+env_kwargs:
+  # Small deck (28 cards): num_ranks*num_suits must exceed
+  # num_agents*hand_size+4=20 or the post-deal "stock" (deck[deck_used:])
+  # used by center-refresh is empty and that mechanic never fires again --
+  # num_ranks=7 leaves an 8-card stock (2 refresh cycles) while shrinking
+  # the swap action space from 172 to 52 per comm signal.
+  num_agents: 4
+  num_ranks: 7
+  hand_size: 4
+  num_suits: 4
+  comm_dim: 2
+  horizon: 200
+
+
+use_wandb: true
+
+# optional checkpoint save: fractions of training progress at which to save a checkpoint
+save_checkpoints: [0.1, 0.25, 0.5, 0.75, 1.0]
+save_dir: ./checkpoints/simple
