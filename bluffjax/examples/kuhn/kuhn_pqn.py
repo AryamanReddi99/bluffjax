@@ -13,6 +13,7 @@ from bluffjax import make
 from bluffjax.environments.kuhn_poker.kuhn_poker import KuhnState
 from bluffjax.networks.mlp import QNetworkDiscreteMLP
 from bluffjax.utils.jax_utils import pytree_norm
+from bluffjax.utils.paths import register_resolvers
 from bluffjax.utils.wandb_multilogger import WandbMultiLogger
 from bluffjax.utils.typing import (
     FloatArray,
@@ -467,7 +468,7 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
 @hydra.main(version_base=None, config_path="./", config_name="config_pqn")
 def main(config: dict) -> None:
     try:
-        config = OmegaConf.to_container(config)
+        config = OmegaConf.to_container(config, resolve=True)
         config["num_update_steps"] = (
             config["num_timesteps"]
             // config["num_envs"]
@@ -511,4 +512,5 @@ def main(config: dict) -> None:
 
 
 if __name__ == "__main__":
+    register_resolvers()
     main()

@@ -2,6 +2,33 @@
 name = "bluffjax"
 version = "1.0.0"
 description = "A suite of adversarial imperfect information games for reinforcement learning research."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax==0.7.2",
+    "flax==0.12.0",
+    "jaxtyping==0.3.5",
+]
+
+[project.optional-dependencies]
+# NVIDIA GPUs (Linux)
+cuda = [
+    "jax[cuda12]==0.7.2; sys_platform == 'linux'",
+]
+# Training scripts in bluffjax/examples
+baselines = [
+    "chex==0.1.91",
+    "distrax==0.1.7",
+    "hydra-core==1.3.2",
+    "omegaconf==2.3.0",
+    "optax==0.2.6",
+    "wandb==0.22.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
 
 [build-system]
 requires = ["setuptools"]

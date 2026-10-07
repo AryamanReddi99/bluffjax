@@ -93,14 +93,16 @@ The new games each test something different:
 
 ## 🚀 Quick start
 
+BluffJAX uses [uv](https://docs.astral.sh/uv/). It installs Python 3.12 and the exact dependency versions from `uv.lock` into `.venv`:
+
 ```bash
 git clone https://github.com/AryamanReddi99/bluffjax.git
 cd bluffjax
-pip install -e .
-pip install jax==0.7.2 flax==0.12.0 jaxtyping==0.3.5    # use "jax[cuda12]==0.7.2" for NVIDIA GPUs
+uv sync                  # CPU / Apple silicon
+uv sync --extra cuda     # or this, on Linux with an NVIDIA GPU
 ```
 
-This is the example from the paper: 1,000 agent actions in 16 parallel environments, as a single jit-compiled function.
+This is the example from the paper: 1,000 agent actions in 16 parallel environments, as a single jit-compiled function. Save it as `example.py` and run `uv run python example.py`.
 
 ```python
 import jax
@@ -186,11 +188,11 @@ Training scripts live in [`bluffjax/examples/`](bluffjax/examples):
 | 5-Card Draw, 7-Card Stud, Werewolf, Bluff | | | | | ✅ | ✅ | |
 
 ```bash
-python bluffjax/examples/kuhn/kuhn_cfr.py                    # tabular CFR
-python bluffjax/examples/kuhn/kuhn_ppo_nfsp.py wandb=False   # PPO-NFSP in self-play
+uv run --extra baselines python bluffjax/examples/kuhn/kuhn_cfr.py                    # tabular CFR
+uv run --extra baselines python bluffjax/examples/kuhn/kuhn_ppo_nfsp.py wandb=False   # PPO-NFSP in self-play
 ```
 
-Each training script reads its `config_*.yaml` through Hydra, so you can override any key on the command line. The training scripts also need `distrax`, `optax`, `chex`, `hydra-core` and `wandb`. Running `conda env create -f env.yml` builds the full pinned environment. Pre-trained PPO-NFSP and PQN-NFSP checkpoints for 5-Card Draw, 7-Card Stud, Werewolf and Bluff are in `bluffjax/examples/<game>/checkpoints/`.
+`--extra baselines` adds the training dependencies: `distrax`, `optax`, `chex`, `hydra-core` and `wandb`. Each training script reads its `config_*.yaml` through Hydra, so you can override any key on the command line. Wherever you launch from, runs save checkpoints to `checkpoints/<game>/` and Hydra's config and log to `outputs/`, both at the repo root and gitignored. Pre-trained PPO-NFSP and PQN-NFSP checkpoints for 5-Card Draw, 7-Card Stud, Werewolf and Bluff are in `bluffjax/examples/<game>/checkpoints/`.
 
 On the solved games, exploitability is measured exactly. The uniform random policy scores 0.4583 on Kuhn and 2.3736 on Leduc, matching OpenSpiel.
 

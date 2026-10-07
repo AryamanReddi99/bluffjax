@@ -12,7 +12,7 @@ play time.
 ## Run it locally
 
 ```sh
-cd docs && python3 -m http.server 8000
+cd docs && uv run python -m http.server 8000
 # open http://localhost:8000/        (deep link to a game: /#werewolf)
 ```
 
@@ -31,21 +31,19 @@ You always sit in seat 0. The other seats are simple heuristic bots in
 
 ## After changing an environment
 
-Re-export so the demo picks up the change:
+Re-export so the demo picks up the change. `uv run` uses the repo's locked
+environment, so there is nothing else to install:
 
 ```sh
 cd docs
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python --no-deps -e ..
-uv pip install --python .venv/bin/python jax flax jaxtyping
-JAX_PLATFORMS=cpu .venv/bin/python export_games.py          # all games, or: ... kuhn_poker bluff
+JAX_PLATFORMS=cpu uv run python export_games.py          # all games, or: ... kuhn_poker bluff
 ```
 
 Then check the exports still match JAX:
 
 ```sh
-.venv/bin/python verify/make_ref.py kuhn_poker 400   # JAX rollout with random legal actions
-node verify/check.mjs kuhn_poker                     # replay through whlo and compare
+uv run python verify/make_ref.py kuhn_poker 400   # JAX rollout with random legal actions
+node verify/check.mjs kuhn_poker                  # replay through whlo and compare
 ```
 
 `check.mjs` compares the full state, rewards, done flags and legal-action

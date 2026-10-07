@@ -24,3 +24,10 @@ env_kwargs: {}
 project: kuhn
 job_type: ppo
 wandb: True # True, False
+
+# Hydra configs and logs go to outputs/ at the repo root
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}

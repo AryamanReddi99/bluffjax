@@ -47,4 +47,11 @@ wandb: true
 
 # optional checkpoint save
 save_final: true
-save_dir: ./checkpoints
+save_dir: ${repo_root:}/checkpoints/werewolf
+
+# Hydra configs and logs go to outputs/ at the repo root
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}

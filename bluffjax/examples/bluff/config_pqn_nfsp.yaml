@@ -36,7 +36,7 @@ env_kwargs:
 # comparison
 compare: true
 compare_mode: checkpoint # "random" or "checkpoint"
-compare_with: /home/aryaman/Desktop/project-bluff/bluff/bluffjax/examples/bluff/checkpoints/bluff_ppo_nfsp_br_2026-03-03_21-29-57.msgpack
+compare_with: ${repo_root:}/bluffjax/examples/bluff/checkpoints/bluff_ppo_nfsp_br_2026-03-03_21-29-57.msgpack
 compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
 compare_steps: 200
 compare_interval: 10
@@ -48,4 +48,11 @@ wandb: true
 
 # optional checkpoint save
 save_final: false
-save_dir: ./checkpoints
+save_dir: ${repo_root:}/checkpoints/bluff
+
+# Hydra configs and logs go to outputs/ at the repo root
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}

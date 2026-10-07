@@ -10,7 +10,7 @@ batch_size: 256
 num_value_train_steps: 4
 log_interval: 1
 save_final: true
-save_dir: ./checkpoints
+save_dir: ${repo_root:}/checkpoints/HUNL
 
 env_name: hunl
 num_agents: 2
@@ -23,6 +23,13 @@ wandb: true
 
 compare: true
 compare_mode: random  # "checkpoint" or "random"
-compare_with: ./checkpoints/hunl_rebel.msgpack
+compare_with: ""  # e.g. ${repo_root:}/checkpoints/HUNL/hunl_rebel_<timestamp>.msgpack
 compare_steps: 100
 compare_interval: 1
+
+# Hydra configs and logs go to outputs/ at the repo root
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}

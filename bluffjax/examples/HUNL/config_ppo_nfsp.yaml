@@ -32,8 +32,8 @@ env_kwargs:
 
 # comparison
 compare: true
-compare_mode: checkpoint  # "random" or "checkpoint"
-compare_with: /home/aryaman/Desktop/project-bluff/bluff/checkpoints/hunl_rebel_2026-03-03_04-42-33.msgpack
+compare_mode: random  # "random" or "checkpoint"
+compare_with: ""  # e.g. ${repo_root:}/checkpoints/HUNL/hunl_rebel_<timestamp>.msgpack
 compare_network_type: value  # "actor_critic" or "value"
 compare_value_hidden_dim: 128
 compare_steps: 100
@@ -43,3 +43,10 @@ compare_interval: 1
 project: bluffjax
 job_type: hunl_ppo_nfsp
 wandb: true
+
+# Hydra configs and logs go to outputs/ at the repo root
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}

@@ -11,6 +11,8 @@ wandb run, place them in a queue awaiting inputs, and log to them.
 import wandb
 import multiprocessing as mp
 
+from bluffjax.utils.paths import REPO_ROOT
+
 
 def worker(
     project: str, group: str, job_type: str, name: str, config: dict, mode: str, queue: mp.Queue
@@ -22,6 +24,7 @@ def worker(
         name=name,
         config=config,
         mode=mode,
+        dir=str(REPO_ROOT),
     )
     try:
         while True:

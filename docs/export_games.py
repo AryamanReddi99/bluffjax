@@ -15,8 +15,8 @@ manifest names each state leaf by its field path so the page's renderer can
 read e.g. `agent_cards` directly.
 
 Usage:
-    .venv/bin/python export_games.py              # every registered game
-    .venv/bin/python export_games.py kuhn_poker
+    uv run python export_games.py              # every registered game
+    uv run python export_games.py kuhn_poker
 """
 import json
 import pathlib

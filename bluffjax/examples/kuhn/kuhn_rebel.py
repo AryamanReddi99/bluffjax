@@ -33,6 +33,7 @@ from bluffjax.utils.game_utils.kuhn_exploitability import (
     infoset_key,
     is_terminal,
 )
+from bluffjax.utils.paths import register_resolvers
 from bluffjax.utils.wandb_multilogger import WandbMultiLogger
 
 
@@ -1004,7 +1005,7 @@ LOGGER: WandbMultiLogger | None = None
 @hydra.main(version_base=None, config_path="./", config_name="config_rebel")
 def main(config: dict) -> None:
     try:
-        config = OmegaConf.to_container(config)
+        config = OmegaConf.to_container(config, resolve=True)
         rng = jax.random.PRNGKey(config["seed"])
         rng_seeds = jax.random.split(rng, config["num_seeds"])
         exp_ids = jnp.arange(config["num_seeds"])
@@ -1036,4 +1037,5 @@ def main(config: dict) -> None:
 
 
 if __name__ == "__main__":
+    register_resolvers()
     main()

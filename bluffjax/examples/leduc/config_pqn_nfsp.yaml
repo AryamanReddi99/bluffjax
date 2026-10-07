@@ -33,3 +33,10 @@ env_kwargs: {}
 project: bluffjax
 job_type: leduc_pqn_nfsp
 wandb: True
+
+# Hydra configs and logs go to outputs/ at the repo root
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}

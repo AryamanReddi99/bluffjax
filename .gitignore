@@ -31,3 +31,10 @@ wandb/
 .vscode
 
 
+
+# uv
+.venv/
+
+# Training outputs (shipped opponents live in bluffjax/examples/<game>/checkpoints/)
+/checkpoints/
+/outputs/

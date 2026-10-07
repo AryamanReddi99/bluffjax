@@ -15,6 +15,7 @@ from bluffjax import make
 from bluffjax.environments.kuhn_poker.kuhn_poker import KuhnState
 from bluffjax.networks.mlp import ActorCriticDiscreteMLP
 from bluffjax.utils.jax_utils import jprint, pytree_norm
+from bluffjax.utils.paths import register_resolvers
 from bluffjax.utils.wandb_multilogger import WandbMultiLogger
 from bluffjax.utils.typing import (
     Any,
@@ -492,7 +493,7 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
 def main(config: dict) -> None:
     try:
         # config
-        config = OmegaConf.to_container(config)
+        config = OmegaConf.to_container(config, resolve=True)
         config["num_update_steps"] = (
             config["num_timesteps"]
             // config["num_envs"]
@@ -540,4 +541,5 @@ def main(config: dict) -> None:
 
 
 if __name__ == "__main__":
+    register_resolvers()
     main()
