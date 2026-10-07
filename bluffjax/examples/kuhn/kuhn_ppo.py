@@ -445,10 +445,8 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
             metric["update_step"] = runner_state.update_step
             metric.update(loss_info)
 
-            def logging_callback(seed_val, metric_dict, probs, info):
-                policy_net = policy_from_network(
-                    network.apply, final_update_state.train_state.params
-                )
+            def logging_callback(seed_val, metric_dict, info, params):
+                policy_net = policy_from_network(network.apply, params)
                 expl = exploitability(policy_net)
                 metric_dict = dict(metric_dict)
                 metric_dict["exploitability"] = float(expl)
@@ -460,6 +458,7 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
                 seed,
                 metric,
                 transitions.info,
+                final_update_state.train_state.params,
             )
 
             runner_state = RunnerState(
