@@ -1,0 +1,992 @@
+<!-- local-only:start -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<!-- local-only:end -->
+<title>BluffJAX Table</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=VT323&display=swap" />
+<style>
+  /* Layout: a card room on white paper. Shelf of game tiles -> one table (seats around a center) with a side ledger. */
+  /* Deliberately single-theme: the BluffJAX look is navy pixel type on white with grey pixel cards. */
+  :root {
+    --paper: #ffffff;
+    --navy: #000080;
+    --ink: #000000;
+    --card: #d3dcdc;
+    --card-shade: #b4b4be;
+    --heart: #800000;
+    --pip-red: #ff0000;
+    --pip-blue: #0000ff;
+    --muted: #4b4b78;
+    --wash: #eef0f7;
+    --ok: #006400;
+    --font-display: "Silkscreen", ui-monospace, monospace;
+    --font-body: "VT323", ui-monospace, "Courier New", monospace;
+    --px: 3px;            /* one "pixel" of the pixel-art grid */
+    --cw: 58px;           /* card width */
+    color-scheme: light;
+  }
+  @media (max-width: 560px) { :root { --cw: 44px; --px: 2px; } }
+  * { box-sizing: border-box; }
+  html, body { background: var(--paper); color: var(--ink); }
+  body { margin: 0; font: 22px/1.15 var(--font-body); }
+  a { color: var(--navy); }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: var(--px) dashed var(--pip-blue); outline-offset: 3px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding-inline: max(16px, 3vw); }
+
+  /* pixel box: hard black outline with notched corners and a hard drop shadow */
+  .px-box {
+    background: var(--paper);
+    border: var(--px) solid var(--ink);
+    box-shadow: var(--px) var(--px) 0 var(--ink);
+  }
+
+  header .wrap { display: flex; align-items: center; gap: 12px 24px; flex-wrap: wrap; padding-block: 18px 10px; }
+  .logo { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .logo b { font: 700 clamp(28px, 6vw, 44px)/1 var(--font-display); color: var(--navy); letter-spacing: .02em; }
+  .logo .mini { display: flex; gap: 4px; }
+  header p { margin: 0; color: var(--muted); max-width: 52ch; }
+  .credit { font-size: 18px; color: var(--muted); }
+
+  /* ---------- buttons ---------- */
+  .btn {
+    font: 700 15px/1 var(--font-display); text-transform: uppercase; letter-spacing: .04em;
+    background: var(--paper); color: var(--navy); cursor: pointer;
+    border: var(--px) solid var(--ink); box-shadow: var(--px) var(--px) 0 var(--ink);
+    padding: 10px 14px; min-height: 44px;
+  }
+  .btn:hover:not(:disabled) { background: var(--wash); }
+  .btn:active:not(:disabled) { transform: translate(var(--px), var(--px)); box-shadow: none; }
+  .btn:disabled { color: #9a9ab5; border-color: #9a9ab5; box-shadow: var(--px) var(--px) 0 #9a9ab5; cursor: not-allowed; }
+  .btn.primary { background: var(--navy); color: var(--paper); }
+  .btn.primary:hover:not(:disabled) { background: #1a1a9a; }
+  .btn.danger { color: var(--heart); }
+  .btn.on { background: var(--navy); color: var(--paper); }
+
+  /* ---------- cards ---------- */
+  .card {
+    --c: var(--ink);
+    position: relative; flex: none; width: var(--cw); aspect-ratio: 5 / 7;
+    background: var(--card); border: var(--px) solid var(--ink);
+    clip-path: polygon(var(--px) 0, calc(100% - var(--px)) 0, 100% var(--px), 100% calc(100% - var(--px)), calc(100% - var(--px)) 100%, var(--px) 100%, 0 calc(100% - var(--px)), 0 var(--px));
+    display: grid; place-items: center; grid-template-rows: 1fr auto; padding-block: calc(var(--cw) * .08) calc(var(--cw) * .14);
+    color: var(--c); user-select: none;
+  }
+  .card.red { --c: var(--heart); }
+  .card .r { font: 400 calc(var(--cw) * .5)/1 var(--font-display); align-self: end; }
+  .card .s { width: 38%; height: auto; }
+  .card .corner { position: absolute; width: calc(var(--px) * 2); height: calc(var(--px) * 2); background: var(--pip); }
+  .card .corner:nth-of-type(1) { top: var(--px); left: var(--px); }
+  .card .corner:nth-of-type(2) { top: var(--px); right: var(--px); }
+  .card .corner:nth-of-type(3) { bottom: var(--px); left: var(--px); }
+  .card .corner:nth-of-type(4) { bottom: var(--px); right: var(--px); }
+  .card.back {
+    background:
+      repeating-linear-gradient(45deg, transparent 0 calc(var(--px) * 2), rgba(255,255,255,.35) calc(var(--px) * 2) calc(var(--px) * 3)),
+      var(--navy);
+  }
+  .card.back::after { content: ""; position: absolute; inset: calc(var(--px) * 2); border: var(--px) solid var(--paper); }
+  .card.ghost { background: var(--wash); border-style: dashed; border-color: #8a8ab0; }
+  .card.pick { cursor: pointer; }
+  .card.pick:hover { transform: translateY(-4px); }
+  .card.sel { transform: translateY(-8px); outline: var(--px) solid var(--pip-blue); outline-offset: 0; }
+  .card.dim { opacity: .38; }
+  .card.small { --cw: 34px; }
+  @media (max-width: 560px) { .card.small { --cw: 26px; } }
+  .card .tag { position: absolute; bottom: -2px; right: 2px; font: 400 14px var(--font-body); color: var(--muted); }
+  button.card { padding: 0; font: inherit; cursor: pointer; }
+  button.card:disabled { cursor: not-allowed; }
+  .hand { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-end; min-height: calc(var(--cw) * 1.4 + 8px); padding-top: 8px; }
+  .hand.tight { gap: 3px; }
+  .hand.fan .card + .card { margin-left: calc(var(--cw) * -.62); }
+
+  /* ---------- shelf ---------- */
+  .shelf { display: grid; gap: 22px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); padding-block: 18px 40px; }
+  .tile { display: grid; grid-template-rows: auto 1fr; text-decoration: none; color: inherit; min-width: 0; }
+  .tile:hover { background: var(--wash); }
+  .tile:active { transform: translate(var(--px), var(--px)); box-shadow: none; }
+  .tile .art { height: 120px; display: flex; align-items: center; justify-content: center; gap: 4px; border-bottom: var(--px) solid var(--ink); background: var(--wash); overflow: hidden; --cw: 40px; }
+  .tile .meta { padding: 10px 12px 12px; display: grid; gap: 4px; }
+  .tile h3 { margin: 0; font: 700 17px/1.15 var(--font-display); color: var(--navy); text-transform: uppercase; }
+  .tile .who { font-size: 18px; color: var(--muted); }
+  .tile p { margin: 0; font-size: 20px; }
+
+  /* ---------- table ---------- */
+  #table-view { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 22px; padding-block: 14px 40px; align-items: start; }
+  @media (max-width: 880px) { #table-view { grid-template-columns: minmax(0, 1fr); } }
+  .topbar { grid-column: 1 / -1; display: flex; gap: 12px 16px; align-items: center; flex-wrap: wrap; }
+  .topbar h2 { margin: 0; font: 700 clamp(20px, 4vw, 28px)/1.1 var(--font-display); color: var(--navy); text-transform: uppercase; }
+  .felt { padding: 16px; display: grid; gap: 16px; min-width: 0; }
+  .seats { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+  .seat { padding: 10px 12px; border: var(--px) solid var(--ink); background: var(--paper); min-width: 0; }
+  .seat.turn { box-shadow: 0 0 0 var(--px) var(--paper), 0 0 0 calc(var(--px) * 2) var(--pip-blue); }
+  .seat.out { opacity: .5; }
+  .seat .name { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font: 700 15px/1.2 var(--font-display); text-transform: uppercase; color: var(--navy); }
+  .seat .sub { color: var(--muted); font-size: 19px; }
+  .center { padding: 12px; background: var(--wash); border: var(--px) dashed #8a8ab0; display: grid; gap: 10px; justify-items: center; text-align: center; min-width: 0; }
+  .center .label { font: 700 13px var(--font-display); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .row { display: flex; gap: 8px 12px; flex-wrap: wrap; align-items: center; justify-content: center; }
+  .you { border-width: calc(var(--px) * 1.5); }
+  .status { min-height: 1.3em; font-size: 24px; color: var(--navy); }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; font-size: 22px; }
+  .ico { display: inline-block; flex: none; }
+  .ico > svg { display: block; width: 100%; height: auto; }
+  .chip > svg { display: block; flex: none; width: 18px; height: 18px; }
+  .pill { font: 700 12px/1 var(--font-display); text-transform: uppercase; padding: 4px 6px; border: 2px solid currentColor; }
+  .pill.blue { color: var(--pip-blue); } .pill.red { color: var(--heart); } .pill.green { color: var(--ok); } .pill.grey { color: var(--muted); }
+  .lamp { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--ink); background: var(--paper); vertical-align: middle; }
+  .lamp.on { background: var(--pip-red); }
+
+  .side { display: grid; gap: 16px; min-width: 0; }
+  .panel { padding: 12px 14px; }
+  .panel h3 { margin: 0 0 8px; font: 700 14px var(--font-display); text-transform: uppercase; color: var(--navy); letter-spacing: .04em; }
+  .score { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .score .pos { color: var(--ok); } .score .neg { color: var(--heart); }
+  .log { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; font-size: 20px; display: grid; gap: 4px; }
+  .log li { border-bottom: 1px dotted #b5b5cc; padding-bottom: 3px; overflow-wrap: anywhere; }
+  .log li:first-child { color: var(--navy); }
+  .rules { font-size: 20px; } .rules p { margin: 0 0 6px; }
+  .banner { padding: 12px 14px; display: grid; gap: 8px; justify-items: start; background: var(--paper); }
+  .banner strong { font: 700 18px var(--font-display); text-transform: uppercase; color: var(--navy); }
+  .err { color: var(--heart); white-space: pre-wrap; }
+  .loading { display: grid; place-items: center; min-height: 240px; text-align: center; color: var(--muted); }
+  .blink { animation: blink 1s steps(2, end) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .blink { animation: none; } .card.pick:hover, .card.sel { transform: none; } }
+  [hidden] { display: none !important; }
+</style>
+<!-- local-only:start -->
+</head>
+<body>
+<!-- local-only:end -->
+
+<header>
+  <div class="wrap">
+    <a class="logo" href="#" aria-label="All games">
+      <b>BLUFF</b>
+      <span class="mini" id="logo-cards"></span>
+    </a>
+    <p>Imperfect-information card games from BluffJAX, compiled from JAX to WebAssembly and played against bots in your browser.</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="shelf-view">
+    <div class="shelf" id="shelf"></div>
+    <p class="credit">Unofficial page. Game rules and state come from <a href="https://github.com/bluffjax/bluffjax" target="_blank" rel="noopener">github.com/bluffjax/bluffjax</a>; each game's JAX code runs here through the whlo StableHLO compiler. The bots are simple heuristics written for this page.</p>
+  </section>
+
+  <section id="table-view" hidden>
+    <div class="topbar">
+      <button class="btn" id="back">← Games</button>
+      <h2 id="game-title"></h2>
+    </div>
+    <div>
+      <div class="felt px-box" id="felt"><div class="loading">Loading…</div></div>
+      <div style="height:16px"></div>
+      <div class="controls" id="controls"></div>
+    </div>
+    <aside class="side">
+      <div class="panel px-box"><h3>Session</h3><div class="score" id="score"></div></div>
+      <div class="panel px-box"><h3>Table talk</h3><ol class="log" id="log"></ol></div>
+      <div class="panel px-box rules"><h3>How to play</h3><div id="rules"></div></div>
+    </aside>
+  </section>
+</main>
+
+<script type="module">
+  // Where whlo and the exported game modules live.
+  const WHLO_URL = "./vendor/whlo/src/index.mjs";
+  const moduleText = (game, kind) => fetchText(`games/${game}/${kind}.mlir`);
+
+  async function fetchText(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Could not download ${url} (HTTP ${res.status}).`);
+    return res.text();
+  }
+
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const rand = () => Math.random();
+  const pick = (xs) => xs[Math.floor(rand() * xs.length)];
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const fmt = (x) => (Number.isInteger(x) ? String(x) : x.toFixed(1));
+  const signed = (x) => (x > 0 ? "+" : "") + fmt(x);
+
+  // ---------------------------------------------------------------- pixel art
+  // 7x7 suit glyphs, drawn as SVG rects so they stay crisp at any size.
+  const GLYPHS = {
+    h: [".XX.XX.", "XXXXXXX", "XXXXXXX", "XXXXXXX", ".XXXXX.", "..XXX..", "...X..."],
+    d: ["...X...", "..XXX..", ".XXXXX.", "XXXXXXX", ".XXXXX.", "..XXX..", "...X..."],
+    s: ["...X...", "..XXX..", ".XXXXX.", "XXXXXXX", "XXXXXXX", "...X...", "..XXX.."],
+    c: ["..XXX..", "..XXX..", "XX.X.XX", "XXXXXXX", "XX.X.XX", "...X...", "..XXX.."],
+    chip: ["..XX.XX..", ".XXXXXXX.", "XXX...XXX", "XX.....XX", ".X.....X.", "XX.....XX", "XXX...XXX", ".XXXXXXX.", "..XX.XX.."],
+    moon: ["..XXX..", ".XX....", "XX.....", "XX.....", "XX.....", ".XX....", "..XXX.."],
+    eye: [".......", "..XXX..", ".X...X.", "X..X..X", ".X...X.", "..XXX..", "......."],
+    cross: ["..XXX..", "..XXX..", "XXXXXXX", "XXXXXXX", "XXXXXXX", "..XXX..", "..XXX.."],
+    claw: ["X..X..X", "X..X..X", "X..X..X", ".X.X.X.", ".XXXXX.", "..XXX..", "..XXX.."],
+    head: ["..XXX..", ".XXXXX.", ".XXXXX.", "..XXX..", ".XXXXX.", "XXXXXXX", "XXXXXXX"],
+  };
+  function glyph(name, color = "currentColor", cls = "s") {
+    const rows = GLYPHS[name];
+    let rects = "";
+    rows.forEach((row, y) => [...row].forEach((ch, x) => { if (ch === "X") rects += `<rect x="${x}" y="${y}" width="1" height="1"/>`; }));
+    return `<svg class="${cls}" viewBox="0 0 ${rows[0].length} ${rows.length}" shape-rendering="crispEdges" fill="${color}" aria-hidden="true">${rects}</svg>`;
+  }
+  const SUITS = ["c", "d", "h", "s"]; // clubs, diamonds, hearts, spades (BluffJAX poker order)
+  const SUIT_NAME = { c: "clubs", d: "diamonds", h: "hearts", s: "spades" };
+  const RANKS_A_LOW = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+
+  /** A face-up pixel card. suit may be null (rank-only games). */
+  function card(rank, suit, { cls = "", pip = null, tag = "", attrs = "", button = false } = {}) {
+    const red = suit === "h" || suit === "d";
+    const corners = pip ? `<i class="corner" style="--pip:${pip}"></i>`.repeat(4) : "";
+    const label = `${rank}${suit ? " of " + SUIT_NAME[suit] : ""}`;
+    const inner = `${corners}<span class="r">${esc(rank)}</span>${suit ? glyph(suit) : "<span></span>"}${tag ? `<span class="tag">${esc(tag)}</span>` : ""}`;
+    const tagName = button ? "button" : "div";
+    return `<${tagName} class="card ${red ? "red" : ""} ${cls}" aria-label="${esc(label)}" ${attrs}>${inner}</${tagName}>`;
+  }
+  const back = (cls = "") => `<div class="card back ${cls}" aria-label="face-down card"></div>`;
+  const ghost = (cls = "") => `<div class="card ghost ${cls}" aria-hidden="true"></div>`;
+  /** 52-card deck id (BluffJAX poker encoding): suit = id / 13, id % 13 = 0 is the ace. */
+  const c52 = (id) => ({ rank: RANKS_A_LOW[id % 13], suit: SUITS[Math.floor(id / 13)] });
+  const card52 = (id, opts) => { const { rank, suit } = c52(id); return card(rank, suit, opts); };
+  const chips = (n) => `<span class="chip">${glyph("chip", "var(--heart)", "")}${fmt(n)}</span>`;
+  const pill = (text, color = "blue") => `<span class="pill ${color}">${esc(text)}</span>`;
+
+  // Logo: J A X on three pixel cards, like the BluffJAX wordmark.
+  $("logo-cards").innerHTML = ["J", "A", "X"].map((r) => card(r, "h", { cls: "small" })).join("");
+
+  // ---------------------------------------------------------------- poker helpers
+  const pokerRank = (id) => (id % 13 === 0 ? 14 : (id % 13) + 1); // 2..14
+  /** Rough hand strength in [0, 1] from whatever cards are visible to the holder. */
+  function handStrength(ids) {
+    const ranks = ids.map(pokerRank).sort((a, b) => b - a);
+    const counts = {};
+    ranks.forEach((r) => (counts[r] = (counts[r] || 0) + 1));
+    const groups = Object.values(counts).sort((a, b) => b - a);
+    const suits = {};
+    ids.forEach((id) => (suits[Math.floor(id / 13)] = (suits[Math.floor(id / 13)] || 0) + 1));
+    const flush = Math.max(...Object.values(suits)) >= 5;
+    const uniq = [...new Set(ranks)].sort((a, b) => a - b);
+    if (uniq.includes(14)) uniq.unshift(1);
+    let run = 1, straight = false;
+    for (let i = 1; i < uniq.length; i++) { run = uniq[i] === uniq[i - 1] + 1 ? run + 1 : 1; if (run >= 5) straight = true; }
+    let cat = 0;
+    if (groups[0] >= 4) cat = 7; else if (groups[0] === 3 && groups[1] >= 2) cat = 6; else if (flush) cat = 5;
+    else if (straight) cat = 4; else if (groups[0] === 3) cat = 3; else if (groups[0] === 2 && groups[1] === 2) cat = 2; else if (groups[0] === 2) cat = 1;
+    const high = (ranks[0] - 2) / 12;
+    if (ids.length <= 2) return Math.min(1, (cat ? 0.55 + (ranks[0] - 2) / 30 : 0.1 + high * 0.35 + ((ranks[1] ?? 2) - 2) / 60));
+    return Math.min(1, cat / 6 + high * 0.15 + 0.05);
+  }
+  /** Shared betting policy. m maps intents to this game's action ids. */
+  function pokerBot(av, s, facing, m) {
+    const ok = (a) => a !== undefined && av[a];
+    const r = rand();
+    if (facing) {
+      if (ok(m.allIn) && s > 0.93 && r < 0.5) return m.allIn;
+      if (ok(m.raise) && s > 0.7 && r < 0.45) return m.raise;
+      if (ok(m.raisePot) && s > 0.8 && r < 0.3) return m.raisePot;
+      if (ok(m.raiseHalf) && s > 0.65 && r < 0.4) return m.raiseHalf;
+      if (ok(m.fold) && r < Math.max(0, 0.55 - s)) return m.fold;
+      return ok(m.call) ? m.call : m.check;
+    }
+    if (ok(m.raise) && (s > 0.6 ? r < 0.6 : r < 0.12)) return m.raise;
+    if (ok(m.raiseHalf) && (s > 0.55 ? r < 0.55 : r < 0.1)) return m.raiseHalf;
+    if (ok(m.raisePot) && s > 0.85 && r < 0.4) return m.raisePot;
+    return ok(m.check) ? m.check : m.call;
+  }
+  function boardFrom(S, reveal) {
+    const stage = S.stage[0];
+    const shown = reveal ? 5 : stage >= 3 ? 5 : stage === 2 ? 4 : stage === 1 ? 3 : 0;
+    const ids = [...S.flop_cards, S.turn_card[0], S.river_card[0]];
+    return { ids: ids.slice(0, shown), html: ids.map((id, i) => (i < shown ? card52(id) : ghost())).join("") };
+  }
+  const stageName = (i) => ["Pre-flop", "Flop", "Turn", "River", "Showdown"][i] ?? "Showdown";
+
+  // ---------------------------------------------------------------- games
+  // Each game: name, blurb, who, rules (html), art (tile html), seats(),
+  // render(S, ctx) -> felt html, controls(S, av, ctx) -> {html, wire(el, act)},
+  // bot(S, seat, av, ctx) -> action, log(prev, seat, action, next, ctx) -> string|null,
+  // result(S, rewards, ctx) -> string.
+  const GAMES = {};
+
+  // ---- Kuhn poker
+  GAMES.kuhn_poker = {
+    title: "Kuhn Poker", who: "You vs 1 bot", blurb: "Three cards, one bet. The smallest game of poker there is.",
+    art: () => ["J", "Q", "K"].map((r) => card(r, "h")).join(""),
+    rules: `<p>Each player antes 1 and gets one of J, Q, K. Check or bet 1; facing a bet you call or fold.</p><p>Highest card wins at showdown.</p>`,
+    labels(S) { const cp = S.current_player_idx[0]; const facing = S.pot[cp] < Math.max(...S.pot); return facing ? ["Fold", "Call 1"] : ["Check", "Bet 1"]; },
+    render(S, ctx) {
+      const R = ["J", "Q", "K"];
+      const seat = (i) => `<div class="seat ${ctx.turn === i ? "turn" : ""} ${i === 0 ? "you" : ""}">
+        <div class="name">${ctx.names[i]} ${chips(S.pot[i])}</div>
+        <div class="hand">${i === 0 || ctx.reveal ? card(R[S.agent_hands[i]], "h") : back()}</div></div>`;
+      return `<div class="seats">${seat(1)}</div>
+        <div class="center"><div class="label">Pot</div>${chips(S.pot[0] + S.pot[1])}</div>
+        <div class="seats">${seat(0)}</div>`;
+    },
+    bot(S, seat, av) {
+      const c = S.agent_hands[seat], facing = S.pot[seat] < Math.max(...S.pot);
+      if (facing) return c === 2 || (c === 1 && rand() < 0.35) ? 1 : 0;
+      return c === 2 ? (rand() < 0.7 ? 1 : 0) : c === 0 ? (rand() < 0.33 ? 1 : 0) : 0;
+    },
+    log(prev, seat, a, next, ctx) { const facing = prev.pot[seat] < Math.max(...prev.pot); return `${ctx.names[seat]} ${facing ? (a ? "calls" : "folds") : a ? "bets 1" : "checks"}.`; },
+  };
+
+  // ---- Leduc hold'em
+  GAMES.leduc_holdem = {
+    title: "Leduc Hold'em", who: "You vs 1 bot", blurb: "Six cards, two rounds, one shared card. A pair beats any high card.",
+    art: () => [["J", "s"], ["Q", "h"], ["K", "s"]].map(([r, s]) => card(r, s, { pip: s === "h" ? "var(--pip-red)" : "var(--pip-blue)" })).join(""),
+    rules: `<p>Deck: J, Q, K in two suits. Ante 1. Round one bets are 2, round two bets are 4, at most two raises a round.</p><p>After round one a public card is shown. Pairing it beats any high card.</p>`,
+    cardHtml(c, opts = {}) { const s = c % 2 ? "h" : "s"; return card(["J", "Q", "K"][c >> 1], s, { pip: s === "h" ? "var(--pip-red)" : "var(--pip-blue)", ...opts }); },
+    labels(S) { const cp = S.current_player_idx[0]; const facing = S.stakes[0] > S.ante[cp]; const amt = S.stage[0] === 1 ? 2 : 4; return ["Fold", facing ? `Call ${fmt(S.stakes[0] - S.ante[cp])}` : "Check", facing ? `Raise ${amt}` : `Bet ${amt}`]; },
+    render(S, ctx) {
+      const g = GAMES.leduc_holdem;
+      const seat = (i) => `<div class="seat ${ctx.turn === i ? "turn" : ""} ${S.folded[i] ? "out" : ""} ${i === 0 ? "you" : ""}">
+        <div class="name">${ctx.names[i]} ${chips(S.ante[i])} ${S.folded[i] ? pill("folded", "grey") : ""}</div>
+        <div class="hand">${i === 0 || ctx.reveal ? g.cardHtml(S.agent_cards[i]) : back()}</div></div>`;
+      const pub = S.public_card[0] >= 0 ? g.cardHtml(S.public_card[0]) : ctx.reveal ? g.cardHtml(S.shuffled_deck[2], { cls: "dim" }) : ghost();
+      return `<div class="seats">${seat(1)}</div>
+        <div class="center"><div class="label">Round ${Math.min(S.stage[0], 2)} · public card</div><div class="row">${pub}</div>
+        <div class="row"><span class="label">Pot</span>${chips(S.ante[0] + S.ante[1])}</div></div>
+        <div class="seats">${seat(0)}</div>`;
+    },
+    bot(S, seat, av) {
+      const c = S.agent_cards[seat] >> 1, pub = S.public_card[0];
+      const pair = pub >= 0 && pub >> 1 === c;
+      const s = pair ? 0.95 : [0.25, 0.5, 0.75][c] * (pub >= 0 ? 0.8 : 1);
+      return pokerBot(av, s, S.stakes[0] > S.ante[seat], { fold: 0, call: 1, check: 1, raise: 2 });
+    },
+    log(prev, seat, a, next, ctx) {
+      const facing = prev.stakes[0] > prev.ante[seat];
+      const verb = a === 0 ? "folds" : a === 1 ? (facing ? "calls" : "checks") : facing ? "raises" : "bets";
+      let msg = `${ctx.names[seat]} ${verb}.`;
+      if (prev.public_card[0] < 0 && next.public_card[0] >= 0) { const c = next.public_card[0]; msg += ` Public card: ${["J", "Q", "K"][c >> 1]}.`; }
+      return msg;
+    },
+  };
+
+  // ---- Goofspiel
+  GAMES.goofspiel = {
+    title: "Goofspiel", who: "You vs 1 bot · simultaneous", blurb: "Bid a card from your hand for each prize. Highest bid takes it; ties burn it.",
+    art: () => card("7", "d") + card("K", "s", { cls: "sel" }) + card("Q", "h"),
+    rules: `<p>You and the bot each hold A to K. Each round a prize card (♦) is turned up. Both bid one card at the same time.</p><p>The higher bid wins points equal to the prize value (A = 1, K = 13). Equal bids win nothing. Bids are spent.</p>`,
+    render(S, ctx) {
+      const done = S.current_round[0] >= 13;
+      const prize = done ? null : S.deck[S.current_round[0]];
+      const left = (i) => [...Array(13).keys()].filter((v) => S.player_hands[i * 13 + v]);
+      const last = ctx.lastBids;
+      return `<div class="seats"><div class="seat"><div class="name">${ctx.names[1]} ${pill(`${fmt(S.points[1])} pts`, "red")}</div>
+          <div class="hand tight">${left(1).map((v) => card(RANKS_A_LOW[v], "h", { cls: "small" })).join("")}</div><div class="sub">Cards still in hand</div></div></div>
+        <div class="center"><div class="label">${done ? "Game over" : `Prize ${S.current_round[0] + 1} of 13`}</div>
+          <div class="row">${prize === null ? ghost() : card(RANKS_A_LOW[prize], "d")}</div>
+          ${last ? `<div class="sub">Last round: you bid ${RANKS_A_LOW[last[0]]}, bot bid ${RANKS_A_LOW[last[1]]} for ${RANKS_A_LOW[last.prize]}</div>` : ""}</div>
+        <div class="seats"><div class="seat you turn"><div class="name">${ctx.names[0]} ${pill(`${fmt(S.points[0])} pts`, "blue")}</div><div class="sub">Pick your bid below</div></div></div>`;
+    },
+    controls(S, av) {
+      const vals = [...Array(13).keys()];
+      return {
+        html: `<div class="hand">${vals.map((v) => card(RANKS_A_LOW[v], "s", { button: true, cls: av[v] ? "pick" : "dim", attrs: `data-a="${v}" ${av[v] ? "" : "disabled"}` })).join("")}</div>`,
+        wire(el, act) { el.querySelectorAll("[data-a]").forEach((b) => (b.onclick = () => act(+b.dataset.a))); },
+      };
+    },
+    bot(S, seat, av) {
+      const prize = S.deck[S.current_round[0]];
+      const want = Math.max(0, Math.min(12, prize + Math.round((rand() - 0.5) * 5)));
+      const legal = [...Array(13).keys()].filter((v) => av[v]);
+      return legal.reduce((b, v) => (Math.abs(v - want) < Math.abs(b - want) ? v : b), legal[0]);
+    },
+    logJoint(prev, acts, next, ctx) {
+      const prize = prev.deck[prev.current_round[0]];
+      ctx.lastBids = Object.assign([...acts], { prize });
+      const w = acts[0] === acts[1] ? "Tie, the prize is discarded." : `${acts[0] > acts[1] ? "You win" : "Bot 1 wins"} ${prize + 1} points.`;
+      return `Prize ${RANKS_A_LOW[prize]}: you bid ${RANKS_A_LOW[acts[0]]}, bot bids ${RANKS_A_LOW[acts[1]]}. ${w}`;
+    },
+    result(S) { const [a, b] = [S.points[0], S.points[1]]; return a > b ? `You win ${fmt(a)} to ${fmt(b)}.` : a < b ? `Bot 1 wins ${fmt(b)} to ${fmt(a)}.` : `Draw at ${fmt(a)}.`; },
+  };
+
+  // ---- Kemps
+  const KEMPS_RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"];
+  const kcard = (c, opts) => card(KEMPS_RANKS[c >> 2], SUITS[c & 3], opts);
+  GAMES.kemps = {
+    title: "Kemps", who: "You + partner vs 2 bots · simultaneous", blurb: "Collect four of a kind, then signal your partner to shout Kemps.",
+    art: () => ["c", "d", "h", "s"].map((s) => card("K", s)).join(""),
+    rules: `<p>Teams: you and Bot 2 against Bot 1 and Bot 3. Everyone acts at once each turn: swap one card with the centre, pass, or call.</p>
+      <p>When everyone passes, the centre is replaced from the deck. Get four of a kind and light your signal; if your partner calls <b>Kemps</b> while you hold it, your team wins. Call <b>Stop Kemps</b> when an opponent holds four of a kind. A wrong call loses.</p>`,
+    render(S, ctx) {
+      const sig = (i) => S.communication[i * 2 + 1] === 1;
+      const seat = (i, label) => `<div class="seat ${i === 0 ? "you" : ""}">
+        <div class="name">${ctx.names[i]} ${pill(label, i % 2 ? "red" : "blue")} <span class="lamp ${sig(i) ? "on" : ""}" title="signal"></span></div>
+        <div class="hand tight">${[0, 1, 2, 3].map((k) => (ctx.reveal ? kcard(S.agent_hands[i * 4 + k], { cls: "small" }) : back("small"))).join("")}</div></div>`;
+      const sel = ctx.ui;
+      return `<div class="seats">${seat(1, "them")}${seat(2, "partner")}${seat(3, "them")}</div>
+        <div class="center"><div class="label">Centre · deck ${32 - S.deck_idx[0]} left</div>
+          <div class="row">${[0, 1, 2, 3].map((k) => kcard(S.center_cards[k], { button: true, cls: `pick ${sel.center === k ? "sel" : ""}`, attrs: `data-center="${k}"` })).join("")}</div></div>
+        <div class="seat you turn"><div class="name">${ctx.names[0]} ${pill("you", "blue")} <span class="lamp ${sig(0) ? "on" : ""}"></span></div>
+          <div class="hand">${[0, 1, 2, 3].map((k) => kcard(S.agent_hands[k], { button: true, cls: `pick ${sel.hand === k ? "sel" : ""}`, attrs: `data-hand="${k}"` })).join("")}</div></div>`;
+    },
+    wireFelt(el, S, ctx, rerender) {
+      el.querySelectorAll("[data-hand]").forEach((b) => (b.onclick = () => { ctx.ui.hand = ctx.ui.hand === +b.dataset.hand ? null : +b.dataset.hand; rerender(); }));
+      el.querySelectorAll("[data-center]").forEach((b) => (b.onclick = () => { ctx.ui.center = ctx.ui.center === +b.dataset.center ? null : +b.dataset.center; rerender(); }));
+    },
+    controls(S, av, ctx) {
+      const u = ctx.ui;
+      const canSwap = u.hand != null && u.center != null;
+      const enc = (g) => g * 2 + (u.signal ? 1 : 0);
+      return {
+        html: `<button class="btn primary" data-k="swap" ${canSwap ? "" : "disabled"}>Swap selected</button>
+          <button class="btn" data-k="pass">Pass</button>
+          <button class="btn" data-k="kemps">Kemps!</button>
+          <button class="btn danger" data-k="stop">Stop Kemps!</button>
+          <button class="btn ${u.signal ? "on" : ""}" data-k="sig" aria-pressed="${u.signal}">Signal ${u.signal ? "on" : "off"}</button>`,
+        wire(el, act, rerender) {
+          el.querySelector('[data-k="swap"]').onclick = () => {
+            const lose = S.agent_hands[u.hand] >> 2, gain = S.center_cards[u.center] >> 2;
+            u.hand = u.center = null; act(enc(lose * 13 + gain));
+          };
+          el.querySelector('[data-k="pass"]').onclick = () => act(enc(169));
+          el.querySelector('[data-k="kemps"]').onclick = () => act(enc(170));
+          el.querySelector('[data-k="stop"]').onclick = () => act(enc(171));
+          el.querySelector('[data-k="sig"]').onclick = () => { u.signal = !u.signal; rerender(); };
+        },
+      };
+    },
+    bot(S, seat) {
+      const counts = S.agent_hand_counts.slice(seat * 13, seat * 13 + 13);
+      const center = S.center_counts;
+      const four = counts.some((c) => c === 4);
+      const sig = (i) => S.communication[i * 2 + 1] === 1;
+      const partner = (seat + 2) % 4, opps = [(seat + 1) % 4, (seat + 3) % 4];
+      const comm = four ? 1 : 0;
+      if (sig(partner) && rand() < 0.85) return 170 * 2 + comm;
+      if (opps.some(sig) && rand() < 0.5) return 171 * 2 + comm;
+      if (!four) {
+        const target = counts.indexOf(Math.max(...counts));
+        if (center[target] > 0) {
+          const lose = counts.findIndex((c, r) => c > 0 && r !== target);
+          if (lose >= 0) return (lose * 13 + target) * 2 + comm;
+        }
+        // Chase a pair the centre can complete.
+        for (let r = 0; r < 13; r++) if (counts[r] >= 2 && center[r] > 0 && r !== target) {
+          const lose = counts.findIndex((c, q) => c === 1 && q !== r);
+          if (lose >= 0) return (lose * 13 + r) * 2 + comm;
+        }
+      }
+      return 169 * 2 + comm;
+    },
+    logJoint(prev, acts, next, ctx) {
+      const g = acts.map((a) => a >> 1);
+      const callers = g.map((x, i) => (x >= 170 ? `${ctx.names[i]} calls ${x === 170 ? "Kemps" : "Stop Kemps"}!` : null)).filter(Boolean);
+      if (callers.length) return callers.join(" ");
+      if (g.every((x) => x === 169)) return next.deck_idx[0] > prev.deck_idx[0] ? "Everyone passes. A fresh centre is dealt." : "Everyone passes and the deck is empty.";
+      const swaps = g.map((x, i) => (x < 169 ? ctx.names[i] : null)).filter(Boolean);
+      return `${swaps.join(", ")} swap${swaps.length > 1 ? "" : "s"} with the centre.`;
+    },
+    result(S, rewards) { if (rewards.every((r) => r === 0)) return "Nobody called before the hand ended. Draw."; return rewards[0] > 0 ? "Your team wins the hand." : "The other team wins the hand."; },
+  };
+
+  // ---- Bluff
+  const BR = RANKS_A_LOW;
+  GAMES.bluff = {
+    title: "Bluff", who: "You vs 2 bots", blurb: "Play cards face down and name their rank. Lie if you like, but don't get caught.",
+    art: () => back() + back() + card("?", null),
+    rules: `<p>Choose how many cards to play (1 to 4), then pick them. They go face down and you claim they are all the required rank (the next rank up from the last claim; after a challenge the winner names any rank).</p>
+      <p>Others may call your bluff. A caught liar, or a wrong challenger, picks up the whole pile. Empty your hand to win. The hand also ends after 100 moves.</p>`,
+    reqRank(S) { return S.has_current_rank[0] && !S.rank_choice_pending[0] ? S.current_rank[0] : null; },
+    render(S, ctx) {
+      const phase = S.phase[0], req = GAMES.bluff.reqRank(S);
+      const seat = (i) => `<div class="seat ${ctx.turn === i ? "turn" : ""}">
+        <div class="name">${ctx.names[i]} ${pill(`${S.agent_hand_sizes[i]} cards`, "grey")}</div>
+        <div class="hand fan">${Array.from({ length: Math.min(S.agent_hand_sizes[i], 10) }, () => back("small")).join("")}</div></div>`;
+      const claims = [...S.pile_claims].map((n, r) => (n ? `${n}×${BR[r]}` : null)).filter(Boolean).join(", ");
+      let claimLine = "";
+      if (phase === 2) claimLine = `${ctx.names[S.challenge_target_idx[0]]} claims ${S.claim_size[0]} × ${BR[S.claim_rank[0]]}`;
+      else if (phase === 1) claimLine = `${S.current_player_idx[0] === 0 ? "You are" : ctx.names[S.current_player_idx[0]] + " is"} playing ${S.claim_size[0]} card${S.claim_size[0] > 1 ? "s" : ""}${req != null ? ` as ${BR[req]}` : ""}`;
+      const pending = phase === 1 && S.current_player_idx[0] === 0 ? [...S.pending_play_hand].flatMap((n, r) => Array(n).fill(r)) : [];
+      const mine = [...Array(13).keys()].flatMap((r) => Array(S.agent_hands[r] - (pending.filter((x) => x === r).length)).fill(r));
+      return `<div class="seats">${seat(1)}${seat(2)}</div>
+        <div class="center"><div class="label">Pile · ${S.pile_size[0]} card${S.pile_size[0] === 1 ? "" : "s"}</div>
+          <div class="hand fan" style="justify-content:center">${Array.from({ length: Math.min(S.pile_size[0], 12) }, () => back("small")).join("") || ghost("small")}</div>
+          <div class="sub">${claims ? `Claimed into the pile: ${claims}` : "No claims on the pile yet"}</div>
+          <div class="status">${esc(claimLine || (req != null ? `Next claim must be ${BR[req]}` : "Next claim: any rank"))}</div>
+          ${pending.length ? `<div class="row">${pending.map((r) => card(BR[r], null, { cls: "small" })).join("")}</div>` : ""}</div>
+        <div class="seat you ${ctx.turn === 0 ? "turn" : ""}"><div class="name">${ctx.names[0]} ${pill(`${S.agent_hand_sizes[0]} cards`, "blue")}</div>
+          <div class="hand tight">${mine.map((r) => card(BR[r], null, { cls: "small" })).join("")}</div></div>`;
+    },
+    controls(S, av) {
+      const phase = S.phase[0];
+      if (phase === 0) return { html: [0, 1, 2, 3].map((a) => `<button class="btn ${a ? "" : "primary"}" data-a="${a}" ${av[a] ? "" : "disabled"}>Play ${a + 1}</button>`).join(""), wire: wireButtons };
+      if (phase === 2) return { html: `<button class="btn danger" data-a="0">Call bluff</button><button class="btn primary" data-a="1">Believe it</button>`, wire: wireButtons };
+      // play: offsets are relative to current_rank when one is set
+      const toRank = (a) => (S.has_current_rank[0] ? (S.current_rank[0] + a) % 13 : a % 13);
+      const opts = [...Array(13).keys()].filter((a) => av[a]).map((a) => ({ a, r: toRank(a) })).sort((x, y) => x.r - y.r);
+      const req = GAMES.bluff.reqRank(S);
+      return {
+        html: `<span class="sub">Pick card ${S.pending_play_count[0] + 1} of ${S.claim_size[0]}:</span>${opts.map(({ a, r }) => card(BR[r], null, { button: true, cls: `pick ${req === r ? "sel" : ""}`, attrs: `data-a="${a}"` })).join("")}`,
+        wire: wireButtons,
+      };
+    },
+    bot(S, seat, av, ctx) {
+      const phase = S.phase[0], hand = S.agent_hands.slice(seat * 13, seat * 13 + 13), req = GAMES.bluff.reqRank(S);
+      const toRank = (a) => (S.has_current_rank[0] ? (S.current_rank[0] + a) % 13 : a % 13);
+      if (phase === 0) {
+        const have = req != null ? hand[req] : Math.max(...hand);
+        let n = have > 0 ? have : 1 + (rand() < 0.3 ? 1 : 0);
+        if (have > 0 && rand() < 0.2) n++;
+        n = Math.max(1, Math.min(n, 4));
+        while (n > 1 && !av[n - 1]) n--;
+        ctx.plan[seat] = req;
+        return n - 1;
+      }
+      if (phase === 1) {
+        const legal = [...Array(13).keys()].filter((a) => av[a]);
+        const want = req ?? ctx.plan[seat] ?? [...hand.keys()].sort((x, y) => hand[y] - hand[x])[0];
+        const good = legal.find((a) => toRank(a) === want);
+        if (good !== undefined) return good;
+        // lie with the least useful card
+        return legal.sort((x, y) => hand[toRank(x)] - hand[toRank(y)])[0];
+      }
+      const mine = hand[S.claim_rank[0]];
+      const impossible = mine + S.claim_size[0] > 4;
+      const target = S.challenge_target_idx[0];
+      return impossible || rand() < 0.1 + (S.agent_hand_sizes[target] <= 3 ? 0.25 : 0) + S.claim_size[0] * 0.04 ? 0 : 1;
+    },
+    log(prev, seat, a, next, ctx) {
+      const phase = prev.phase[0];
+      if (phase === 0) return null;
+      if (phase === 1) return next.phase[0] === 2 ? `${ctx.names[seat]} plays ${prev.claim_size[0]} card${prev.claim_size[0] > 1 ? "s" : ""}, claiming ${prev.claim_size[0]} × ${BR[next.claim_rank[0]]}.` : null;
+      const target = prev.challenge_target_idx[0];
+      if (a === 0) {
+        const shown = [...next.challenge_hand].flatMap((n, r) => Array(n).fill(BR[r])).join(" ");
+        const truth = next.challenge_status[0] === 0;
+        return `${ctx.names[seat]} calls bluff on ${ctx.names[target]}! The cards were ${shown}. ${truth ? `${ctx.names[seat]}` : ctx.names[target]} picks up ${prev.pile_size[0]} cards.`;
+      }
+      return next.phase[0] === 0 ? `Nobody challenges ${ctx.names[target]}.` : null;
+    },
+    result(S, rewards, ctx) {
+      const w = [...S.game_winner].findIndex(Boolean);
+      if (w >= 0) return `${w === 0 ? "You empty" : ctx.names[w] + " empties"} the hand first and win${w === 0 ? "" : "s"}.`;
+      const sizes = [...S.agent_hand_sizes]; const best = sizes.indexOf(Math.min(...sizes));
+      return `Out of moves. ${best === 0 ? "You hold" : ctx.names[best] + " holds"} the fewest cards (${sizes[best]}).`;
+    },
+  };
+
+  // ---- poker family shared bits
+  const NL_LABELS = (S, cp) => {
+    const rr = S.round_raised, diff = Math.max(...rr) - rr[cp], pot = S.chips_in.reduce((a, b) => a + b, 0);
+    return [diff > 0 ? `Call ${fmt(diff)}` : "Check", `Raise ${fmt(Math.floor(pot / 2))}`, `Raise ${fmt(pot)}`, `All in ${fmt(S.remaining_chips[cp])}`, "Fold"];
+  };
+  const NL_MAP = { call: 0, check: 0, raiseHalf: 1, raisePot: 2, allIn: 3, fold: 4 };
+  const LIMIT_MAP = { call: 0, raise: 1, fold: 2, check: 3 };
+  const LIMIT_LABELS = (amt) => ["Call", `Raise ${amt}`, "Fold", "Check"];
+  const showdown = (S, ctx) => ctx.done && ![...S.folded].some(Boolean);
+  const pokerSeat = (S, ctx, i, handHtml, extra = "") => `<div class="seat ${ctx.turn === i ? "turn" : ""} ${S.folded[i] ? "out" : ""} ${i === 0 ? "you" : ""}">
+      <div class="name">${ctx.names[i]} ${S.folded[i] ? pill("folded", "grey") : ""} ${S.all_in?.[i] ? pill("all in", "red") : ""}</div>
+      <div class="sub">In pot ${chips(S.chips_in[i])}${S.remaining_chips ? ` · stack ${chips(S.remaining_chips[i])}` : ""}${extra}</div>
+      <div class="hand">${handHtml}</div></div>`;
+  const potLine = (S) => `<div class="row"><span class="label">Pot</span>${chips(S.chips_in.reduce((a, b) => a + b, 0))}</div>`;
+  function pokerVerb(labels, a) { return labels[a].replace(/^Call.*/, "calls").replace(/^Check/, "checks").replace(/^Fold/, "folds").replace(/^Raise (.*)/, "raises $1").replace(/^All in.*/, "goes all in").replace(/^Bet (.*)/, "bets $1"); }
+
+  // ---- 5-card draw
+  GAMES.five_card_draw = {
+    title: "5-Card Draw", who: "You vs 1 bot · no limit", blurb: "Bet, swap up to five cards, bet again.",
+    art: () => [0, 13, 26, 39, 12].map((id) => card52(id)).join("").replace(/class="card/g, 'style="--cw:30px" class="card'),
+    rules: `<p>Blinds 1/2, stacks of 100. Bet, then pick cards to throw away and draw replacements, then bet again.</p><p>Raises are half pot, pot, or all in.</p>`,
+    labels(S) {
+      if (S.stage[0] === 1) return null;
+      return NL_LABELS(S, S.current_player_idx[0]);
+    },
+    render(S, ctx) {
+      const show = (i) => i === 0 || (ctx.reveal && showdown(S, ctx));
+      const hand = (i) => {
+        const ids = [...S.agent_cards.slice(i * 5, i * 5 + 5)].sort((a, b) => pokerRank(a) - pokerRank(b));
+        if (!show(i)) return ids.map(() => back()).join("");
+        return ids.map((id) => card52(id, i === 0 && ctx.drawing ? { button: true, cls: `pick ${ctx.ui.discard?.has(id) ? "dim" : ""}`, attrs: `data-card="${id}"`, tag: ctx.ui.discard?.has(id) ? "out" : "" } : {})).join("");
+      };
+      const st = ["Pre-draw betting", "Draw", "Post-draw betting"][S.stage[0]] ?? "Showdown";
+      return `<div class="seats">${pokerSeat(S, ctx, 1, hand(1))}</div>
+        <div class="center"><div class="label">${st}</div>${potLine(S)}</div>
+        <div class="seats">${pokerSeat(S, ctx, 0, hand(0))}</div>`;
+    },
+    wireFelt(el, S, ctx, rerender) {
+      el.querySelectorAll("[data-card]").forEach((b) => (b.onclick = () => { const id = +b.dataset.card; ctx.ui.discard.has(id) ? ctx.ui.discard.delete(id) : ctx.ui.discard.add(id); rerender(); }));
+    },
+    drawAction(S, seat, discard) {
+      // Bit j of the pattern keeps the card at position j of the hand sorted by card id.
+      const sorted = [...S.agent_cards.slice(seat * 5, seat * 5 + 5)].sort((a, b) => a - b);
+      return 5 + sorted.reduce((acc, id, j) => acc + (discard.has(id) ? 0 : 1 << j), 0);
+    },
+    controls(S, av, ctx) {
+      if (S.stage[0] === 1) {
+        ctx.ui.discard ??= new Set();
+        const n = ctx.ui.discard.size;
+        return {
+          html: `<span class="sub">Tap cards to throw away.</span><button class="btn primary" data-k="draw">${n ? `Draw ${n}` : "Stand pat"}</button>`,
+          wire(el, act) { el.querySelector('[data-k="draw"]').onclick = () => { const a = GAMES.five_card_draw.drawAction(S, 0, ctx.ui.discard); ctx.ui.discard = new Set(); act(a); }; },
+        };
+      }
+      return labelButtons(GAMES.five_card_draw.labels(S), av);
+    },
+    bot(S, seat, av) {
+      const ids = [...S.agent_cards.slice(seat * 5, seat * 5 + 5)];
+      if (S.stage[0] === 1) {
+        const count = {}; ids.forEach((id) => (count[pokerRank(id)] = (count[pokerRank(id)] || 0) + 1));
+        let keep = ids.filter((id) => count[pokerRank(id)] >= 2);
+        if (!keep.length) keep = ids.filter((id) => pokerRank(id) >= 13);
+        return GAMES.five_card_draw.drawAction(S, seat, new Set(ids.filter((id) => !keep.includes(id))));
+      }
+      const diff = Math.max(...S.round_raised) - S.round_raised[seat];
+      return pokerBot(av, handStrength(ids), diff > 0, NL_MAP);
+    },
+    log(prev, seat, a, next, ctx) {
+      if (prev.stage[0] === 1) { const kept = [...Array(5).keys()].filter((j) => ((a - 5) >> j) & 1).length; return `${ctx.names[seat]} draws ${5 - kept}.`; }
+      return `${ctx.names[seat]} ${pokerVerb(NL_LABELS(prev, seat), a)}.`;
+    },
+  };
+
+  // ---- 7-card stud
+  GAMES.seven_card_stud = {
+    title: "7-Card Stud", who: "You vs 1 bot · limit", blurb: "Seven cards each, four of them face up. No community cards.",
+    art: () => back() + back() + card52(25) + card52(38),
+    rules: `<p>Ante ½, the lowest door card brings it in. Cards 3 to 6 are dealt face up, the 7th face down. Best five of seven wins.</p><p>Bets are 1 on 3rd and 4th street and 2 after that, up to four raises a street.</p>`,
+    labels(S) { return LIMIT_LABELS(S.stage[0] >= 2 ? 2 : 1); },
+    render(S, ctx) {
+      const st = S.stage[0], dealt = Math.min(7, st + 3), upTo = [1, 2, 3, 4, 4][Math.min(st, 4)] + 2;
+      const hand = (i) => {
+        const ids = [...S.agent_cards.slice(i * 7, i * 7 + 7)];
+        const reveal = ctx.reveal && showdown(S, ctx);
+        return ids.slice(0, dealt).map((id, k) => {
+          const up = k >= 2 && k < upTo; // 3rd-6th cards are dealt face up
+          return i === 0 || up || reveal ? card52(id, { tag: up ? "" : "down" }) : back();
+        }).join("");
+      };
+      return `<div class="seats">${pokerSeat(S, ctx, 1, hand(1), S.bring_in_idx[0] === 1 ? " · brought in" : "")}</div>
+        <div class="center"><div class="label">${["3rd", "4th", "5th", "6th", "7th"][st] ?? "Showdown"} street</div>${potLine(S)}</div>
+        <div class="seats">${pokerSeat(S, ctx, 0, hand(0), S.bring_in_idx[0] === 0 ? " · brought in" : "")}</div>`;
+    },
+    controls(S, av) { return labelButtons(GAMES.seven_card_stud.labels(S), av); },
+    bot(S, seat, av) {
+      const dealt = Math.min(7, S.stage[0] + 3);
+      const ids = [...S.agent_cards.slice(seat * 7, seat * 7 + dealt)];
+      return pokerBot(av, handStrength(ids), S.chips_in[seat] < Math.max(...S.chips_in), LIMIT_MAP);
+    },
+    log(prev, seat, a, next, ctx) { return `${ctx.names[seat]} ${pokerVerb(GAMES.seven_card_stud.labels(prev), a)}.`; },
+  };
+
+  // ---- Texas hold'em (limit / no-limit)
+  const holdemRender = (S, ctx) => {
+    const hand = (i) => {
+      const ids = [...S.agent_cards.slice(i * 2, i * 2 + 2)];
+      return i === 0 || (ctx.reveal && showdown(S, ctx)) ? ids.map((id) => card52(id)).join("") : back() + back();
+    };
+    const board = boardFrom(S, ctx.done && showdown(S, ctx));
+    return `<div class="seats">${pokerSeat(S, ctx, 1, hand(1), S.small_blind_idx[0] === 1 ? " · small blind" : " · big blind")}</div>
+      <div class="center"><div class="label">${ctx.done ? "Hand over" : stageName(S.stage[0])}</div><div class="row">${board.html}</div>${potLine(S)}</div>
+      <div class="seats">${pokerSeat(S, ctx, 0, hand(0), S.small_blind_idx[0] === 0 ? " · small blind" : " · big blind")}</div>`;
+  };
+  const holdemBot = (map) => (S, seat, av) => {
+    const ids = [...S.agent_cards.slice(seat * 2, seat * 2 + 2), ...boardFrom(S, false).ids];
+    const facing = S.round_raised ? Math.max(...S.round_raised) > S.round_raised[seat] : S.chips_in[seat] < Math.max(...S.chips_in);
+    return pokerBot(av, handStrength(ids), facing, map);
+  };
+  GAMES.texas_limit_holdem = {
+    title: "Limit Hold'em", who: "You vs 1 bot · heads-up", blurb: "Two hole cards, five on the board, fixed bet sizes.",
+    art: () => card52(0) + card52(39) + `<span style="width:8px"></span>` + card52(12) + card52(25) + card52(51),
+    rules: `<p>Blinds 1/2. Bets are 2 before the turn and 4 from the turn on, four raises a round at most.</p><p>Best five cards from your two plus the five on the board.</p>`,
+    labels(S) { return LIMIT_LABELS(S.stage[0] >= 2 ? 4 : 2); },
+    render: holdemRender,
+    controls(S, av) { return labelButtons(GAMES.texas_limit_holdem.labels(S), av); },
+    bot: holdemBot(LIMIT_MAP),
+    log(prev, seat, a, next, ctx) { return `${ctx.names[seat]} ${pokerVerb(GAMES.texas_limit_holdem.labels(prev), a)}.${next.stage[0] > prev.stage[0] && next.stage[0] < 4 && !next.done[0] ? ` ${stageName(next.stage[0])}.` : ""}`; },
+  };
+  GAMES.texas_nolimit_holdem = {
+    title: "No-Limit Hold'em", who: "You vs 1 bot · 100 chips", blurb: "Two hole cards, five on the board, and any bet up to your stack.",
+    art: () => card52(0) + card52(13) + `<span style="width:8px"></span>` + `<span class="pill red">All in</span>`,
+    rules: `<p>Blinds 1/2, stacks of 100. Raise half the pot, the pot, or go all in.</p><p>Best five cards from your two plus the five on the board.</p>`,
+    labels(S) { return NL_LABELS(S, S.current_player_idx[0]); },
+    render: holdemRender,
+    controls(S, av) { return labelButtons(GAMES.texas_nolimit_holdem.labels(S), av); },
+    bot: holdemBot(NL_MAP),
+    log(prev, seat, a, next, ctx) { return `${ctx.names[seat]} ${pokerVerb(NL_LABELS(prev, seat), a)}.${next.stage[0] > prev.stage[0] && next.stage[0] < 4 && !next.done[0] ? ` ${stageName(next.stage[0])}.` : ""}`; },
+  };
+
+  // ---- Werewolf
+  const ROLE = ["Villager", "Werewolf", "Doctor", "Seer"];
+  const ROLE_GLYPH = ["head", "claw", "cross", "eye"];
+  GAMES.werewolf = {
+    title: "Werewolf", who: "You + 5 bots · hidden roles", blurb: "Two werewolves hide among six. Find them before they outnumber you.",
+    art: () => `<span class="ico" style="width:64px">${glyph("moon", "var(--navy)", "")}</span><span class="ico" style="width:64px">${glyph("claw", "var(--heart)", "")}</span>`,
+    rules: `<p>Roles: 2 werewolves, 1 doctor, 1 seer, 2 villagers. At night the doctor protects someone, the seer checks someone, and the wolves pick a victim.</p>
+      <p>By day everyone may accuse, then everyone votes someone out. Villagers win when both wolves are gone; wolves win once they equal the rest.</p>`,
+    actorRole(S) { return S.phase[0] === 0 ? ["Doctor", "Seer", "Werewolf", "Werewolf"][S.night_subphase[0]] : null; },
+    render(S, ctx) {
+      const me = S.roles[0], phase = S.phase[0];
+      const known = (i) => ctx.reveal || i === 0 || (me === 1 && S.roles[i] === 1);
+      const seerSaw = (i) => (me === 3 && S.seer_results[i] !== 0 ? (S.seer_results[i] > 0 ? pill("wolf!", "red") : pill("clear", "green")) : "");
+      const accusedBy = (i) => [...S.accusations].map((t, j) => (t === i ? ctx.names[j] : null)).filter(Boolean);
+      const seat = (i) => {
+        const r = S.roles[i];
+        const acc = phase >= 1 ? accusedBy(i) : [];
+        return `<div class="seat ${ctx.turn === i && phase !== 0 ? "turn" : ""} ${S.alive[i] ? "" : "out"} ${i === 0 ? "you" : ""}">
+          <div class="name"><span class="ico" style="width:20px">${glyph(known(i) ? ROLE_GLYPH[r] : "head", known(i) && r === 1 ? "var(--heart)" : "var(--navy)", "")}</span>${ctx.names[i]}
+            ${known(i) ? pill(ROLE[r], r === 1 ? "red" : "blue") : ""} ${S.alive[i] ? "" : pill("dead", "grey")} ${seerSaw(i)}</div>
+          <div class="sub">${acc.length ? `Accused by ${acc.join(", ")}` : "&nbsp;"}</div></div>`;
+      };
+      const ph = ["Night", "Day · accusations", "Day · vote"][phase];
+      const note = phase === 0 ? `${GAMES.werewolf.actorRole(S)} ${S.current_player_idx[0] === 0 ? "(you)" : ""} is awake.` : `${ctx.names[S.current_player_idx[0]]} to ${phase === 1 ? "accuse" : "vote"}.`;
+      return `<div class="center"><div class="label">${ph}</div><div class="status">${ctx.done ? "" : esc(note)}</div>
+          <div class="sub">You are the <b>${ROLE[me]}</b>${me === 1 ? `. Your fellow wolf is ${ctx.names[[1, 2, 3, 4, 5].find((i) => S.roles[i] === 1)]}` : ""}.</div></div>
+        <div class="seats">${[0, 1, 2, 3, 4, 5].map(seat).join("")}</div>`;
+    },
+    controls(S, av, ctx) {
+      const phase = S.phase[0];
+      const verb = phase === 0 ? { Doctor: "Protect", Seer: "Check", Werewolf: "Attack" }[GAMES.werewolf.actorRole(S)] : phase === 1 ? "Accuse" : "Vote out";
+      const targets = [0, 1, 2, 3, 4, 5].filter((i) => av[i]);
+      return {
+        html: targets.map((i) => `<button class="btn ${phase === 0 && GAMES.werewolf.actorRole(S) === "Werewolf" ? "danger" : ""}" data-a="${i}">${verb} ${esc(ctx.names[i])}</button>`).join("") +
+          (av[6] ? `<button class="btn" data-a="6">${phase === 1 ? "Accuse nobody" : "Pass"}</button>` : ""),
+        wire: wireButtons,
+      };
+    },
+    bot(S, seat, av) {
+      const rel = (abs) => (abs - seat + 6) % 6; // actions are relative to the actor
+      const legal = [0, 1, 2, 3, 4, 5].filter((r) => av[r]).map((r) => (seat + r) % 6);
+      if (!legal.length) return 6;
+      const role = S.roles[seat], phase = S.phase[0];
+      const knownWolf = role === 3 ? legal.find((i) => S.seer_results[i] > 0) : undefined;
+      const accCount = (i) => [...S.accusations].filter((t, j) => t === i && S.alive[j]).length;
+      if (phase === 0) {
+        if (role === 1) { const other = S.werewolf_targets.find((t) => t >= 0); if (other !== undefined && legal.includes(other) && rand() < 0.8) return rel(other); }
+        if (role === 3) { const unchecked = legal.filter((i) => i !== seat && S.seer_results[i] === 0); if (unchecked.length) return rel(pick(unchecked)); }
+        return rel(pick(legal));
+      }
+      let pool = legal.filter((i) => !(role === 1 && S.roles[i] === 1));
+      if (!pool.length) pool = legal;
+      if (knownWolf !== undefined) return rel(knownWolf);
+      if (phase === 1) return rand() < 0.25 && av[6] ? 6 : rel(pick(pool));
+      const most = Math.max(...pool.map(accCount));
+      return rel(pick(most > 0 ? pool.filter((i) => accCount(i) === most) : pool));
+    },
+    log(prev, seat, a, next, ctx) {
+      const out = [];
+      const target = a < 6 ? ctx.names[(seat + a) % 6] : null;
+      if (prev.phase[0] === 1 && target) out.push(`${ctx.names[seat]} accuses ${target}.`);
+      if (prev.phase[0] === 2 && target) out.push(`${ctx.names[seat]} votes for ${target}.`);
+      if (prev.phase[0] === 0 && seat === 0 && target) out.push(`You ${{ Doctor: "protect", Seer: "check", Werewolf: "stalk" }[GAMES.werewolf.actorRole(prev)]} ${target}.`);
+      const died = [0, 1, 2, 3, 4, 5].filter((i) => prev.alive[i] && !next.alive[i]).map((i) => ctx.names[i]);
+      if (prev.phase[0] === 0 && next.phase[0] !== 0) out.push(died.length ? `Morning. ${died.join(", ")} was killed in the night.` : "Morning. Nobody died in the night.");
+      if (prev.phase[0] === 2 && next.phase[0] !== 2) out.push(died.length ? `The village votes out ${died.join(", ")}.` : "The vote is empty. Nobody leaves.");
+      if (prev.phase[0] === 1 && next.phase[0] === 2) out.push("Accusations are in. Time to vote.");
+      return out.join(" ") || null;
+    },
+    result(S) { const w = S.game_winner[0]; const youWolf = S.roles[0] === 1; if (w < 0) return "Out of time. Nobody wins."; const won = (w === 1) === youWolf; return `${w === 1 ? "The werewolves" : "The villagers"} win. ${won ? "That's your side." : "Better luck next time."}`; },
+  };
+
+  // shared control builders
+  function wireButtons(el, act) { el.querySelectorAll("[data-a]").forEach((b) => (b.onclick = () => act(+b.dataset.a))); }
+  function labelButtons(labels, av) {
+    return {
+      html: labels.map((l, a) => (av[a] ? `<button class="btn ${/^(Fold)/.test(l) ? "danger" : /^(Check|Call)/.test(l) ? "primary" : ""}" data-a="${a}">${esc(l)}</button>` : "")).join(""),
+      wire: wireButtons,
+    };
+  }
+  for (const g of Object.values(GAMES)) if (!g.controls) g.controls = (S, av) => labelButtons(g.labels(S), av);
+
+  // ---------------------------------------------------------------- engine
+  let whlo = null;
+  const cache = new Map();
+  async function loadGame(name, meta) {
+    if (cache.has(name)) return cache.get(name);
+    whlo ??= await import(WHLO_URL);
+    const [r, s, a] = await Promise.all(["reset", "step", "avail"].map((k) => moduleText(name, k)));
+    const exes = { reset: await whlo.compile(r), step: await whlo.compile(s), avail: await whlo.compile(a) };
+    cache.set(name, exes);
+    return exes;
+  }
+  const run = (exe, args) => {
+    const out = exe.run(Object.fromEntries(exe.inputs.map((slot, i) => [slot.name, args[i]])));
+    return exe.outputs.map((o) => out[o.name]);
+  };
+  const randKey = () => crypto.getRandomValues(new Uint32Array(2));
+  /** Named view over the state leaves: S.field is the flat typed array (bools as 0/1 numbers). */
+  function view(meta, leaves) {
+    const S = {};
+    meta.leaves.forEach((l, i) => { S[l.name] = l.dtype === "bool" ? Array.from(leaves[i]) : Array.from(leaves[i]); });
+    return S;
+  }
+
+  // ---------------------------------------------------------------- table controller
+  const NAMES = ["You", "Bot 1", "Bot 2", "Bot 3", "Bot 4", "Bot 5"];
+  let INDEX = {};
+  let T = null; // current table
+
+  function scoreHtml() {
+    const rows = T.totals.map((v, i) => `<span>${esc(T.ctx.names[i])}</span><span class="${v > 0 ? "pos" : v < 0 ? "neg" : ""}">${signed(v)}</span>`);
+    return rows.join("") + `<span style="grid-column:1/-1;color:var(--muted);font-size:18px">${T.hands} hand${T.hands === 1 ? "" : "s"} finished</span>`;
+  }
+  // Bots get third-person verbs; "You" needs the plain form.
+  const YOU_VERBS = { calls: "call", folds: "fold", checks: "check", bets: "bet", raises: "raise", goes: "go", accuses: "accuse", votes: "vote",
+    plays: "play", draws: "draw", picks: "pick", swaps: "swap", empties: "empty", holds: "hold", wins: "win", is: "are", loses: "lose" };
+  function addLog(msg) {
+    if (!msg) return;
+    msg = msg.replace(/\bYou (\w+)/g, (m, v) => `You ${YOU_VERBS[v] ?? v}`);
+    const li = document.createElement("li");
+    li.textContent = msg;
+    $("log").prepend(li);
+    while ($("log").children.length > 60) $("log").lastChild.remove();
+  }
+
+  function draw() {
+    const { g, S, ctx } = T;
+    $("felt").innerHTML = g.render(S, ctx);
+    g.wireFelt?.($("felt"), S, ctx, draw);
+    $("score").innerHTML = scoreHtml();
+    const c = $("controls");
+    if (ctx.done) {
+      c.innerHTML = `<div class="banner px-box"><strong>${esc(T.resultText)}</strong>
+        <span>${T.lastRewards.map((r, i) => `${esc(ctx.names[i])} ${signed(r)}`).join(" · ")}</span>
+        <button class="btn primary" id="again">Deal again</button></div>`;
+      $("again").onclick = () => newHand();
+      return;
+    }
+    if (T.waiting) {
+      const ctl = g.controls(S, T.av0, ctx);
+      c.innerHTML = `<span class="status">Your move.</span>` + ctl.html;
+      ctl.wire(c, (a) => humanAct(a), draw);
+    } else {
+      c.innerHTML = `<span class="status">${esc(ctx.names[ctx.turn] ?? "")} is thinking<span class="blink">…</span></span>`;
+    }
+  }
+
+  function applyStep(action) {
+    const { exes, meta } = T;
+    const out = run(exes.step, [randKey(), ...T.leaves, Int32Array.from([action].flat())]);
+    const n = meta.leaves.length;
+    T.leaves = out.slice(0, n);
+    const prev = T.S;
+    T.S = view(meta, T.leaves);
+    return { prev, reward: Array.from(out[n]), done: out[n + 1][0] === 1 };
+  }
+
+  function finishIfDone(res) {
+    for (let i = 0; i < T.totals.length; i++) T.handRewards[i] += res.reward[i];
+    if (!res.done) return false;
+    T.ctx.done = true; T.ctx.reveal = true; T.ctx.turn = -1;
+    T.lastRewards = T.handRewards.slice();
+    T.lastRewards.forEach((r, i) => (T.totals[i] += r));
+    T.hands++;
+    T.resultText = T.g.result ? T.g.result(T.S, T.lastRewards, T.ctx) : T.lastRewards[0] > 0 ? `You win ${fmt(T.lastRewards[0])}.` : T.lastRewards[0] < 0 ? `You lose ${fmt(-T.lastRewards[0])}.` : "Split pot.";
+    addLog(T.resultText);
+    return true;
+  }
+
+  async function advance() {
+    const token = T.token;
+    while (T && token === T.token) {
+      const { g, meta, ctx } = T;
+      if (ctx.done) { draw(); return; }
+      const av = Array.from(run(T.exes.avail, T.leaves)[0]);
+      if (meta.kind === "parallel") {
+        T.av0 = av.slice(0, meta.num_actions);
+        T.avAll = av;
+        ctx.turn = 0; T.waiting = true; draw(); return;
+      }
+      const cp = T.S.current_player_idx[0];
+      ctx.turn = cp;
+      const legal = av.map((x, i) => (x ? i : -1)).filter((i) => i >= 0);
+      if (cp === 0 && legal.length > 1) { T.av0 = av; T.waiting = true; draw(); return; }
+      T.waiting = false; draw();
+      const a = cp === 0 || legal.length === 1 ? legal[0] ?? 0 : g.bot(T.S, cp, av, ctx);
+      await sleep(cp === 0 ? 250 : meta.name === "werewolf" && T.S.phase[0] === 0 ? 350 : 650);
+      if (!T || token !== T.token) return;
+      const res = applyStep(a);
+      addLog(g.log?.(res.prev, cp, a, T.S, ctx));
+      if (finishIfDone(res)) { draw(); return; }
+    }
+  }
+
+  function humanAct(a) {
+    if (!T.waiting) return;
+    T.waiting = false;
+    const { g, meta, ctx } = T;
+    if (meta.kind === "parallel") {
+      const acts = [a];
+      for (let i = 1; i < meta.num_agents; i++) acts.push(g.bot(T.S, i, T.avAll.slice(i * meta.num_actions, (i + 1) * meta.num_actions), ctx));
+      const res = applyStep(acts);
+      addLog(g.logJoint?.(res.prev, acts, T.S, ctx));
+      if (finishIfDone(res)) { draw(); return; }
+    } else {
+      const res = applyStep(a);
+      addLog(g.log?.(res.prev, 0, a, T.S, ctx));
+      if (finishIfDone(res)) { draw(); return; }
+    }
+    advance();
+  }
+
+  function newHand() {
+    const { exes, meta } = T;
+    T.token++;
+    T.leaves = run(exes.reset, [randKey()]);
+    T.S = view(meta, T.leaves);
+    T.ctx = { names: NAMES.slice(0, meta.num_agents), done: false, reveal: false, turn: -1, ui: { signal: false }, plan: {}, drawing: false, lastBids: null };
+    Object.defineProperty(T.ctx, "drawing", { get: () => T.meta.name === "five_card_draw" && T.S.stage[0] === 1 && T.S.current_player_idx[0] === 0 && T.waiting });
+    T.handRewards = Array(meta.num_agents).fill(0);
+    T.waiting = false;
+    addLog("New hand dealt.");
+    advance();
+  }
+
+  async function openTable(name) {
+    const meta = INDEX[name], g = GAMES[name];
+    if (!meta || !g) return closeTable();
+    $("shelf-view").hidden = true; $("table-view").hidden = false;
+    $("game-title").textContent = g.title;
+    $("rules").innerHTML = g.rules;
+    $("log").innerHTML = ""; $("controls").innerHTML = "";
+    $("felt").innerHTML = `<div class="loading"><div><span class="ico" style="width:40px">${glyph("chip", "var(--navy)", "")}</span><br>Compiling ${esc(g.title)} to WebAssembly<span class="blink">…</span></div></div>`;
+    scrollTo(0, 0);
+    try {
+      const t0 = performance.now();
+      const exes = await loadGame(name, meta);
+      if (location.hash.slice(1) !== name) return;
+      T = { name, meta: { ...meta, name }, g, exes, token: 0, totals: Array(meta.num_agents).fill(0), hands: 0 };
+      addLog(`Compiled in ${Math.round(performance.now() - t0)} ms.`);
+      newHand();
+    } catch (e) {
+      $("felt").innerHTML = `<div class="loading err">The game didn't load.\n${esc(e.message ?? e)}</div>`;
+    }
+  }
+  function closeTable() {
+    if (T) T.token++;
+    T = null;
+    $("shelf-view").hidden = false; $("table-view").hidden = true;
+  }
+
+  // ---------------------------------------------------------------- shelf + routing
+  try {
+    INDEX = await (await fetch("games/index.json")).json();
+  } catch (e) {
+    $("shelf").innerHTML = `<p class="err">The game list didn't load (${esc(e.message)}). Reload the page to try again.</p>`;
+  }
+  const order = ["kuhn_poker", "leduc_holdem", "goofspiel", "bluff", "kemps", "werewolf", "five_card_draw", "seven_card_stud", "texas_limit_holdem", "texas_nolimit_holdem"];
+  $("shelf").innerHTML = order.filter((n) => INDEX[n] && GAMES[n]).map((n) => {
+    const g = GAMES[n];
+    return `<a class="tile px-box" href="#${n}"><div class="art">${g.art()}</div>
+      <div class="meta"><h3>${esc(g.title)}</h3><span class="who">${esc(g.who)}</span><p>${esc(g.blurb)}</p></div></a>`;
+  }).join("");
+  $("back").onclick = () => (location.hash = "");
+  function route() { const n = location.hash.slice(1); if (n && n !== T?.name) openTable(n); else if (!n) closeTable(); }
+  addEventListener("hashchange", route);
+  route();
+</script>
+<!-- local-only:start -->
+</body>
+</html>
+<!-- local-only:end -->
