@@ -1,0 +1,954 @@
+{
+ "kuhn_poker": {
+  "name": "kuhn_poker",
+  "kind": "aec",
+  "num_agents": 2,
+  "num_actions": 2,
+  "leaves": [
+   {
+    "name": "agent_hands",
+    "dtype": "int32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "pot",
+    "dtype": "int32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "start_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "returns",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "all_absorbing",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 35378,
+   "step": 18652,
+   "avail": 2499
+  }
+ },
+ "leduc_holdem": {
+  "name": "leduc_holdem",
+  "kind": "aec",
+  "num_agents": 2,
+  "num_actions": 3,
+  "leaves": [
+   {
+    "name": "agent_cards",
+    "dtype": "int32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "public_card",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "shuffled_deck",
+    "dtype": "int32",
+    "shape": [
+     6
+    ]
+   },
+   {
+    "name": "ante",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "stakes",
+    "dtype": "float32",
+    "shape": []
+   },
+   {
+    "name": "stage",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "num_calls",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "num_raises",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "folded",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 30468,
+   "step": 38395,
+   "avail": 5045
+  }
+ },
+ "goofspiel": {
+  "name": "goofspiel",
+  "kind": "parallel",
+  "num_agents": 2,
+  "num_actions": 13,
+  "leaves": [
+   {
+    "name": "player_hands",
+    "dtype": "bool",
+    "shape": [
+     2,
+     13
+    ]
+   },
+   {
+    "name": "deck",
+    "dtype": "int32",
+    "shape": [
+     13
+    ]
+   },
+   {
+    "name": "current_round",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "points",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "winners",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 22536,
+   "step": 12471,
+   "avail": 2282
+  }
+ },
+ "kemps": {
+  "name": "kemps",
+  "kind": "parallel",
+  "num_agents": 4,
+  "num_actions": 344,
+  "leaves": [
+   {
+    "name": "agent_hands",
+    "dtype": "int32",
+    "shape": [
+     4,
+     4
+    ]
+   },
+   {
+    "name": "agent_hand_counts",
+    "dtype": "int32",
+    "shape": [
+     4,
+     13
+    ]
+   },
+   {
+    "name": "center_cards",
+    "dtype": "int32",
+    "shape": [
+     4
+    ]
+   },
+   {
+    "name": "center_counts",
+    "dtype": "int32",
+    "shape": [
+     13
+    ]
+   },
+   {
+    "name": "deck",
+    "dtype": "int32",
+    "shape": [
+     32
+    ]
+   },
+   {
+    "name": "deck_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "communication",
+    "dtype": "float32",
+    "shape": [
+     4,
+     2
+    ]
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     4
+    ]
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 39821,
+   "step": 85579,
+   "avail": 5651
+  }
+ },
+ "bluff": {
+  "name": "bluff",
+  "kind": "aec",
+  "num_agents": 3,
+  "num_actions": 13,
+  "leaves": [
+   {
+    "name": "pile_hand",
+    "dtype": "float32",
+    "shape": [
+     13
+    ]
+   },
+   {
+    "name": "pile_claims",
+    "dtype": "float32",
+    "shape": [
+     13
+    ]
+   },
+   {
+    "name": "pile_size",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "agent_hands",
+    "dtype": "float32",
+    "shape": [
+     3,
+     13
+    ]
+   },
+   {
+    "name": "agent_hand_sizes",
+    "dtype": "int32",
+    "shape": [
+     3
+    ]
+   },
+   {
+    "name": "phase",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "start_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "round_start_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "challenge_target_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "claim_size",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "claim_rank",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "pending_play_hand",
+    "dtype": "float32",
+    "shape": [
+     13
+    ]
+   },
+   {
+    "name": "pending_play_count",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "has_current_rank",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "current_rank",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "rank_choice_pending",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "challenge_status",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "challenge_hand",
+    "dtype": "float32",
+    "shape": [
+     13
+    ]
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     3
+    ]
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "game_winner",
+    "dtype": "bool",
+    "shape": [
+     3
+    ]
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 58876,
+   "step": 48802,
+   "avail": 13266
+  }
+ },
+ "five_card_draw": {
+  "name": "five_card_draw",
+  "kind": "aec",
+  "num_agents": 2,
+  "num_actions": 37,
+  "leaves": [
+   {
+    "name": "agent_cards",
+    "dtype": "int32",
+    "shape": [
+     2,
+     5
+    ]
+   },
+   {
+    "name": "chips_in",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "round_raised",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "remaining_chips",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "small_blind_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "stage",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "folded",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "all_in",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "not_raise_num",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "shuffled_deck",
+    "dtype": "int32",
+    "shape": [
+     52
+    ]
+   },
+   {
+    "name": "deck_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "draw_start_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 40340,
+   "step": 122022,
+   "avail": 10205
+  }
+ },
+ "seven_card_stud": {
+  "name": "seven_card_stud",
+  "kind": "aec",
+  "num_agents": 2,
+  "num_actions": 4,
+  "leaves": [
+   {
+    "name": "agent_cards",
+    "dtype": "int32",
+    "shape": [
+     2,
+     7
+    ]
+   },
+   {
+    "name": "chips_in",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "bring_in_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "stage",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "raise_nums",
+    "dtype": "int32",
+    "shape": [
+     5
+    ]
+   },
+   {
+    "name": "folded",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "not_raise_num",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 51607,
+   "step": 152643,
+   "avail": 5727
+  }
+ },
+ "texas_limit_holdem": {
+  "name": "texas_limit_holdem",
+  "kind": "aec",
+  "num_agents": 2,
+  "num_actions": 4,
+  "leaves": [
+   {
+    "name": "flop_cards",
+    "dtype": "int32",
+    "shape": [
+     3
+    ]
+   },
+   {
+    "name": "turn_card",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "river_card",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "agent_cards",
+    "dtype": "int32",
+    "shape": [
+     2,
+     2
+    ]
+   },
+   {
+    "name": "chips_in",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "small_blind_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "stage",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "raise_nums",
+    "dtype": "int32",
+    "shape": [
+     4
+    ]
+   },
+   {
+    "name": "folded",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "not_raise_num",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 47227,
+   "step": 83107,
+   "avail": 6828
+  }
+ },
+ "texas_nolimit_holdem": {
+  "name": "texas_nolimit_holdem",
+  "kind": "aec",
+  "num_agents": 2,
+  "num_actions": 5,
+  "leaves": [
+   {
+    "name": "flop_cards",
+    "dtype": "int32",
+    "shape": [
+     3
+    ]
+   },
+   {
+    "name": "turn_card",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "river_card",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "agent_cards",
+    "dtype": "int32",
+    "shape": [
+     2,
+     2
+    ]
+   },
+   {
+    "name": "chips_in",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "round_raised",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "remaining_chips",
+    "dtype": "float32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "small_blind_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "stage",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "folded",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "all_in",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "not_raise_num",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 44411,
+   "step": 98872,
+   "avail": 9727
+  }
+ },
+ "werewolf": {
+  "name": "werewolf",
+  "kind": "aec",
+  "num_agents": 6,
+  "num_actions": 7,
+  "leaves": [
+   {
+    "name": "roles",
+    "dtype": "int32",
+    "shape": [
+     6
+    ]
+   },
+   {
+    "name": "alive",
+    "dtype": "bool",
+    "shape": [
+     6
+    ]
+   },
+   {
+    "name": "phase",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "night_subphase",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "night_order",
+    "dtype": "int32",
+    "shape": [
+     4
+    ]
+   },
+   {
+    "name": "doctor_target",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "seer_target",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "werewolf_targets",
+    "dtype": "int32",
+    "shape": [
+     2
+    ]
+   },
+   {
+    "name": "seer_results",
+    "dtype": "float32",
+    "shape": [
+     6
+    ]
+   },
+   {
+    "name": "accusations",
+    "dtype": "int32",
+    "shape": [
+     6
+    ]
+   },
+   {
+    "name": "votes",
+    "dtype": "int32",
+    "shape": [
+     6
+    ]
+   },
+   {
+    "name": "phase_progress",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "absorbing",
+    "dtype": "bool",
+    "shape": [
+     6
+    ]
+   },
+   {
+    "name": "done",
+    "dtype": "bool",
+    "shape": []
+   },
+   {
+    "name": "game_winner",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "timestep",
+    "dtype": "int32",
+    "shape": []
+   }
+  ],
+  "bytes": {
+   "reset": 45633,
+   "step": 101891,
+   "avail": 15142
+  }
+ }
+}
