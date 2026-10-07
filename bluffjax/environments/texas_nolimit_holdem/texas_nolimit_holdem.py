@@ -291,12 +291,10 @@ class TexasNoLimitHoldem(AECEnv):
                 new_folded,
                 new_all_in,
             ) = apply_bet(half_pot)
+            # A raise reopens the betting: everyone else still able to act must
+            # respond. An all-in raiser can't act again, so it isn't counted.
             player_all_in = new_all_in[current_player]
-            new_not_raise_num = jnp.where(
-                player_all_in,
-                state.not_raise_num,
-                jnp.int32(1),
-            )
+            new_not_raise_num = jnp.where(player_all_in, jnp.int32(0), jnp.int32(1))
             return (
                 new_chips_in,
                 new_round_raised,
@@ -321,12 +319,10 @@ class TexasNoLimitHoldem(AECEnv):
                 new_folded,
                 new_all_in,
             ) = apply_bet(pot)
+            # A raise reopens the betting: everyone else still able to act must
+            # respond. An all-in raiser can't act again, so it isn't counted.
             player_all_in = new_all_in[current_player]
-            new_not_raise_num = jnp.where(
-                player_all_in,
-                state.not_raise_num,
-                jnp.int32(1),
-            )
+            new_not_raise_num = jnp.where(player_all_in, jnp.int32(0), jnp.int32(1))
             return (
                 new_chips_in,
                 new_round_raised,
@@ -351,12 +347,10 @@ class TexasNoLimitHoldem(AECEnv):
                 new_folded,
                 new_all_in,
             ) = apply_bet(player_remain)
+            # A raise reopens the betting: everyone else still able to act must
+            # respond. An all-in raiser can't act again, so it isn't counted.
             player_all_in = new_all_in[current_player]
-            new_not_raise_num = jnp.where(
-                player_all_in,
-                state.not_raise_num,
-                jnp.int32(1),
-            )
+            new_not_raise_num = jnp.where(player_all_in, jnp.int32(0), jnp.int32(1))
             return (
                 new_chips_in,
                 new_round_raised,
