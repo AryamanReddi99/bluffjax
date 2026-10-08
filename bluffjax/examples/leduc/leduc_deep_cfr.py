@@ -1,15 +1,42 @@
 """
-Deep CFR for Leduc Poker (OpenSpiel-style).
+Deep CFR for Leduc Poker.
 
-Uses the Leduc implementation and exploitability from new_test.py.
-Based on https://arxiv.org/abs/1811.00164.
+Deep Counterfactual Regret Minimization (Brown et al., 2019,
+https://arxiv.org/abs/1811.00164), following Algorithms 1 and 2 of the paper
+and OpenSpiel's implementations (open_spiel/python/{jax,pytorch}/deep_cfr.py):
+
+- On iteration t, for each player p in turn: K external-sampling traversals
+  with p as the traverser, then a new advantage network for p is trained from
+  scratch on p's reservoir-sampled advantage memory.
+- Strategies come from regret matching on the predicted advantages. When no
+  advantage is positive, the max-advantage action is played (paper, Section
+  2.1). Before its first training the advantage network predicts 0 everywhere
+  (Algorithm 1), which gives the uniform strategy.
+- Opponent strategies met during traversals go to a reservoir-sampled strategy
+  memory, on which the average-strategy (policy) network is trained.
+- Linear CFR: every sample is weighted by the iteration t it was collected on,
+  rescaled by 2 / T when training on iteration T (paper, Section 5.3).
+
+OpenSpiel's JAX and PyTorch versions skip training while a memory holds fewer
+samples than a batch; here the networks are trained on every iteration, with
+minibatches sampled with replacement.
+
+Defaults: 50 iterations of 100 traversals per player, 2 hidden layers of 64
+units, 200 advantage-network steps and memories of 100,000 samples, as in the
+BluffJAX paper; Adam with learning rate 1e-3 and gradient norms clipped to 1,
+as in the Deep CFR paper (Section 5.2); batches of 2048 and 5000
+policy-network steps, as in OpenSpiel's Deep CFR examples.
+
+Network inputs are OpenSpiel's leduc_poker information_state_tensor, which is
+perfect recall: each of the 936 infosets has a distinct tensor. Exploitability
+is exact, over the full game tree.
 """
 
-from __future__ import annotations
-
 import argparse
-import random
-from typing import Callable, NamedTuple
+import functools
+import json
+import time
+from typing import Callable, NamedTuple, Sequence
 
 import flax.linen as nn
 import jax
@@ -18,461 +45,405 @@ import numpy as np
 import optax
 
 from bluffjax.utils.game_utils import leduc_exploitability as leduc
+from bluffjax.utils.typing import BoolArray, FloatArray, PRNGKeyArray, PyTree
 
-# --- Constants ---
-ILLEGAL_ACTION_LOGITS_PENALTY = jnp.finfo(jnp.float32).min
 NUM_ACTIONS = 3  # fold, call, raise
-EMBEDDING_SIZE = 36  # Leduc obs dim from new_test
+NUM_CARDS = 6
+MAX_ACTIONS_PER_ROUND = 4  # with at most 2 raises, e.g. call raise raise call
+# Acting player, private card, public card, then [call, raise] bits per action
+INFO_STATE_SIZE = 2 + 2 * NUM_CARDS + 2 * 2 * MAX_ACTIONS_PER_ROUND
+ILLEGAL_ACTION_LOGITS_PENALTY = jnp.finfo(jnp.float32).min
 
 
-def _legal_actions_mask(state: leduc.LeducState) -> np.ndarray:
-    """Boolean mask of shape (3,) for legal actions."""
-    legal = state.legal_actions()
-    mask = np.zeros(NUM_ACTIONS, dtype=np.bool_)
-    for a in legal:
-        mask[a] = True
+def information_state_tensor(infoset_key: tuple) -> np.ndarray:
+    """OpenSpiel's leduc_poker information_state_tensor for an infoset.
+
+    Layout (30): acting player one-hot (2), private card one-hot (6), public
+    card one-hot (6, zeros before the flop), then each round's betting sequence
+    as 4 action slots of [call, raise] bits (a fold sets neither).
+    """
+    player, private_card, public_card, round1, round2 = infoset_key[:5]
+    tensor = np.zeros(INFO_STATE_SIZE, dtype=np.float32)
+    tensor[player] = 1.0
+    tensor[2 + private_card] = 1.0
+    if public_card >= 0:
+        tensor[2 + NUM_CARDS + public_card] = 1.0
+    offset = 2 + 2 * NUM_CARDS
+    for sequence in (round1, round2):
+        for i, action in enumerate(sequence):
+            if action == leduc.ACTION_CALL:
+                tensor[offset + 2 * i] = 1.0
+            elif action == leduc.ACTION_RAISE:
+                tensor[offset + 2 * i + 1] = 1.0
+        offset += 2 * MAX_ACTIONS_PER_ROUND
+    return tensor
+
+
+def legal_actions_mask(legal_actions: Sequence[int]) -> np.ndarray:
+    mask = np.zeros(NUM_ACTIONS, dtype=bool)
+    mask[list(legal_actions)] = True
     return mask
 
 
-def _information_state_tensor(state: leduc.LeducState) -> np.ndarray:
-    """36-dim observation for the current player (at a decision node)."""
-    return leduc._state_to_obs(state).astype(np.float32)
+def regret_matching(advantages: np.ndarray, legal_mask: np.ndarray) -> np.ndarray:
+    """Strategy proportional to the positive advantages of the legal actions.
+
+    With no positive advantage, plays the legal action with the highest
+    advantage, as in the paper and OpenSpiel. Ties are split evenly, so an
+    all-zero prediction gives the uniform strategy.
+    """
+    positive = np.where(legal_mask, np.maximum(advantages, 0.0), 0.0)
+    total = positive.sum()
+    if total > 0:
+        return positive / total
+    masked = np.where(legal_mask, advantages, -np.inf)
+    best = (masked == masked.max()).astype(np.float64)
+    return best / best.sum()
 
 
-# --- Reservoir buffer (Python-based for portability) ---
-class AdvantageMemory(NamedTuple):
-    info_state: np.ndarray
-    iteration: int
-    advantage: np.ndarray
-    legal_mask: np.ndarray
+# Network inputs for every infoset, in leduc_exploitability's infoset order
+INFOSET_TENSORS = np.stack(
+    [information_state_tensor(k) for k, _ in leduc._INFOSET_LIST]
+)
+INFOSET_LEGAL_MASKS = np.stack([legal_actions_mask(a) for _, a in leduc._INFOSET_LIST])
 
 
-class StrategyMemory(NamedTuple):
-    info_state: np.ndarray
-    iteration: int
-    strategy_action_probs: np.ndarray
-    legal_mask: np.ndarray
+# --- Reservoir memories ---
+class Memory(NamedTuple):
+    info_state: FloatArray  # [capacity, INFO_STATE_SIZE]
+    iteration: FloatArray  # [capacity], CFR iteration the sample was collected on
+    target: FloatArray  # [capacity, NUM_ACTIONS], sampled regrets or strategy
+    legal_mask: BoolArray  # [capacity, NUM_ACTIONS]
 
 
 class ReservoirBuffer:
-    """Reservoir sampling buffer."""
+    """Reservoir sampling (Vitter, 1985): after n additions, each of the n
+    samples is kept with probability min(1, capacity / n)."""
 
-    def __init__(self, capacity: int):
+    def __init__(self, capacity: int) -> None:
         self.capacity = capacity
-        self.buffer: list = []
         self.add_calls = 0
-
-    def append(self, item: NamedTuple) -> None:
-        self.add_calls += 1
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(item)
-        else:
-            idx = random.randint(0, self.add_calls - 1)
-            if idx < self.capacity:
-                self.buffer[idx] = item
-
-    def sample(self, n: int) -> tuple:
-        if not self.buffer:
-            return None
-        size = min(n, len(self.buffer))
-        indices = random.sample(range(len(self.buffer)), size)
-        if isinstance(self.buffer[0], AdvantageMemory):
-            return AdvantageMemory(
-                info_state=np.stack([self.buffer[i].info_state for i in indices]),
-                iteration=np.stack(
-                    [np.array(self.buffer[i].iteration) for i in indices]
-                ),
-                advantage=np.stack([self.buffer[i].advantage for i in indices]),
-                legal_mask=np.stack([self.buffer[i].legal_mask for i in indices]),
-            )
-        else:
-            return StrategyMemory(
-                info_state=np.stack([self.buffer[i].info_state for i in indices]),
-                iteration=np.stack(
-                    [np.array(self.buffer[i].iteration) for i in indices]
-                ),
-                strategy_action_probs=np.stack(
-                    [self.buffer[i].strategy_action_probs for i in indices]
-                ),
-                legal_mask=np.stack([self.buffer[i].legal_mask for i in indices]),
-            )
+        self.data = Memory(
+            info_state=np.zeros((capacity, INFO_STATE_SIZE), dtype=np.float32),
+            iteration=np.zeros(capacity, dtype=np.float32),
+            target=np.zeros((capacity, NUM_ACTIONS), dtype=np.float32),
+            legal_mask=np.zeros((capacity, NUM_ACTIONS), dtype=bool),
+        )
 
     def __len__(self) -> int:
-        return len(self.buffer)
+        return min(self.add_calls, self.capacity)
+
+    def add(self, rng: np.random.Generator, sample: Memory) -> None:
+        if self.add_calls < self.capacity:
+            idx = self.add_calls
+        else:
+            idx = rng.integers(self.add_calls + 1)
+        self.add_calls += 1
+        if idx < self.capacity:
+            for buffer, value in zip(self.data, sample):
+                buffer[idx] = value
 
 
-# --- MLP (flax.linen) ---
-class AdvantageMLP(nn.Module):
-    """MLP that outputs raw advantage logits (no softmax)."""
+# --- Networks ---
+def torch_linear_init(fan_in: int) -> Callable:
+    """PyTorch's default nn.Linear initialisation for weights and biases,
+    U(-1/sqrt(fan_in), 1/sqrt(fan_in)), as in the Deep CFR paper's network."""
+    bound = 1.0 / np.sqrt(fan_in)
+    return lambda key, shape, dtype=jnp.float32: jax.random.uniform(
+        key, shape, dtype, -bound, bound
+    )
 
-    hidden_dim: int
+
+class MLP(nn.Module):
+    """ReLU MLP with LayerNorm after each hidden layer."""
+
+    hidden_sizes: Sequence[int]
+    output_size: int
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.xavier_uniform())(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.xavier_uniform())(x)
-        x = nn.relu(x)
-        x = nn.Dense(NUM_ACTIONS, kernel_init=nn.initializers.xavier_uniform())(x)
-        return x
+    def __call__(self, x: FloatArray) -> FloatArray:
+        for size in self.hidden_sizes:
+            init = torch_linear_init(x.shape[-1])
+            x = nn.relu(nn.Dense(size, kernel_init=init, bias_init=init)(x))
+            x = nn.LayerNorm()(x)
+        init = torch_linear_init(x.shape[-1])
+        return nn.Dense(self.output_size, kernel_init=init, bias_init=init)(x)
 
 
-class PolicyMLP(nn.Module):
-    """MLP that outputs raw logits (softmax applied externally with masking)."""
+def advantage_loss(
+    apply_fn: Callable, params: PyTree, batch: Memory, iteration: FloatArray
+) -> FloatArray:
+    """Linear-CFR weighted squared error between predicted advantages and
+    sampled regrets, over the legal actions (Algorithm 1)."""
+    preds = apply_fn(params, batch.info_state)
+    sq_err = jnp.where(batch.legal_mask, preds - batch.target, 0.0) ** 2
+    weights = batch.iteration * 2.0 / iteration
+    return jnp.mean(weights * sq_err.sum(axis=-1))
 
-    hidden_dim: int
 
-    @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.xavier_uniform())(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.xavier_uniform())(x)
-        x = nn.relu(x)
-        x = nn.Dense(NUM_ACTIONS, kernel_init=nn.initializers.xavier_uniform())(x)
-        return x
+def policy_loss(
+    apply_fn: Callable, params: PyTree, batch: Memory, iteration: FloatArray
+) -> FloatArray:
+    """Linear-CFR weighted squared error between the policy and the stored
+    strategies (Algorithm 1). Both are zero on illegal actions."""
+    logits = apply_fn(params, batch.info_state)
+    logits = jnp.where(batch.legal_mask, logits, ILLEGAL_ACTION_LOGITS_PENALTY)
+    sq_err = (jax.nn.softmax(logits) - batch.target) ** 2
+    weights = batch.iteration * 2.0 / iteration
+    return jnp.mean(weights * sq_err.sum(axis=-1))
+
+
+def make_train(
+    network: nn.Module,
+    loss_fn: Callable,
+    optimizer: optax.GradientTransformation,
+    num_steps: int,
+    batch_size: int,
+) -> Callable:
+    """Returns a jitted function that initialises `network` from scratch and
+    trains it for `num_steps` minibatch steps on the first `memory_size`
+    samples of a memory. Minibatches are sampled uniformly with replacement."""
+    loss_fn = functools.partial(loss_fn, network.apply)
+
+    def train(
+        key: PRNGKeyArray, memory: Memory, memory_size: int, iteration: float
+    ) -> tuple[PyTree, FloatArray]:
+        init_key, sample_key = jax.random.split(key)
+        params = network.init(init_key, memory.info_state[:1])
+        opt_state = optimizer.init(params)
+
+        def _update_step(carry, step_key):
+            params, opt_state = carry
+            idx = jax.random.randint(step_key, (batch_size,), 0, memory_size)
+            batch = jax.tree.map(lambda x: x[idx], memory)
+            loss, grads = jax.value_and_grad(loss_fn)(params, batch, iteration)
+            updates, opt_state = optimizer.update(grads, opt_state)
+            return (optax.apply_updates(params, updates), opt_state), loss
+
+        step_keys = jax.random.split(sample_key, num_steps)
+        (params, _), losses = jax.lax.scan(_update_step, (params, opt_state), step_keys)
+        return params, losses[-1]
+
+    return jax.jit(train)
 
 
 # --- Deep CFR Solver ---
 class DeepCFRSolver:
-    def __init__(
-        self,
-        policy_hidden: int = 64,
-        advantage_hidden: int = 64,
-        num_iterations: int = 100,
-        num_traversals: int = 20,
-        learning_rate: float = 1e-3,
-        batch_size_advantage: int = 256,
-        batch_size_strategy: int = 256,
-        memory_capacity: int = 100_000,
-        policy_network_train_steps: int = 500,
-        advantage_network_train_steps: int = 200,
-        reinitialize_advantage_networks: bool = False,
-        seed: int = 42,
-    ) -> None:
-        self._batch_size_advantage = batch_size_advantage
-        self._batch_size_strategy = batch_size_strategy
-        self._policy_network_train_steps = policy_network_train_steps
-        self._advantage_network_train_steps = advantage_network_train_steps
-        self._num_players = 2
-        self._num_actions = NUM_ACTIONS
-        self._embedding_size = EMBEDDING_SIZE
-        self._num_iterations = num_iterations
-        self._num_traversals = num_traversals
-        self._reinitialize_advantage_networks = reinitialize_advantage_networks
-        self._iteration = 1
-        self._learning_rate = learning_rate
-        self._numpy_rng = np.random.default_rng(seed)
-        self._memory_capacity = int(memory_capacity)
-
-        # Initialize networks
-        rng_key = jax.random.PRNGKey(seed)
-        dummy_obs = jnp.zeros((1, EMBEDDING_SIZE), dtype=jnp.float32)
-
-        self._advantage_networks = [
-            AdvantageMLP(hidden_dim=advantage_hidden) for _ in range(self._num_players)
-        ]
-        self._advantage_params = [
-            self._advantage_networks[p].init(rng_key, dummy_obs)
-            for p in range(self._num_players)
-        ]
-        self._advantage_opt = [
-            optax.adam(learning_rate) for _ in range(self._num_players)
-        ]
-        self._advantage_opt_state = [
-            self._advantage_opt[p].init(self._advantage_params[p])
-            for p in range(self._num_players)
-        ]
-
-        self._policy_network = PolicyMLP(hidden_dim=policy_hidden)
-        self._policy_params = self._policy_network.init(rng_key, dummy_obs)
-        self._policy_opt = optax.adam(learning_rate)
-        self._policy_opt_state = self._policy_opt.init(self._policy_params)
-
-        self._advantage_memories: list[ReservoirBuffer | None] = [None, None]
-        self._strategy_memories: ReservoirBuffer | None = None
-        self._cached_policy: dict = {}
-
-        # JIT-compiled forward passes (same architecture for both players)
-        adv_net = self._advantage_networks[0]
-        self._advantage_apply_jit = jax.jit(
-            lambda params, obs: adv_net.apply(params, obs[jnp.newaxis, :])[0]
-        )
-        self._policy_apply_jit = jax.jit(
-            lambda params, obs: self._policy_network.apply(params, obs[jnp.newaxis, :])[
-                0
-            ]
+    def __init__(self, config: argparse.Namespace) -> None:
+        self._config = config
+        self._iteration = 0
+        # Traversal and reservoir sampling on the host, network training on device
+        self._rng = np.random.default_rng(config.seed)
+        self._advantage_key, self._policy_key = jax.random.split(
+            jax.random.key(config.seed)
         )
 
-        # JIT-compiled training steps
-        def _advantage_train_step(
-            params, opt_state, info_state, advantage, legal_mask, iteration
-        ):
-            def loss_fn(p):
-                logits = jax.vmap(lambda x: adv_net.apply(p, x[jnp.newaxis, :])[0])(
-                    info_state
+        self._advantage_memories = [
+            ReservoirBuffer(config.memory_capacity) for _ in range(2)
+        ]
+        self._strategy_memory = ReservoirBuffer(config.memory_capacity)
+        # None stands for the initial advantage network, which predicts 0 everywhere
+        self._advantage_params: list[PyTree | None] = [None, None]
+        # Regret-matching strategies of each player's current advantage network,
+        # keyed by information state
+        self._strategy_cache: list[dict[bytes, np.ndarray]] = [{}, {}]
+
+        network = MLP(tuple(config.hidden_sizes), NUM_ACTIONS)
+        optimizer = optax.adam(config.learning_rate)
+        if config.max_grad_norm > 0:
+            optimizer = optax.chain(
+                optax.clip_by_global_norm(config.max_grad_norm), optimizer
+            )
+        self._apply = jax.jit(network.apply)
+        self._train_advantage = make_train(
+            network,
+            advantage_loss,
+            optimizer,
+            config.advantage_train_steps,
+            config.batch_size,
+        )
+        self._train_policy = make_train(
+            network,
+            policy_loss,
+            optimizer,
+            config.policy_train_steps,
+            config.batch_size,
+        )
+
+    def run_iteration(self) -> list[float]:
+        """One Deep CFR iteration. Returns each player's final advantage loss."""
+        self._iteration += 1
+        losses = []
+        for player in range(2):
+            for _ in range(self._config.traversals):
+                self._traverse_game_tree(leduc.initial_state(), player)
+            losses.append(self._learn_advantage_network(player))
+        return losses
+
+    def _strategy(
+        self, player: int, info_state: np.ndarray, legal_mask: np.ndarray
+    ) -> np.ndarray:
+        """Regret matching on `player`'s current advantage network."""
+        cache = self._strategy_cache[player]
+        key = info_state.tobytes()
+        if key not in cache:
+            params = self._advantage_params[player]
+            if params is None:
+                advantages = np.zeros(NUM_ACTIONS)
+            else:
+                advantages = np.asarray(
+                    self._apply(params, info_state), dtype=np.float64
                 )
-                logits = jnp.where(legal_mask, logits, 0.0)
-                it = jnp.sqrt(jnp.asarray(iteration, dtype=jnp.float32))[:, jnp.newaxis]
-                return jnp.mean(optax.l2_loss(logits * it, advantage * it))
+            cache[key] = regret_matching(advantages, legal_mask)
+        return cache[key]
 
-            loss, grads = jax.value_and_grad(loss_fn)(params)
-            updates, new_opt_state = self._advantage_opt[0].update(grads, opt_state)
-            new_params = optax.apply_updates(params, updates)
-            return new_params, new_opt_state, loss
+    def _traverse_game_tree(self, state: leduc.LeducState, player: int) -> float:
+        """External-sampling traversal for `player` (Algorithm 2 of the paper).
 
-        def _policy_train_step(
-            params, opt_state, info_state, strategy_probs, legal_mask, iteration
-        ):
-            def loss_fn(p):
-                logits = jax.vmap(
-                    lambda x: self._policy_network.apply(p, x[jnp.newaxis, :])[0]
-                )(info_state)
-                logits = jnp.where(legal_mask, logits, ILLEGAL_ACTION_LOGITS_PENALTY)
-                probs = jax.nn.softmax(logits)
-                it = jnp.sqrt(jnp.asarray(iteration, dtype=jnp.float32))[:, jnp.newaxis]
-                return jnp.mean(optax.l2_loss(probs * it, strategy_probs * it))
-
-            loss, grads = jax.value_and_grad(loss_fn)(params)
-            updates, new_opt_state = self._policy_opt.update(grads, opt_state)
-            new_params = optax.apply_updates(params, updates)
-            return new_params, new_opt_state, loss
-
-        self._advantage_train_step_jit = jax.jit(_advantage_train_step)
-        self._policy_train_step_jit = jax.jit(_policy_train_step)
-
-    def _sample_action_from_advantage(
-        self, state: leduc.LeducState, player: int
-    ) -> tuple[np.ndarray, np.ndarray]:
-        obs = jnp.asarray(_information_state_tensor(state), dtype=jnp.float32)
-        logits = np.asarray(
-            self._advantage_apply_jit(self._advantage_params[player], obs)
-        )
-        legal_mask = _legal_actions_mask(state)
-        logits = np.where(legal_mask, np.asarray(logits), -np.inf)
-        advantages = np.maximum(logits, 0.0)
-        if advantages.sum() <= 0:
-            legal = state.legal_actions()
-            matched = np.zeros(NUM_ACTIONS)
-            matched[legal[0]] = 1.0
-        else:
-            matched = advantages / advantages.sum()
-        return advantages, matched
-
-    def _traverse_game_tree(self, state: leduc.LeducState, player: int) -> np.floating:
+        Explores every traverser action and samples one action at chance and
+        opponent nodes. Adds the traverser's sampled regrets to its advantage
+        memory and the opponent's strategies to the strategy memory. Returns the
+        traverser's sampled value of `state`.
+        """
         if state.is_terminal():
-            return np.array(state.returns()[player], dtype=np.float32)
+            return state.returns()[player]
         if state.is_chance_node():
             outcomes, probs = zip(*state.chance_outcomes())
-            action = self._numpy_rng.choice(np.asarray(outcomes), p=np.asarray(probs))
-            return self._traverse_game_tree(state.child(int(action)), player)
+            action = outcomes[self._rng.choice(len(outcomes), p=probs)]
+            return self._traverse_game_tree(state.child(action), player)
 
-        cur = state.current_player
-        if cur == player:
-            _, strategy = self._sample_action_from_advantage(state, player)
-            strategy = np.array(strategy, dtype=np.float64)
-            exp_payoff = np.zeros(self._num_actions, dtype=np.float64)
+        current = state.current_player
+        info_state = information_state_tensor(state.info_state_key(current))
+        legal_mask = legal_actions_mask(state.legal_actions())
+        strategy = self._strategy(current, info_state, legal_mask)
+        if current == player:
+            values = np.zeros(NUM_ACTIONS)
             for action in state.legal_actions():
-                exp_payoff[action] = self._traverse_game_tree(
-                    state.child(action), player
-                )
-            cfv = np.sum(exp_payoff * strategy)
-            samp_regret = (exp_payoff - cfv) * _legal_actions_mask(state)
-            data = AdvantageMemory(
-                info_state=_information_state_tensor(state),
-                iteration=self._iteration,
-                advantage=samp_regret.astype(np.float32),
-                legal_mask=_legal_actions_mask(state),
-            )
-            if self._advantage_memories[player] is None:
-                self._advantage_memories[player] = ReservoirBuffer(
-                    self._memory_capacity
-                )
-            self._advantage_memories[player].append(data)
-            return np.float64(cfv)
-        else:
-            other = cur
-            _, strategy = self._sample_action_from_advantage(state, other)
-            probs = np.array(strategy, dtype=np.float64)
-            probs /= probs.sum()
-            legal = state.legal_actions()
-            probs_legal = np.array([probs[a] for a in legal], dtype=np.float64)
-            probs_legal /= probs_legal.sum()
-            sampled_action = self._numpy_rng.choice(np.asarray(legal), p=probs_legal)
-            data = StrategyMemory(
-                info_state=_information_state_tensor(state),
-                iteration=self._iteration,
-                strategy_action_probs=probs.astype(np.float32),
-                legal_mask=_legal_actions_mask(state),
-            )
-            if self._strategy_memories is None:
-                self._strategy_memories = ReservoirBuffer(self._memory_capacity)
-            self._strategy_memories.append(data)
-            return self._traverse_game_tree(state.child(int(sampled_action)), player)
+                values[action] = self._traverse_game_tree(state.child(action), player)
+            value = np.dot(strategy, values)
+            regrets = np.where(legal_mask, values - value, 0.0)
+            sample = Memory(info_state, self._iteration, regrets, legal_mask)
+            self._advantage_memories[player].add(self._rng, sample)
+            return value
+        sample = Memory(info_state, self._iteration, strategy, legal_mask)
+        self._strategy_memory.add(self._rng, sample)
+        action = self._rng.choice(NUM_ACTIONS, p=strategy)
+        return self._traverse_game_tree(state.child(action), player)
 
-    def policy_for_exploitability(
-        self,
-    ) -> Callable[[leduc.LeducState], dict[int, float]]:
-        """Build policy(state) -> dict[int, float] for exploitability."""
-
-        def policy(state: leduc.LeducState) -> dict[int, float]:
-            legal = state.legal_actions()
-            if not legal:
-                return {}
-            obs = _information_state_tensor(state)
-            key = obs.tobytes()
-            if key in self._cached_policy:
-                logits = self._cached_policy[key]
-            else:
-                obs_jax = jnp.asarray(obs, dtype=jnp.float32)
-                logits = np.asarray(
-                    self._policy_apply_jit(self._policy_params, obs_jax)
-                )
-                self._cached_policy[key] = logits
-            mask = np.ones(NUM_ACTIONS, dtype=np.float64) * (-np.inf)
-            for a in legal:
-                mask[a] = float(logits[a])
-            expo = np.exp(mask - np.max(mask))
-            probs = expo / expo.sum()
-            return {a: float(probs[a]) for a in legal}
-
-        return policy
-
-    def _learn_advantage_network(self, player: int) -> float | None:
-        buf = self._advantage_memories[player]
-        if buf is None or len(buf) == 0:
-            return None
-        batch_size = min(self._batch_size_advantage, len(buf))
-        batch = buf.sample(batch_size)
-        info_state = jnp.asarray(batch.info_state, dtype=jnp.float32)
-        advantage = jnp.asarray(batch.advantage, dtype=jnp.float32)
-        legal_mask = jnp.asarray(batch.legal_mask, dtype=jnp.bool_)
-        iteration = jnp.asarray(batch.iteration, dtype=jnp.int32)
-        (
-            self._advantage_params[player],
-            self._advantage_opt_state[player],
-            loss,
-        ) = self._advantage_train_step_jit(
-            self._advantage_params[player],
-            self._advantage_opt_state[player],
-            info_state,
-            advantage,
-            legal_mask,
-            iteration,
+    def _learn_advantage_network(self, player: int) -> float:
+        """Trains a new advantage network for `player` from scratch."""
+        memory = self._advantage_memories[player]
+        key = jax.random.fold_in(
+            jax.random.fold_in(self._advantage_key, self._iteration), player
         )
+        self._advantage_params[player], loss = self._train_advantage(
+            key, memory.data, len(memory), self._iteration
+        )
+        self._strategy_cache[player].clear()
         return float(loss)
 
-    def _learn_strategy_network(self) -> float | None:
-        if self._strategy_memories is None or len(self._strategy_memories) == 0:
-            return None
-        batch_size = min(self._batch_size_strategy, len(self._strategy_memories))
-        batch = self._strategy_memories.sample(batch_size)
-        info_state = jnp.asarray(batch.info_state, dtype=jnp.float32)
-        strategy_probs = jnp.asarray(batch.strategy_action_probs, dtype=jnp.float32)
-        legal_mask = jnp.asarray(batch.legal_mask, dtype=jnp.bool_)
-        iteration = jnp.asarray(batch.iteration, dtype=jnp.int32)
-        (
-            self._policy_params,
-            self._policy_opt_state,
-            loss,
-        ) = self._policy_train_step_jit(
-            self._policy_params,
-            self._policy_opt_state,
-            info_state,
-            strategy_probs,
-            legal_mask,
-            iteration,
+    def learn_policy_network(self) -> tuple[PyTree, float]:
+        """Trains the average-strategy network from scratch on the strategy
+        memory collected so far. Its key depends only on the iteration, so
+        intermediate evaluations don't change the run."""
+        key = jax.random.fold_in(self._policy_key, self._iteration)
+        params, loss = self._train_policy(
+            key, self._strategy_memory.data, len(self._strategy_memory), self._iteration
         )
-        return float(loss)
+        return params, float(loss)
+
+    def average_policy(self, policy_params: PyTree) -> np.ndarray:
+        """Policy network's action probabilities for every infoset, shape (936, 3)."""
+        logits = np.asarray(
+            self._apply(policy_params, INFOSET_TENSORS), dtype=np.float64
+        )
+        logits = np.where(INFOSET_LEGAL_MASKS, logits, -np.inf)
+        probs = np.exp(logits - logits.max(axis=-1, keepdims=True))
+        return probs / probs.sum(axis=-1, keepdims=True)
 
 
-def _exploitability(policy_fn: Callable[[leduc.LeducState], dict[int, float]]) -> float:
-    """Exploitability using new_test's BestResponseSolver and _state_values."""
-    root = leduc.initial_state()
-    on_policy = leduc._state_values(root, policy_fn)
-    br0 = leduc.BestResponseSolver(root, 0, policy_fn).value(root)
-    br1 = leduc.BestResponseSolver(root, 1, policy_fn).value(root)
-    nash_conv = (br0 - on_policy[0]) + (br1 - on_policy[1])
-    return nash_conv / 2.0
+def exploitability(policy_array: np.ndarray) -> float:
+    return leduc.exploitability_from_policy_array(policy_array, leduc._KEY_TO_IDX)
 
 
-def run_deep_cfr(
-    num_iterations: int = 50,
-    num_traversals: int = 100,
-    log_interval: int = 5,
-    **kwargs,
-) -> list[tuple[int, float]]:
-    solver = DeepCFRSolver(
-        policy_hidden=64,
-        advantage_hidden=64,
-        num_iterations=num_iterations,
-        num_traversals=num_traversals,
-        batch_size_advantage=min(256, 936 * num_traversals // 10),
-        batch_size_strategy=min(256, 936 * num_traversals // 10),
-        memory_capacity=100_000,
-        policy_network_train_steps=500,
-        advantage_network_train_steps=200,
-        reinitialize_advantage_networks=True,
-        seed=42,
-        **kwargs,
+def run_deep_cfr(config: argparse.Namespace) -> dict:
+    """Runs Deep CFR, logging the exploitability of the average-strategy
+    network after iteration 1, every `eval_every` iterations and at the end."""
+    start = time.time()
+    eval_seconds = 0.0
+    solver = DeepCFRSolver(config)
+    results = {
+        "iterations": [],
+        "exploitability": [],
+        "advantage_loss": [],
+        "policy_loss": [],
+    }
+
+    for it in range(1, config.iterations + 1):
+        results["advantage_loss"].append(solver.run_iteration())
+        if it == 1 or it % config.eval_every == 0 or it == config.iterations:
+            eval_start = time.time()
+            policy_params, loss = solver.learn_policy_network()
+            if it == config.iterations:
+                # Training the final policy network is part of the algorithm
+                eval_start = time.time()
+            expl = exploitability(solver.average_policy(policy_params))
+            eval_seconds += time.time() - eval_start
+            results["iterations"].append(it)
+            results["exploitability"].append(expl)
+            results["policy_loss"].append(loss)
+            print(f"Iteration {it:4d}: exploitability = {expl:.6f}")
+
+    results["final_exploitability"] = results["exploitability"][-1]
+    results["runtime_seconds"] = time.time() - start
+    # Intermediate policy networks and all exploitability computations, which a
+    # run without logging doesn't need
+    results["eval_seconds"] = eval_seconds
+    return results
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Deep CFR on Leduc Poker.")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--iterations", type=int, default=50, help="CFR iterations T")
+    parser.add_argument(
+        "--traversals",
+        type=int,
+        default=100,
+        help="traversals K per player per iteration",
     )
-
-    root = leduc.initial_state()
-    exploitability_log: list[tuple[int, float]] = []
-
-    for it in range(num_iterations):
-        if (it + 1) % log_interval == 0 or it == 0:
-            solver._learn_strategy_network()
-            pol = solver.policy_for_exploitability()
-            expl = _exploitability(pol)
-            exploitability_log.append((solver._iteration, float(expl)))
-            print(f"Iteration {solver._iteration:4d}: exploitability = {expl:.6f}")
-            solver._cached_policy.clear()
-
-        for p in range(2):
-            for _ in range(num_traversals):
-                solver._traverse_game_tree(root, p)
-            if solver._reinitialize_advantage_networks:
-                rng_key = jax.random.PRNGKey(solver._iteration * 2 + p)
-                dummy = jnp.zeros((1, EMBEDDING_SIZE), dtype=jnp.float32)
-                solver._advantage_params[p] = solver._advantage_networks[p].init(
-                    rng_key, dummy
-                )
-                solver._advantage_opt_state[p] = solver._advantage_opt[p].init(
-                    solver._advantage_params[p]
-                )
-            solver._learn_advantage_network(p)
-
-        solver._iteration += 1
-
-    solver._learn_strategy_network()
-    pol = solver.policy_for_exploitability()
-    final_expl = _exploitability(pol)
-    exploitability_log.append((solver._iteration, float(final_expl)))
-    print(
-        f"Iteration {solver._iteration:4d}: exploitability = {final_expl:.6f} (final)"
+    parser.add_argument("--hidden_sizes", type=int, nargs="+", default=[64, 64])
+    parser.add_argument("--learning_rate", type=float, default=1e-3)
+    parser.add_argument(
+        "--max_grad_norm", type=float, default=1.0, help="0 disables clipping"
     )
-
-    return exploitability_log
+    parser.add_argument("--batch_size", type=int, default=2048)
+    parser.add_argument("--advantage_train_steps", type=int, default=200)
+    parser.add_argument("--policy_train_steps", type=int, default=5000)
+    parser.add_argument("--memory_capacity", type=int, default=100_000)
+    parser.add_argument("--eval_every", type=int, default=5)
+    parser.add_argument(
+        "--output", type=str, default=None, help="write results to this JSON file"
+    )
+    return parser.parse_args(argv)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Deep CFR on Leduc Poker (OpenSpiel-style)"
-    )
-    parser.add_argument("--iterations", type=int, default=100)
-    parser.add_argument("--traversals", type=int, default=10)
-    parser.add_argument("--log_interval", type=int, default=5)
-    args = parser.parse_args()
-
-    print("Deep CFR for Leduc Poker (OpenSpiel-style)")
+    config = parse_args()
+    print("Deep CFR for Leduc Poker")
     print("=" * 50)
-    expl_log = run_deep_cfr(
-        num_iterations=args.iterations,
-        num_traversals=args.traversals,
-        log_interval=args.log_interval,
-    )
+    results = run_deep_cfr(config)
     print("=" * 50)
-    print(f"Final exploitability: {expl_log[-1][1]:.6f}")
+    print(f"Final exploitability: {results['final_exploitability']:.6f}")
+    print(
+        f"Runtime: {results['runtime_seconds']:.1f}s "
+        f"({results['eval_seconds']:.1f}s evaluating)"
+    )
+    if config.output:
+        with open(config.output, "w") as f:
+            json.dump(
+                {"game": "leduc_poker", "config": vars(config), **results}, f, indent=2
+            )
 
 
 if __name__ == "__main__":
