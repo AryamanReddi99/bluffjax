@@ -548,9 +548,13 @@ def _train(game: HoldemGame, cfg: dict, logger: WandbMultiLogger) -> str:
             **{k: int(v) for k, v in jax.device_get(stats).items()},
         }
         if chunk_i % cfg["log_every_chunks"] == 0:
+            per_step = steps_per_chunk * cfg["num_games"]
             print(
                 f"samples {samples:9d}  loss {loss:.3e}  replay {int(buf.size):7d}  "
-                f"{metrics['seconds_per_1e5_samples']:.1f}s/1e5 samples"
+                f"{metrics['seconds_per_1e5_samples']:.1f}s/1e5 samples  per game-step: "
+                f"solves {metrics['subgames_solved'] / per_step:.2f} "
+                f"all-in {metrics['allin_chains'] / per_step:.2f} "
+                f"hands done {metrics['hands_finished'] / per_step:.2f}"
             )
         if samples >= next_eval or samples >= num_samples:
             print(f"evaluation at {samples} samples ({elapsed / 60:.1f} min):")
