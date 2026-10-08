@@ -213,7 +213,7 @@ class RebelPlayer(Player):
         value_fn = lambda pub, b: self.net.apply(params, pub, b)  # noqa: E731
         sol, root_beliefs = solve_batch(
             self.game, self.tpl, views.bet, views.board, state.beliefs, value_fn,
-            rng, self.cfr_iters, self.solve_chunk, by_street=self.by_street,
+            rng, self.cfr_iters, self.solve_chunk, active=need, by_street=self.by_street,
         )
         new = RebelState(
             beliefs=root_beliefs,

@@ -383,6 +383,38 @@ def solve(
     )
 
 
+def masked_map(group_fn, active: BoolArray, args, group: int, sort_key=None):
+    """group_fn over the entries where `active`, `group` entries at a time.
+
+    group_fn maps batched args (leading axis `group`) to batched outputs.
+    Inactive entries get zeros. Only ceil(sum(active) / group) groups run, so
+    work is spent on active entries only. Entries are processed in order of
+    sort_key (e.g. river subgames last) so that groups are homogeneous.
+    """
+    n = active.shape[0]
+    key = jnp.zeros(n, jnp.int32) if sort_key is None else sort_key.astype(jnp.int32)
+    order = jnp.argsort(jnp.where(active, key, jnp.iinfo(jnp.int32).max), stable=True)
+    count = jnp.sum(active)
+    n_groups = -(-n // group)
+    padded = jnp.concatenate([order, jnp.zeros(n_groups * group - n, order.dtype)])
+    sample = jax.tree.map(lambda x: x[:group], args)
+    out = jax.tree.map(
+        lambda sh: jnp.zeros((n,) + sh.shape[1:], sh.dtype), jax.eval_shape(group_fn, sample)
+    )
+
+    def body(carry):
+        g, out = carry
+        idx = lax.dynamic_slice(padded, (g * group,), (group,))
+        valid = g * group + jnp.arange(group) < count
+        res = group_fn(jax.tree.map(lambda x: x[idx], args))
+        write = jnp.where(valid, idx, n)  # n = dropped
+        out = jax.tree.map(lambda o, r: o.at[write].set(r, mode="drop"), out, res)
+        return g + 1, out
+
+    _, out = lax.while_loop(lambda c: c[0] * group < count, body, (jnp.int32(0), out))
+    return out
+
+
 def solve_batch(
     game: HoldemGame,
     tpl: Template,
@@ -393,42 +425,34 @@ def solve_batch(
     rng: PRNGKeyArray,
     cfr_iters: int,
     chunk: int,
+    active: BoolArray | None = None,
     by_street: bool = True,
 ) -> tuple[Solution, FloatArray]:
-    """Solve a batch of subgames, `chunk` at a time. Returns (solutions, root beliefs).
+    """Solve the `active` subgames of a batch, `chunk` at a time.
 
-    With by_street, subgames are ordered so that chunks without a river
-    subgame skip the showdown code and the others evaluate both leaf kinds.
-    This branches on chunk contents, so use by_street=False under vmap.
+    Returns (solutions, root beliefs); inactive entries are zeros. With
+    by_street, chunks without a river subgame skip the showdown code and the
+    others evaluate both leaf kinds; this branches on chunk contents, so use
+    by_street=False under vmap.
     """
     n = beliefs.shape[0]
     keys = jax.random.split(rng, n)
+    active = jnp.ones(n, bool) if active is None else active
 
-    def one(args, mode):
-        root, board, belief, key = args
+    def one(root, board, belief, key, mode):
         sg = make_subgame(game, tpl, root, board, belief, with_showdown=mode != "net")
         return solve(game, tpl, sg, value_fn, key, cfr_iters, mode), sg.beliefs
 
-    args = (roots, boards, beliefs, keys)
-    if not by_street:
-        return lax.map(lambda a: one(a, "both"), args, batch_size=chunk)
-    n_chunks = -(-n // chunk)
-    order = jnp.argsort(roots.street == 3, stable=True)
-    pad = jnp.concatenate([order, jnp.full(n_chunks * chunk - n, order[-1])])
-    chunked = jax.tree.map(lambda x: x[pad].reshape((n_chunks, chunk) + x.shape[1:]), args)
+    def group_fn(a):
+        both = lambda: jax.vmap(lambda *x: one(*x, "both"))(*a)  # noqa: E731
+        if not by_street:
+            return both()
+        net = lambda: jax.vmap(lambda *x: one(*x, "net"))(*a)  # noqa: E731
+        return lax.cond(jnp.any(a[0].street == 3), both, net)
 
-    def run_chunk(c):
-        has_river = jnp.any(c[0].street == 3)
-        return lax.cond(
-            has_river,
-            lambda: jax.vmap(lambda *a: one(a, "both"))(*c),
-            lambda: jax.vmap(lambda *a: one(a, "net"))(*c),
-        )
-
-    out = lax.map(run_chunk, chunked)
-    out = jax.tree.map(lambda x: x.reshape((n_chunks * chunk,) + x.shape[2:])[:n], out)
-    inverse = jnp.argsort(order)
-    return jax.tree.map(lambda x: x[inverse], out)
+    return masked_map(
+        group_fn, active, (roots, boards, beliefs, keys), chunk, sort_key=roots.street == 3
+    )
 
 
 def evaluate_profile(

@@ -70,6 +70,7 @@ from bluffjax.examples.holdem_rebel.solver import (
     chance_children,
     chance_values,
     make_subgame,
+    masked_map,
     solve,
 )
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
@@ -174,38 +175,6 @@ def sample_leaf(
         beliefs = jnp.where(is_dec, beliefs.at[actor].set(updated), beliefs)
         node = jnp.where(is_dec, children[node, slot], node)
     return node, beliefs
-
-
-def masked_map(group_fn, active: BoolArray, args, group: int, sort_key=None):
-    """group_fn over the entries where `active`, `group` entries at a time.
-
-    group_fn maps batched args (leading axis `group`) to batched outputs.
-    Inactive entries get zeros. Only ceil(sum(active) / group) groups run, so
-    work is spent on active entries only. Entries are processed in order of
-    sort_key (e.g. river subgames last) so that groups are homogeneous.
-    """
-    n = active.shape[0]
-    key = jnp.zeros(n, jnp.int32) if sort_key is None else sort_key.astype(jnp.int32)
-    order = jnp.argsort(jnp.where(active, key, jnp.iinfo(jnp.int32).max), stable=True)
-    count = jnp.sum(active)
-    n_groups = -(-n // group)
-    padded = jnp.concatenate([order, jnp.zeros(n_groups * group - n, order.dtype)])
-    sample = jax.tree.map(lambda x: x[:group], args)
-    out = jax.tree.map(
-        lambda sh: jnp.zeros((n,) + sh.shape[1:], sh.dtype), jax.eval_shape(group_fn, sample)
-    )
-
-    def body(carry):
-        g, out = carry
-        idx = lax.dynamic_slice(padded, (g * group,), (group,))
-        valid = g * group + jnp.arange(group) < count
-        res = group_fn(jax.tree.map(lambda x: x[idx], args))
-        write = jnp.where(valid, idx, n)  # n = dropped
-        out = jax.tree.map(lambda o, r: o.at[write].set(r, mode="drop"), out, res)
-        return g + 1, out
-
-    _, out = lax.while_loop(lambda c: c[0] * group < count, body, (jnp.int32(0), out))
-    return out
 
 
 def make_self_play_step(game: HoldemGame, tpl: Template, net: ValueNetwork, cfg: dict):
@@ -451,6 +420,24 @@ def checkpoint_meta(game: HoldemGame, cfg: dict, samples: int) -> dict:
 
 def run_training(game: HoldemGame, cfg: dict) -> str:
     """Train ReBeL for cfg['num_samples'] samples; returns the checkpoint path."""
+    # The logger forks worker processes; do it before JAX starts its threads.
+    logger = WandbMultiLogger(
+        project=cfg["project"],
+        group=f"{cfg['env_name']}_rebel"
+        + datetime.datetime.now().strftime("_%Y-%m-%d_%H-%M-%S"),
+        job_type=f"{cfg['job_type']}_{cfg['env_name']}",
+        config=cfg,
+        mode="online" if cfg["wandb"] else "disabled",
+        seed=cfg["seed"],
+        num_seeds=1,
+    )
+    try:
+        return _train(game, cfg, logger)
+    finally:
+        logger.finish()
+
+
+def _train(game: HoldemGame, cfg: dict, logger: WandbMultiLogger) -> str:
     rng = jax.random.PRNGKey(cfg["seed"])
     tpl_player = RebelPlayer(
         game,
@@ -503,16 +490,6 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
             lambda p, k: play_match(env, game, tpl_player, p, ref_player, ref_params, eval_batch, k)
         )
 
-    logger = WandbMultiLogger(
-        project=cfg["project"],
-        group=f"{cfg['env_name']}_rebel"
-        + datetime.datetime.now().strftime("_%Y-%m-%d_%H-%M-%S"),
-        job_type=f"{cfg['job_type']}_{cfg['env_name']}",
-        config=cfg,
-        mode="online" if cfg["wandb"] else "disabled",
-        seed=cfg["seed"],
-        num_seeds=1,
-    )
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     save_path = os.path.join(cfg["save_dir"], f"{game.name}_rebel_{timestamp}.msgpack")
 
@@ -539,63 +516,60 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
             )
         return out
 
-    try:
-        games = new_games(cfg["num_games"])
-        buf = new_replay(cfg["replay_capacity"])
-        samples, trained, chunk_i = 0, 0, 0
-        next_eval = float(cfg["eval_every"])
-        t_start = time.time()
-        gen_time = 0.0
-        while samples < num_samples:
-            rng, k_gen, k_train = jax.random.split(rng, 3)
-            t0 = time.time()
-            games, buf, added, stats = generate(params, games, buf, k_gen)
-            added = int(added)
-            gen_time += time.time() - t0
-            samples += added
-            loss = float("nan")
-            if int(buf.size) >= 2 * cfg["batch_size"]:
-                n_steps = int((cfg["train_ratio"] * samples - trained) // cfg["batch_size"])
-                if n_steps > 0:
-                    params, opt_state, loss = train(params, opt_state, buf, k_train, n_steps)
-                    loss = float(loss)
-                    trained += n_steps * cfg["batch_size"]
-            chunk_i += 1
-            elapsed = time.time() - t_start
-            metrics = {
-                "samples": samples,
-                "value_loss": loss,
-                "replay_size": int(buf.size),
-                "trained_examples": trained,
-                "seconds_per_1e5_samples": elapsed / max(samples, 1) * 1e5,
-                "gen_seconds_per_1e5_samples": gen_time / max(samples, 1) * 1e5,
-                **{k: int(v) for k, v in jax.device_get(stats).items()},
-            }
-            if chunk_i % cfg["log_every_chunks"] == 0:
-                print(
-                    f"samples {samples:9d}  loss {loss:.3e}  replay {int(buf.size):7d}  "
-                    f"{metrics['seconds_per_1e5_samples']:.1f}s/1e5 samples"
-                )
-            if samples >= next_eval or samples >= num_samples:
-                print(f"evaluation at {samples} samples ({elapsed / 60:.1f} min):")
-                rng, k_eval = jax.random.split(rng)
-                metrics.update(evaluate(params, k_eval, cfg["eval_deals"]))
-                next_eval += float(cfg["eval_every"])
-                if cfg["save_final"]:
-                    save_checkpoint(save_path, params, checkpoint_meta(game, cfg, samples))
-            logger.log(0, metrics)
-        if cfg["save_final"]:
-            save_checkpoint(save_path, params, checkpoint_meta(game, cfg, samples))
-            print(f"Saved model to {save_path}")
-        if cfg["final_eval_deals"]:
-            print(f"final evaluation ({cfg['final_eval_deals']} deals, mirrored):")
+    games = new_games(cfg["num_games"])
+    buf = new_replay(cfg["replay_capacity"])
+    samples, trained, chunk_i = 0, 0, 0
+    next_eval = float(cfg["eval_every"])
+    t_start = time.time()
+    gen_time = 0.0
+    while samples < num_samples:
+        rng, k_gen, k_train = jax.random.split(rng, 3)
+        t0 = time.time()
+        games, buf, added, stats = generate(params, games, buf, k_gen)
+        added = int(added)
+        gen_time += time.time() - t0
+        samples += added
+        loss = float("nan")
+        if int(buf.size) >= 2 * cfg["batch_size"]:
+            n_steps = int((cfg["train_ratio"] * samples - trained) // cfg["batch_size"])
+            if n_steps > 0:
+                params, opt_state, loss = train(params, opt_state, buf, k_train, n_steps)
+                loss = float(loss)
+                trained += n_steps * cfg["batch_size"]
+        chunk_i += 1
+        elapsed = time.time() - t_start
+        metrics = {
+            "samples": samples,
+            "value_loss": loss,
+            "replay_size": int(buf.size),
+            "trained_examples": trained,
+            "seconds_per_1e5_samples": elapsed / max(samples, 1) * 1e5,
+            "gen_seconds_per_1e5_samples": gen_time / max(samples, 1) * 1e5,
+            **{k: int(v) for k, v in jax.device_get(stats).items()},
+        }
+        if chunk_i % cfg["log_every_chunks"] == 0:
+            print(
+                f"samples {samples:9d}  loss {loss:.3e}  replay {int(buf.size):7d}  "
+                f"{metrics['seconds_per_1e5_samples']:.1f}s/1e5 samples"
+            )
+        if samples >= next_eval or samples >= num_samples:
+            print(f"evaluation at {samples} samples ({elapsed / 60:.1f} min):")
             rng, k_eval = jax.random.split(rng)
-            final = evaluate(params, k_eval, cfg["final_eval_deals"])
-            logger.log(0, {f"final/{k[5:]}": v for k, v in final.items()})
-        print(
-            f"total {time.time() - t_start:.0f}s for {samples} samples "
-            f"({(time.time() - t_start) / max(samples, 1) * 1e5:.1f}s per 1e5)"
-        )
-    finally:
-        logger.finish()
+            metrics.update(evaluate(params, k_eval, cfg["eval_deals"]))
+            next_eval += float(cfg["eval_every"])
+            if cfg["save_final"]:
+                save_checkpoint(save_path, params, checkpoint_meta(game, cfg, samples))
+        logger.log(0, metrics)
+    if cfg["save_final"]:
+        save_checkpoint(save_path, params, checkpoint_meta(game, cfg, samples))
+        print(f"Saved model to {save_path}")
+    if cfg["final_eval_deals"]:
+        print(f"final evaluation ({cfg['final_eval_deals']} deals, mirrored):")
+        rng, k_eval = jax.random.split(rng)
+        final = evaluate(params, k_eval, cfg["final_eval_deals"])
+        logger.log(0, {f"final/{k[5:]}": v for k, v in final.items()})
+    print(
+        f"total {time.time() - t_start:.0f}s for {samples} samples "
+        f"({(time.time() - t_start) / max(samples, 1) * 1e5:.1f}s per 1e5)"
+    )
     return save_path
