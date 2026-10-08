@@ -1,0 +1,9 @@
+# The ReBeL evaluation opponent of the paper: config_rebel.yaml trained for
+# 5e6 samples. PPO-NFSP, PQN-NFSP and ReBeL (config_rebel.yaml, 1e7 samples)
+# are evaluated against its checkpoint via compare_with.
+defaults:
+  - config_rebel
+  - _self_
+
+num_samples: 5e6
+job_type: hul_rebel_opponent
