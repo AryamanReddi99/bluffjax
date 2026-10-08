@@ -6,12 +6,12 @@
 num_samples: 1e7
 
 # Self-play and search
-num_games: 128  # self-play games solved in parallel
-cfr_iters: 128  # Linear CFR-D iterations per subgame (each updates both players)
+num_games: 256  # self-play games solved in parallel
+cfr_iters: 64  # Linear CFR-D iterations per subgame (each updates both players)
 explore_prob: 0.25  # ReBeL's epsilon: one player explores at random
 chance_flops: 256  # flops sampled per preflop chance node (0 = all 22,100)
-max_raises: 3  # non-all-in raises per betting round in the search tree (all-in always allowed)
-solve_chunk: 64  # subgames solved at once (bounds GPU memory)
+max_raises: 2  # non-all-in raises per betting round in the search tree (all-in always allowed)
+solve_chunk: 32  # subgames solved at once (bounds GPU memory)
 steps_per_chunk: 8  # self-play steps per jitted call
 
 # Value network (MLP with LayerNorm and GeLU) and its training
@@ -25,8 +25,8 @@ grad_clip: 5.0
 replay_capacity: 131072  # FIFO; ~11 kB per example on the GPU
 
 # Evaluation: mirrored deals (each deal played from both seats)
-eval_every: 5e5  # samples
-eval_deals: 256  # per opponent at each evaluation
+eval_every: 1e6  # samples
+eval_deals: 128  # per opponent at each evaluation
 final_eval_deals: 2048  # per opponent at the end
 eval_batch_deals: 128  # deals played at once (GPU memory)
 compare_with: ""  # also play this ReBeL checkpoint, e.g. ${repo_root:}/checkpoints/HUNL/hunl_rebel_<timestamp>.msgpack

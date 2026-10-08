@@ -324,11 +324,13 @@ def test_self_play_examples(name: str) -> None:
     net = SV.ValueNetwork(hidden_dim=32, num_layers=1)
     params = net.init(jax.random.PRNGKey(0), jnp.zeros((G.PUBLIC_DIM,)), jnp.zeros((2, C.NUM_HANDS)))
     cfg = {"chance_flops": 16, "explore_prob": 0.25, "cfr_iters": 4, "solve_chunk": 4}
-    step = jax.jit(T.make_self_play_step(game, tpl, net, cfg))
+    solve_initial, step = T.make_self_play_step(game, tpl, net, cfg)
+    shared = jax.jit(solve_initial)(params)
+    step = jax.jit(step)
     games = T.new_games(8)
     streets = set()
     for i in range(4):
-        games, ex, stats = step(params, games, jax.random.PRNGKey(i))
+        games, ex, stats = step(params, shared, games, jax.random.PRNGKey(i))
         streets |= set(np.asarray(games.street).tolist())
         valid = np.asarray(ex.valid)
         assert valid.sum() >= 1

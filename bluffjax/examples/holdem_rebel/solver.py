@@ -187,9 +187,11 @@ class _Ops:
             nodes = tpl.internal[ilo:ihi]
             self.int_local.append(nodes - self.node_rng[d][0])
             if d < D:
+                # Missing children point at node 0 of the next depth; every use
+                # of their values is masked by the legal slots.
                 ch = tpl.children[nodes]
-                nlo, nhi = self.node_rng[d + 1]
-                self.child_local.append(np.where(ch >= 0, ch - nlo, nhi - nlo))
+                nlo = self.node_rng[d + 1][0]
+                self.child_local.append(np.where(ch >= 0, ch - nlo, 0))
             else:
                 self.child_local.append(None)
         n = len(tpl.parent)
@@ -272,8 +274,7 @@ class _Ops:
             if ihi == ilo:
                 v_next = vl
                 continue
-            vpad = jnp.concatenate([v_next, jnp.zeros((1, NUM_HANDS))], axis=0)
-            vc = vpad[self.child_local[d]]  # (ni_d, S, 1326)
+            vc = v_next[self.child_local[d]]  # (ni_d, S, 1326)
             lg = legal[ilo:ihi][:, :, None]
             mine = (actor[ilo:ihi] == player)[:, None, None]
             if best_response:

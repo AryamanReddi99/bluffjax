@@ -215,24 +215,35 @@ def make_self_play_step(game: HoldemGame, tpl: Template, net: ValueNetwork, cfg:
     chunk = int(cfg["solve_chunk"])
     exact_group = 8  # games per group for exact all-in showdowns (52 boards each)
 
-    def solve_games(params, games: Games, rng):
-        """Solve every game's betting-round subgame.
+    root0 = round_root(game, jnp.int32(0), jnp.float32(0.0))
 
-        All games at street 0 are at the same initial PBS, so it is solved once
-        and each of those games draws its own iteration t from the shared
-        solve, which is the same as solving it separately for each game. Its
-        example is added once.
-        """
-        value_fn = lambda pub, b: net.apply(params, pub, b)  # noqa: E731
-        k_root, k_solve, k_t = jax.random.split(rng, 3)
-        n = games.street.shape[0]
-        fresh = games.street == 0
-        root0 = round_root(game, jnp.int32(0), jnp.float32(0.0))
-        sg0 = make_subgame(
+    def initial_subgame():
+        return make_subgame(
             game, tpl, root0, -jnp.ones(5, jnp.int32),
             jnp.full((2, NUM_HANDS), 1.0 / NUM_HANDS, jnp.float32), with_showdown=False,
         )
-        shared = solve(game, tpl, sg0, value_fn, k_root, cfr_iters, "net", all_policies=True)
+
+    def solve_initial(params):
+        """Solve the initial PBS, keeping every iteration's policy.
+
+        It is the same in every hand and depends only on the network, so it is
+        solved once per batch of self-play steps (the network is fixed within
+        a batch), and each game starting a hand draws its own iteration t,
+        which is the same as solving it separately for each game.
+        """
+        value_fn = lambda pub, b: net.apply(params, pub, b)  # noqa: E731
+        sol = solve(game, tpl, initial_subgame(), value_fn, jax.random.PRNGKey(0),
+                    cfr_iters, "net", all_policies=True)
+        return sol._replace(avg_policy=jnp.zeros((), jnp.float32))
+
+    def solve_games(params, shared, games: Games, rng):
+        """Solve every game's betting-round subgame; games at the initial PBS
+        use the shared solve, whose example is added once per step."""
+        value_fn = lambda pub, b: net.apply(params, pub, b)  # noqa: E731
+        k_solve, k_t = jax.random.split(rng)
+        n = games.street.shape[0]
+        fresh = games.street == 0
+        sg0 = initial_subgame()
 
         def one(root, board, beliefs, key, mode):
             sg = make_subgame(game, tpl, root, board, beliefs, with_showdown=mode != "net")
@@ -317,10 +328,10 @@ def make_self_play_step(game: HoldemGame, tpl: Template, net: ValueNetwork, cfg:
         )
         return ex, new_board, new_beliefs
 
-    def step(params, games: Games, rng):
+    def step(params, shared, games: Games, rng):
         k_solve, k_leaf, k_c1, k_c2, k_c3 = jax.random.split(rng, 5)
         n = games.street.shape[0]
-        ex0, ex_root, policy, tree, beliefs, n_solved = solve_games(params, games, k_solve)
+        ex0, ex_root, policy, tree, beliefs, n_solved = solve_games(params, shared, games, k_solve)
         leaf, beliefs = jax.vmap(
             lambda p, t, b, k: sample_leaf(tpl, p, t, b, explore, k)
         )(policy, tree, beliefs, jax.random.split(k_leaf, n))
@@ -362,7 +373,7 @@ def make_self_play_step(game: HoldemGame, tpl: Template, net: ValueNetwork, cfg:
         }
         return nxt, examples, stats
 
-    return step
+    return solve_initial, step
 
 
 def new_replay(capacity: int) -> Replay:
@@ -462,14 +473,16 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
     )
     opt_state = tx.init(params)
     train = make_trainer(net, tx, cfg["batch_size"])
-    step = make_self_play_step(game, tpl, net, cfg)
+    solve_initial, step = make_self_play_step(game, tpl, net, cfg)
     steps_per_chunk = int(cfg["steps_per_chunk"])
 
     @partial(jax.jit, donate_argnums=(1, 2))
     def generate(params, games, buf, rng):
+        shared = solve_initial(params)
+
         def body(carry, key):
             games, buf = carry
-            games, ex, stats = step(params, games, key)
+            games, ex, stats = step(params, shared, games, key)
             return (games, replay_add(buf, ex)), (jnp.sum(ex.valid), stats)
 
         (games, buf), (added, stats) = lax.scan(
