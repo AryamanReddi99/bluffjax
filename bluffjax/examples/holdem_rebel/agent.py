@@ -116,9 +116,7 @@ class PolicyPlayer(Player):
         )
 
 
-def heuristic_players(game: HoldemGame) -> dict[str, PolicyPlayer]:
-    """Uniform random, always check/call, always raise (and shove in No-Limit)."""
-
+def _heuristic_fns(game: HoldemGame) -> dict[str, Callable]:
     def random_fn(params, rng, s, avail):
         return jax.random.categorical(rng, jnp.where(avail, 0.0, -1e9))
 
@@ -129,20 +127,31 @@ def heuristic_players(game: HoldemGame) -> dict[str, PolicyPlayer]:
 
         return fn
 
+    fns = {"random": random_fn}
     if game.is_limit:  # 0 call, 1 raise, 2 fold, 3 check
-        call, raise_, allin = first_legal([0, 3]), first_legal([1, 0, 3]), None
+        fns["always_call"] = first_legal([0, 3])
+        fns["always_raise"] = first_legal([1, 0, 3])
     else:  # 0 check/call, 1 half pot, 2 pot, 3 all-in, 4 fold
-        call = first_legal([0])
-        raise_ = first_legal([2, 1, 3, 0])
-        allin = first_legal([3, 0])
-    players = {
-        "random": PolicyPlayer(random_fn),
-        "always_call": PolicyPlayer(call),
-        "always_raise": PolicyPlayer(raise_),
-    }
-    if allin is not None:
-        players["always_allin"] = PolicyPlayer(allin)
-    return players
+        fns["always_call"] = first_legal([0])
+        fns["always_raise"] = first_legal([2, 1, 3, 0])
+        fns["always_allin"] = first_legal([3, 0])
+    return fns
+
+
+def heuristic_players(game: HoldemGame) -> dict[str, PolicyPlayer]:
+    """Uniform random, always check/call, always raise (and shove in No-Limit)."""
+    return {name: PolicyPlayer(fn) for name, fn in _heuristic_fns(game).items()}
+
+
+def heuristic_switch(game: HoldemGame) -> tuple[PolicyPlayer, list[str]]:
+    """One player that plays heuristic number `params` (one compile for all)."""
+    names, fns = zip(*_heuristic_fns(game).items())
+
+    def fn(params, rng, s, avail):
+        return lax.switch(params, [lambda r, x, a, f=f: f(None, r, x, a) for f in fns],
+                          rng, s, avail)
+
+    return PolicyPlayer(fn), list(names)
 
 
 class RebelState(NamedTuple):
@@ -194,7 +203,8 @@ class RebelPlayer(Player):
         )
         return RebelState(
             beliefs=jnp.full((n, 2, NUM_HANDS), 1.0 / NUM_HANDS, jnp.float32),
-            policy=jnp.zeros((n, ni, a, NUM_HANDS)),
+            # bfloat16 halves the memory of evaluating many hands at once
+            policy=jnp.zeros((n, ni, a, NUM_HANDS), jnp.bfloat16),
             tree=tree,
             node=jnp.zeros(n, jnp.int32),
         )
@@ -207,7 +217,7 @@ class RebelPlayer(Player):
         )
         new = RebelState(
             beliefs=root_beliefs,
-            policy=sol.policy,
+            policy=sol.policy.astype(state.policy.dtype),
             tree=sol.tree,
             node=jnp.zeros_like(state.node),
         )
@@ -227,7 +237,7 @@ class RebelPlayer(Player):
         rows = jnp.arange(n)
         ni, legal, _ = self._node_info(state, jnp.zeros(n, jnp.int32))
         probs = state.policy[rows, jnp.maximum(ni, 0), :, views.own_hand]
-        probs = jnp.where(legal, probs, 0.0)
+        probs = jnp.where(legal, probs.astype(jnp.float32), 0.0)
         fallback = jnp.where(legal, 1.0, 0.0)
         probs = jnp.where(probs.sum(-1, keepdims=True) > 0, probs, fallback)
         return probs / probs.sum(-1, keepdims=True)
@@ -249,7 +259,7 @@ class RebelPlayer(Player):
         ni, _, in_tree = self._node_info(state, slots)
         upd = go & in_tree
         pos = (views.current_seat - views.small_blind) % 2
-        f = state.policy[rows, jnp.maximum(ni, 0), slots]  # (n, 1326)
+        f = state.policy[rows, jnp.maximum(ni, 0), slots].astype(jnp.float32)  # (n, 1326)
         actor_b = state.beliefs[rows, pos] * f
         # An action the policy never takes carries no usable information.
         actor_b = jnp.where(actor_b.sum(-1, keepdims=True) > 0, normalize(actor_b),
@@ -278,7 +288,8 @@ def _where(mask: BoolArray, a, b):
 class MatchResult(NamedTuple):
     rewards: FloatArray  # (n_deals, 2) player A's reward with A in seat 0 / seat 1
     hand_length: FloatArray  # (n_deals, 2) actions per hand
-    unfinished: IntArray  # hands that hit the step limit (should be 0)
+    unfinished: IntArray  # hands that hit the solve limit (should be 0)
+    resolves: IntArray  # opponent actions outside a ReBeL player's subgame
 
 
 def play_match(
@@ -314,6 +325,7 @@ def play_match(
         length: FloatArray
         rng: PRNGKeyArray
         solves: IntArray
+        resolves: IntArray
 
     def inner_cond(c: Carry):
         return jnp.any(~c.done & ~c.need_a & ~c.need_b)
@@ -351,6 +363,7 @@ def play_match(
             length=c.length + go,
             rng=rng,
             solves=c.solves,
+            resolves=c.resolves + jnp.sum(hold),
         )
 
     def outer_cond(c: Carry):
@@ -383,23 +396,26 @@ def play_match(
         length=jnp.zeros(n),
         rng=rng_play,
         solves=jnp.int32(0),
+        resolves=jnp.int32(0),
     )
     out = lax.while_loop(outer_cond, outer_body, init)
     return MatchResult(
         rewards=out.rewards.reshape(2, n_deals).T,
         hand_length=out.length.reshape(2, n_deals).T,
         unfinished=jnp.sum(~out.done),
+        resolves=out.resolves,
     )
 
 
-def summarize(result: MatchResult) -> dict[str, float]:
+def summarize(results: list[MatchResult]) -> dict[str, float]:
     """Mean reward per hand of player A and its standard error over deals."""
-    pair = np.asarray(result.rewards).mean(axis=1)
+    pair = np.concatenate([np.asarray(r.rewards).mean(axis=1) for r in results])
     return {
         "mean": float(pair.mean()),
         "se": float(pair.std(ddof=1) / np.sqrt(len(pair))) if len(pair) > 1 else float("nan"),
         "hands": int(pair.size * 2),
-        "unfinished": int(result.unfinished),
+        "unfinished": int(sum(int(r.unfinished) for r in results)),
+        "resolves": int(sum(int(r.resolves) for r in results)),
     }
 
 

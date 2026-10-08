@@ -312,3 +312,32 @@ def test_agent_ignores_hidden_information(name: str, tmp_path) -> None:
             if s1 >= 2:
                 break
             assert np.array_equal(p1, p2) and np.array_equal(b1, b2)
+
+
+@pytest.mark.parametrize("name", GAMES)
+def test_self_play_examples(name: str) -> None:
+    """A few self-play steps: examples are well formed and games move on."""
+    from bluffjax.examples.holdem_rebel import train as T
+
+    game = G.make_game(name)
+    tpl = G.build_template(game)
+    net = SV.ValueNetwork(hidden_dim=32, num_layers=1)
+    params = net.init(jax.random.PRNGKey(0), jnp.zeros((G.PUBLIC_DIM,)), jnp.zeros((2, C.NUM_HANDS)))
+    cfg = {"chance_flops": 16, "explore_prob": 0.25, "cfr_iters": 4, "solve_chunk": 4}
+    step = jax.jit(T.make_self_play_step(game, tpl, net, cfg))
+    games = T.new_games(8)
+    streets = set()
+    for i in range(4):
+        games, ex, stats = step(params, games, jax.random.PRNGKey(i))
+        streets |= set(np.asarray(games.street).tolist())
+        valid = np.asarray(ex.valid)
+        assert valid.sum() >= 1
+        v, m, b, pub = (np.asarray(a)[valid] for a in (ex.values, ex.mask, ex.beliefs, ex.pub))
+        assert np.isfinite(v).all() and np.abs(v).max() <= 1.0 + 1e-5
+        assert np.allclose(b.sum(-1), 1.0, atol=1e-4)
+        board = pub[:, :52] > 0.5
+        blocked = (board[:, np.asarray(C.HAND_CARDS)].any(-1))  # (E, 1326)
+        assert not (m & blocked[:, None, :]).any()
+        assert (b * blocked[:, None, :]).max() == 0.0
+        assert int(stats["subgames_solved"]) >= 1
+    assert len(streets) > 1

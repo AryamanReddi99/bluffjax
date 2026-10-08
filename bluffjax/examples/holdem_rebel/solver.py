@@ -299,6 +299,7 @@ def solve(
     rng: PRNGKeyArray,
     cfr_iters: int,
     leaf_mode: str = "both",
+    all_policies: bool = False,
 ) -> Solution:
     """Alternating-update Linear CFR-D on one subgame (ReBeL Algorithm 2).
 
@@ -311,6 +312,8 @@ def solve(
     and for acting (safe search, Sec. 6).
 
     leaf_mode: "net" (no river), "showdown" (river) or "both" (select by street).
+    all_policies: return the policy after every iteration, (cfr_iters, Ni, S, 1326),
+    instead of one sampled iteration (to share one solve between games).
     """
     ops = _Ops(game, tpl)
     actor = sg.tree.actor[tpl.internal]
@@ -339,7 +342,9 @@ def solve(
         regrets, policy, sum_policy, root_mean, snap = carry
         player = s % 2
         n_prev = s // 2
-        snap = jnp.where(s == 2 * k_sample, policy, snap)
+        out = policy if all_policies else None
+        if not all_policies:
+            snap = jnp.where(s == 2 * k_sample, policy, snap)
         xs = ops.reaches(policy, sg.beliefs, actor)
         # The other player updated at s - 1; its new reach is in xs.
         sum_policy = jnp.where(
@@ -354,12 +359,14 @@ def solve(
         t = (n_prev + 1.0).astype(jnp.float32)
         policy = jnp.where(own, regret_matching(regrets, legal), policy)
         regrets = jnp.where(own, regrets * (t / (t + 1.0)), regrets)
-        return (regrets, policy, sum_policy, root_mean, snap), None
+        return (regrets, policy, sum_policy, root_mean, snap), out
 
     init = (jnp.zeros_like(uniform), uniform, sum_policy, jnp.zeros((2, NUM_HANDS)), uniform)
-    (_, policy, sum_policy, root_mean, snap), _ = lax.scan(
+    (_, policy, sum_policy, root_mean, snap), history = lax.scan(
         body, init, jnp.arange(num_steps)
     )
+    if all_policies:
+        snap = history[::2]  # policy after 2k steps, k = 0..cfr_iters-1
     last = num_steps - 1
     xs = ops.reaches(policy, sg.beliefs, actor)
     sum_policy = add_average(sum_policy, policy, xs, last % 2, last)

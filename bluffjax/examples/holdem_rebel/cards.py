@@ -49,6 +49,9 @@ _HAND_CARDS_NP, _HAND_INDEX_NP, _CARD_HANDS_NP = _build_hand_tables()
 HAND_CARDS = jnp.asarray(_HAND_CARDS_NP)  # (1326, 2), first card < second
 HAND_INDEX = jnp.asarray(_HAND_INDEX_NP)  # (52, 52) -> hand id, -1 on the diagonal
 CARD_HANDS = jnp.asarray(_CARD_HANDS_NP)  # (52, 51) hands containing each card
+_HAND_HAS_CARD_NP = np.zeros((NUM_HANDS, NUM_CARDS), np.float32)
+_HAND_HAS_CARD_NP[np.arange(NUM_HANDS)[:, None], _HAND_CARDS_NP] = 1.0
+HAND_HAS_CARD = jnp.asarray(_HAND_HAS_CARD_NP)  # (1326, 52) 0/1
 
 
 def hand_index(cards: IntArray) -> IntArray:
@@ -76,7 +79,7 @@ def normalize(x: FloatArray) -> FloatArray:
 
 def card_sums(x: FloatArray) -> FloatArray:
     """(..., 52): total weight of the hands holding each card."""
-    return jnp.take(x, CARD_HANDS, axis=-1).sum(axis=-1)
+    return jnp.matmul(x, HAND_HAS_CARD, precision=jax.lax.Precision.HIGHEST)
 
 
 def compatible_mass(x: FloatArray) -> FloatArray:

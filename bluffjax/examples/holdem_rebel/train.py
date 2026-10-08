@@ -28,6 +28,7 @@ train_gen_ratio).
 import datetime
 import os
 import time
+from functools import partial
 from typing import NamedTuple
 
 import jax
@@ -38,7 +39,7 @@ from jax import lax
 from bluffjax import make
 from bluffjax.examples.holdem_rebel.agent import (
     RebelPlayer,
-    heuristic_players,
+    heuristic_switch,
     load_rebel,
     play_match,
     save_checkpoint,
@@ -64,12 +65,12 @@ from bluffjax.examples.holdem_rebel.game import (
     round_root,
 )
 from bluffjax.examples.holdem_rebel.solver import (
-    Solution,
     ValueNetwork,
     add_cards,
     chance_children,
     chance_values,
-    solve_batch,
+    make_subgame,
+    solve,
 )
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 from bluffjax.utils.wandb_multilogger import WandbMultiLogger
@@ -140,7 +141,8 @@ def deal_next_street(
 
 def sample_leaf(
     tpl: Template,
-    sol: Solution,
+    policy: FloatArray,
+    tree,
     beliefs: FloatArray,
     explore_prob: float,
     rng: PRNGKeyArray,
@@ -151,7 +153,6 @@ def sample_leaf(
     explorer = jax.random.randint(k_br, (), 0, 2)
     children = jnp.asarray(tpl.children)
     internal_id = jnp.asarray(tpl.internal_id)
-    tree = sol.tree
     node = jnp.int32(0)
     for key in jax.random.split(k_walk, tpl.max_depth):
         k_u, k_a, k_r = jax.random.split(key, 3)
@@ -159,7 +160,7 @@ def sample_leaf(
         ni = jnp.maximum(internal_id[node], 0)
         legal = tree.legal[ni]
         actor = tree.actor[node]
-        probs = jnp.where(legal, sol.policy[ni, :, hands[actor]], 0.0)
+        probs = jnp.where(legal, policy[ni, :, hands[actor]], 0.0)
         probs = jnp.where(probs.sum() > 0, probs, legal * 1.0)
         explore = (actor == explorer) & (jax.random.uniform(k_u) < explore_prob)
         slot = jnp.where(
@@ -168,11 +169,43 @@ def sample_leaf(
             jax.random.categorical(k_a, jnp.log(probs)),
         )
         # Beliefs follow pi^t whether or not the action was exploratory.
-        updated = beliefs[actor] * sol.policy[ni, slot]
+        updated = beliefs[actor] * policy[ni, slot]
         updated = jnp.where(updated.sum() > 0, normalize(updated), beliefs[actor])
         beliefs = jnp.where(is_dec, beliefs.at[actor].set(updated), beliefs)
         node = jnp.where(is_dec, children[node, slot], node)
     return node, beliefs
+
+
+def masked_map(group_fn, active: BoolArray, args, group: int, sort_key=None):
+    """group_fn over the entries where `active`, `group` entries at a time.
+
+    group_fn maps batched args (leading axis `group`) to batched outputs.
+    Inactive entries get zeros. Only ceil(sum(active) / group) groups run, so
+    work is spent on active entries only. Entries are processed in order of
+    sort_key (e.g. river subgames last) so that groups are homogeneous.
+    """
+    n = active.shape[0]
+    key = jnp.zeros(n, jnp.int32) if sort_key is None else sort_key.astype(jnp.int32)
+    order = jnp.argsort(jnp.where(active, key, jnp.iinfo(jnp.int32).max), stable=True)
+    count = jnp.sum(active)
+    n_groups = -(-n // group)
+    padded = jnp.concatenate([order, jnp.zeros(n_groups * group - n, order.dtype)])
+    sample = jax.tree.map(lambda x: x[:group], args)
+    out = jax.tree.map(
+        lambda sh: jnp.zeros((n,) + sh.shape[1:], sh.dtype), jax.eval_shape(group_fn, sample)
+    )
+
+    def body(carry):
+        g, out = carry
+        idx = lax.dynamic_slice(padded, (g * group,), (group,))
+        valid = g * group + jnp.arange(group) < count
+        res = group_fn(jax.tree.map(lambda x: x[idx], args))
+        write = jnp.where(valid, idx, n)  # n = dropped
+        out = jax.tree.map(lambda o, r: o.at[write].set(r, mode="drop"), out, res)
+        return g + 1, out
+
+    _, out = lax.while_loop(lambda c: c[0] * group < count, body, (jnp.int32(0), out))
+    return out
 
 
 def make_self_play_step(game: HoldemGame, tpl: Template, net: ValueNetwork, cfg: dict):
@@ -180,101 +213,149 @@ def make_self_play_step(game: HoldemGame, tpl: Template, net: ValueNetwork, cfg:
     explore = float(cfg["explore_prob"])
     cfr_iters = int(cfg["cfr_iters"])
     chunk = int(cfg["solve_chunk"])
+    exact_group = 8  # games per group for exact all-in showdowns (52 boards each)
 
-    def solve_all(params, games: Games, rng):
+    def solve_games(params, games: Games, rng):
+        """Solve every game's betting-round subgame.
+
+        All games at street 0 are at the same initial PBS, so it is solved once
+        and each of those games draws its own iteration t from the shared
+        solve, which is the same as solving it separately for each game. Its
+        example is added once.
+        """
         value_fn = lambda pub, b: net.apply(params, pub, b)  # noqa: E731
-        k_solve, k_leaf = jax.random.split(rng)
-        roots = jax.vmap(lambda st, c: round_root(game, st, c))(games.street, games.chips)
-        sol, beliefs = solve_batch(
-            game, tpl, roots, games.board, games.beliefs, value_fn, k_solve,
-            cfr_iters, chunk,
+        k_root, k_solve, k_t = jax.random.split(rng, 3)
+        n = games.street.shape[0]
+        fresh = games.street == 0
+        root0 = round_root(game, jnp.int32(0), jnp.float32(0.0))
+        sg0 = make_subgame(
+            game, tpl, root0, -jnp.ones(5, jnp.int32),
+            jnp.full((2, NUM_HANDS), 1.0 / NUM_HANDS, jnp.float32), with_showdown=False,
         )
-        keys = jax.random.split(k_leaf, games.street.shape[0])
-        leaf, leaf_beliefs = jax.vmap(
-            lambda s, b, k: sample_leaf(tpl, s, b, explore, k)
-        )(sol, beliefs, keys)
+        shared = solve(game, tpl, sg0, value_fn, k_root, cfr_iters, "net", all_policies=True)
+
+        def one(root, board, beliefs, key, mode):
+            sg = make_subgame(game, tpl, root, board, beliefs, with_showdown=mode != "net")
+            sol = solve(game, tpl, sg, value_fn, key, cfr_iters, mode)
+            return sol.values, sol.value_mask, sol.policy, sol.tree, sg.beliefs
+
+        def group_fn(a):
+            return lax.cond(
+                jnp.any(a[0].street == 3),
+                lambda: jax.vmap(lambda *x: one(*x, "both"))(*a),
+                lambda: jax.vmap(lambda *x: one(*x, "net"))(*a),
+            )
+
+        roots = jax.vmap(lambda st, c: round_root(game, st, c))(games.street, games.chips)
+        keys = jax.random.split(k_solve, n)
+        values, mask, policy, tree, beliefs = masked_map(
+            group_fn, ~fresh, (roots, games.board, games.beliefs, keys), chunk,
+            sort_key=games.street == 3,
+        )
+        t = jax.random.categorical(
+            k_t, jnp.log(jnp.arange(1, cfr_iters + 1, dtype=jnp.float32)), shape=(n,)
+        )
+        pick = lambda a, b: jnp.where(  # noqa: E731
+            fresh.reshape((n,) + (1,) * (b.ndim - 1)), a, b
+        )
+        policy = pick(shared.policy[t], policy)
+        tree = jax.tree.map(lambda a, b: pick(jnp.broadcast_to(a, b.shape), b), shared.tree, tree)
+        beliefs = pick(jnp.broadcast_to(sg0.beliefs, beliefs.shape), beliefs)
         pub = jax.vmap(
             lambda st, b, c: public_features(game, st, b, False, False, c)
         )(games.street, games.board, roots.chips[:, 0])
-        valid = jnp.ones(games.street.shape[0], bool)
-        ex = Examples(pub, beliefs, sol.values, sol.value_mask, valid)
-        rows = jnp.arange(games.street.shape[0])
-        tree = sol.tree
-        return (
-            ex,
-            tree.kind[rows, leaf],
-            tree.chips[rows, leaf, 0],
-            tree.allin[rows, leaf],
-            leaf_beliefs,
+        ex = Examples(pub, beliefs, values, mask, ~fresh)
+        ex_root = Examples(
+            public_features(game, jnp.int32(0), -jnp.ones(5, jnp.int32), False, False, root0.chips[0])[None],
+            sg0.beliefs[None],
+            shared.values[None],
+            shared.value_mask[None],
+            jnp.any(fresh)[None],
         )
+        return ex, ex_root, policy, tree, beliefs, jnp.sum(~fresh) + 1
 
     def chance_level(params, street, board, chips, allin, beliefs, active, rng, flops):
-        """One chance node per game: example + deal. Arrays are batched (G,)."""
+        """One chance node per active game: an example, then deal the next cards."""
         value_fn = lambda pub, b: net.apply(params, pub, b)  # noqa: E731
-        g = street.shape[0]
+        n = street.shape[0]
         k_child, k_deal = jax.random.split(rng)
-        children = jax.vmap(lambda s, b, k: chance_children(s, b, k, flops))(
-            street, board, jax.random.split(k_child, g)
-        )
+        keys = jax.random.split(k_child, n)
+        board_mask = jax.vmap(
+            lambda b, st: hands_not_blocked(cards_onehot(jnp.where(b >= 0, b, 0), num_board_cards(st)))
+        )(board, street)
+        x = jax.vmap(normalize)(beliefs * board_mask[:, None, :])
 
-        def net_values(s, b, c, a, x, ch):
-            return chance_values(game, value_fn, s, b, c, a, x, ch, exact_showdown=False)
+        def values_fn(k_flops, exact):
+            def group_fn(a):
+                st, b, c, al, xx, kk = a
+                ch = jax.vmap(lambda s_, b_, k_: chance_children(s_, b_, k_, k_flops))(st, b, kk)
+                return jax.vmap(
+                    lambda *z: chance_values(game, value_fn, *z, exact_showdown=exact)
+                )(st, b, c, al, xx, ch)
 
-        def exact_values(s, b, c, a, x, ch):
-            return chance_values(game, value_fn, s, b, c, a, x, ch, exact_showdown=True)
+            return group_fn
 
-        args = (street, board, chips, allin, beliefs, children)
-        res = lax.map(lambda a: net_values(*a), args, batch_size=chunk)
+        args = (street, board, chips, allin, x, keys)
         exact = active & allin & (street == 2)
+        pre = active & (street == 0)
+        later = active & (street > 0) & ~exact
+        res = masked_map(values_fn(flops, False), pre, args, chunk)
+        res_later = masked_map(values_fn(1, False), later, args, chunk)
+        res = jax.tree.map(lambda a, b: jnp.where(later.reshape((n,) + (1,) * (a.ndim - 1)), b, a), res, res_later)
         if not game.is_limit:
-            res_exact = lax.cond(
-                jnp.any(exact),
-                lambda: lax.map(lambda a: exact_values(*a), args, batch_size=chunk),
-                lambda: res,
-            )
+            res_exact = masked_map(values_fn(1, True), exact, args, exact_group)
             res = jax.tree.map(
-                lambda e, r: jnp.where(exact.reshape((-1,) + (1,) * (e.ndim - 1)), e, r),
-                res_exact,
-                res,
+                lambda a, b: jnp.where(exact.reshape((n,) + (1,) * (a.ndim - 1)), b, a),
+                res, res_exact,
             )
         pub = jax.vmap(
-            lambda s, b, a, c: public_features(game, s, b, True, a, c)
+            lambda s_, b_, a_, c_: public_features(game, s_, b_, True, a_, c_)
         )(street, board, allin, chips)
-        board_mask = jax.vmap(lambda b, s: hands_not_blocked(
-            cards_onehot(jnp.where(b >= 0, b, 0), num_board_cards(s))))(board, street)
-        x = jax.vmap(normalize)(beliefs * board_mask[:, None, :])
         ex = Examples(pub, x, res.values, res.value_mask, active)
         new_board, new_beliefs = jax.vmap(deal_next_street)(
-            street, board, x, jax.random.split(k_deal, g)
+            street, board, x, jax.random.split(k_deal, n)
         )
         return ex, new_board, new_beliefs
 
     def step(params, games: Games, rng):
-        k_solve, k_c1, k_c2, k_c3 = jax.random.split(rng, 4)
-        ex0, kind, chips, allin, beliefs = solve_all(params, games, k_solve)
+        k_solve, k_leaf, k_c1, k_c2, k_c3 = jax.random.split(rng, 5)
+        n = games.street.shape[0]
+        ex0, ex_root, policy, tree, beliefs, n_solved = solve_games(params, games, k_solve)
+        leaf, beliefs = jax.vmap(
+            lambda p, t, b, k: sample_leaf(tpl, p, t, b, explore, k)
+        )(policy, tree, beliefs, jax.random.split(k_leaf, n))
+        rows = jnp.arange(n)
+        kind = tree.kind[rows, leaf]
+        chips = tree.chips[rows, leaf, 0]
+        allin = tree.allin[rows, leaf]
         street, board = games.street, games.board
         to_chance = (kind == ROUND_END) & (street < 3)
         ex1, board1, beliefs1 = chance_level(
             params, street, board, chips, allin, beliefs, to_chance, k_c1, num_flops
         )
-        a2 = to_chance & allin & (street + 1 < 3)
-        ex2, board2, beliefs2 = chance_level(
-            params, street + 1, board1, chips, allin, beliefs1, a2, k_c2, 1
-        )
-        a3 = a2 & (street + 2 < 3)
-        ex3, board3, beliefs3 = chance_level(
-            params, street + 2, board2, chips, allin, beliefs2, a3, k_c3, 1
-        )
+        examples = [ex0, ex_root, ex1]
+        if not game.is_limit:
+            # Both all-in: no more betting, follow the chance nodes to the river.
+            a2 = to_chance & allin & (street + 1 < 3)
+            ex2, board2, beliefs2 = chance_level(
+                params, street + 1, board1, chips, allin, beliefs1, a2, k_c2, num_flops
+            )
+            a3 = a2 & (street + 2 < 3)
+            ex3, _, _ = chance_level(
+                params, street + 2, board2, chips, allin, beliefs2, a3, k_c3, num_flops
+            )
+            examples += [ex2, ex3]
         cont = to_chance & ~allin
-        fresh = new_games(street.shape[0])
+        fresh = new_games(n)
         nxt = Games(
             street=jnp.where(cont, street + 1, fresh.street),
             board=jnp.where(cont[:, None], board1, fresh.board),
             chips=jnp.where(cont, chips, fresh.chips),
             beliefs=jnp.where(cont[:, None, None], beliefs1, fresh.beliefs),
         )
-        examples = jax.tree.map(lambda *xs: jnp.concatenate(xs), ex0, ex1, ex2, ex3)
+        examples = jax.tree.map(lambda *xs: jnp.concatenate(xs), *examples)
         stats = {
+            "subgames_solved": n_solved,
             "hands_finished": jnp.sum(~cont),
             "folds": jnp.sum(kind == FOLD),
             "allin_chains": jnp.sum(to_chance & allin),
@@ -384,7 +465,7 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
     step = make_self_play_step(game, tpl, net, cfg)
     steps_per_chunk = int(cfg["steps_per_chunk"])
 
-    @jax.jit
+    @partial(jax.jit, donate_argnums=(1, 2))
     def generate(params, games, buf, rng):
         def body(carry, key):
             games, buf = carry
@@ -397,20 +478,17 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
         return games, buf, jnp.sum(added), jax.tree.map(jnp.sum, stats)
 
     env = make(game.env_id, num_agents=2)
-    opponents = heuristic_players(game)
+    heuristics, heuristic_names = heuristic_switch(game)
+    eval_batch = int(cfg["eval_batch_deals"])
+    play_heuristic = jax.jit(
+        lambda p, idx, k: play_match(env, game, tpl_player, p, heuristics, idx, eval_batch, k)
+    )
+    play_checkpoint = None
     if cfg.get("compare_with"):
         ref_player, ref_params, _ = load_rebel(cfg["compare_with"], solve_chunk=cfg["solve_chunk"])
-        opponents["checkpoint"] = ref_player
-    else:
-        ref_params = None
-    eval_fns = {
-        name: jax.jit(
-            lambda p, k, opp=opp: play_match(
-                env, game, tpl_player, p, opp, ref_params, cfg["eval_deals"], k
-            )
+        play_checkpoint = jax.jit(
+            lambda p, k: play_match(env, game, tpl_player, p, ref_player, ref_params, eval_batch, k)
         )
-        for name, opp in opponents.items()
-    }
 
     logger = WandbMultiLogger(
         project=cfg["project"],
@@ -425,16 +503,26 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     save_path = os.path.join(cfg["save_dir"], f"{game.name}_rebel_{timestamp}.msgpack")
 
-    def evaluate(params, rng, deals_note=""):
+    def evaluate(params, rng, num_deals):
+        """Mirrored hands vs each opponent, in batches of eval_batch_deals deals."""
         out = {}
-        for name, fn in eval_fns.items():
-            rng, k = jax.random.split(rng)
-            res = summarize(jax.device_get(fn(params, k)))
+        opponents = [(name, i) for i, name in enumerate(heuristic_names)]
+        if play_checkpoint is not None:
+            opponents.append(("checkpoint", None))
+        for name, idx in opponents:
+            results = []
+            for _ in range(max(1, num_deals // eval_batch)):
+                rng, k = jax.random.split(rng)
+                if idx is None:
+                    results.append(jax.device_get(play_checkpoint(params, k)))
+                else:
+                    results.append(jax.device_get(play_heuristic(params, jnp.int32(idx), k)))
+            res = summarize(results)
             out[f"eval/{name}_mean"] = res["mean"]
             out[f"eval/{name}_se"] = res["se"]
             print(
-                f"  vs {name:13s}: {res['mean']:+.4f} +- {res['se']:.4f} per hand"
-                f" ({res['hands']} hands{deals_note}, unfinished {res['unfinished']})"
+                f"  vs {name:13s}: {res['mean']:+.4f} +- {res['se']:.4f} per hand "
+                f"({res['hands']} hands, re-solves {res['resolves']}, unfinished {res['unfinished']})"
             )
         return out
 
@@ -478,7 +566,7 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
             if samples >= next_eval or samples >= num_samples:
                 print(f"evaluation at {samples} samples ({elapsed / 60:.1f} min):")
                 rng, k_eval = jax.random.split(rng)
-                metrics.update(evaluate(params, k_eval))
+                metrics.update(evaluate(params, k_eval, cfg["eval_deals"]))
                 next_eval += float(cfg["eval_every"])
                 if cfg["save_final"]:
                     save_checkpoint(save_path, params, checkpoint_meta(game, cfg, samples))
@@ -488,19 +576,9 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
             print(f"Saved model to {save_path}")
         if cfg["final_eval_deals"]:
             print(f"final evaluation ({cfg['final_eval_deals']} deals, mirrored):")
-            final_fns = {
-                name: jax.jit(
-                    lambda p, k, opp=opp: play_match(
-                        env, game, tpl_player, p, opp, ref_params,
-                        cfg["final_eval_deals"], k,
-                    )
-                )
-                for name, opp in opponents.items()
-            }
-            eval_fns.clear()
-            eval_fns.update(final_fns)
             rng, k_eval = jax.random.split(rng)
-            logger.log(0, {f"final/{k[5:]}": v for k, v in evaluate(params, k_eval).items()})
+            final = evaluate(params, k_eval, cfg["final_eval_deals"])
+            logger.log(0, {f"final/{k[5:]}": v for k, v in final.items()})
         print(
             f"total {time.time() - t_start:.0f}s for {samples} samples "
             f"({(time.time() - t_start) / max(samples, 1) * 1e5:.1f}s per 1e5)"
