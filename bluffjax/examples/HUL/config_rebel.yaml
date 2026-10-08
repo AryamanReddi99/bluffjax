@@ -21,7 +21,7 @@ lr_halve_at: [0.5, 0.75]  # fractions of training at which the lr halves
 batch_size: 512
 train_ratio: 4  # trained examples per generated example
 grad_clip: 5.0
-replay_capacity: 131072  # FIFO; ~11 kB per example on the GPU
+replay_capacity: 131072  # FIFO, about 13.5 kB per example (1.8 GB) on the GPU
 
 # Evaluation: mirrored deals (each deal played from both seats)
 eval_every: 1e6  # samples
