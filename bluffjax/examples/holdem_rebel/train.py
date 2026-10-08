@@ -491,7 +491,9 @@ def _train(game: HoldemGame, cfg: dict, logger: WandbMultiLogger) -> str:
         )
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    save_path = os.path.join(cfg["save_dir"], f"{game.name}_rebel_{timestamp}.msgpack")
+    save_path = os.path.join(
+        cfg["save_dir"], f"{game.name}_rebel_seed{cfg['seed']}_{timestamp}.msgpack"
+    )
 
     def evaluate(params, rng, num_deals):
         """Mirrored hands vs each opponent, in batches of eval_batch_deals deals."""

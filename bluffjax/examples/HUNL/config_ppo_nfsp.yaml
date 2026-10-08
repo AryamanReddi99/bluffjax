@@ -34,7 +34,7 @@ env_kwargs:
 compare: true
 compare_mode: random  # "random" or "checkpoint"
 # ReBeL opponent, from hunl_rebel.py --config-name config_rebel_opponent, e.g.
-# ${repo_root:}/checkpoints/HUNL/hunl_rebel_<timestamp>.msgpack (+ .json alongside)
+# ${repo_root:}/checkpoints/HUNL/hunl_rebel_seed<seed>_<timestamp>.msgpack (+ .json alongside)
 compare_with: ""
 compare_network_type: rebel  # "rebel" (searches at test time) or "actor_critic"
 compare_cfr_iters: null  # ReBeL CFR iterations per subgame when acting; null = as trained

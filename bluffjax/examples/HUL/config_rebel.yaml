@@ -28,7 +28,7 @@ eval_every: 1e6  # samples
 eval_deals: 128  # per opponent at each evaluation
 final_eval_deals: 2048  # per opponent at the end
 eval_batch_deals: 128  # deals played at once (GPU memory)
-compare_with: ""  # also play this ReBeL checkpoint, e.g. ${repo_root:}/checkpoints/HUL/hul_rebel_<timestamp>.msgpack
+compare_with: ""  # also play this ReBeL checkpoint, e.g. ${repo_root:}/checkpoints/HUL/hul_rebel_seed<seed>_<timestamp>.msgpack
 
 log_every_chunks: 10
 save_final: true
