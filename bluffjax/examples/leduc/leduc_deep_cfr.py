@@ -17,6 +17,16 @@ and OpenSpiel's implementations (open_spiel/python/{jax,pytorch}/deep_cfr.py):
 - Linear CFR: every sample is weighted by the iteration t it was collected on,
   rescaled by 2 / T when training on iteration T (paper, Section 5.3).
 
+OpenSpiel's JAX and PyTorch versions skip training while a memory holds fewer
+samples than a batch; here the networks are trained on every iteration, with
+minibatches sampled with replacement.
+
+Defaults: 50 iterations of 100 traversals per player, 2 hidden layers of 64
+units, 200 advantage-network steps and memories of 100,000 samples, as in the
+BluffJAX paper; Adam with learning rate 1e-3 and gradient norms clipped to 1,
+as in the Deep CFR paper (Section 5.2); batches of 2048 and 5000
+policy-network steps, as in OpenSpiel's Deep CFR examples.
+
 Network inputs are OpenSpiel's leduc_poker information_state_tensor, which is
 perfect recall: each of the 936 infosets has a distinct tensor. Exploitability
 is exact, over the full game tree.
@@ -397,9 +407,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max_grad_norm", type=float, default=1.0, help="0 disables clipping"
     )
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=2048)
     parser.add_argument("--advantage_train_steps", type=int, default=200)
-    parser.add_argument("--policy_train_steps", type=int, default=2500)
+    parser.add_argument("--policy_train_steps", type=int, default=5000)
     parser.add_argument("--memory_capacity", type=int, default=100_000)
     parser.add_argument("--eval_every", type=int, default=5)
     parser.add_argument(
