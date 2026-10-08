@@ -364,6 +364,9 @@ def run_deep_cfr(config: argparse.Namespace) -> dict:
         if it == 1 or it % config.eval_every == 0 or it == config.iterations:
             eval_start = time.time()
             policy_params, loss = solver.learn_policy_network()
+            if it == config.iterations:
+                # Training the final policy network is part of the algorithm
+                eval_start = time.time()
             expl = exploitability(solver.average_policy(policy_params))
             eval_seconds += time.time() - eval_start
             results["iterations"].append(it)
@@ -373,8 +376,8 @@ def run_deep_cfr(config: argparse.Namespace) -> dict:
 
     results["final_exploitability"] = results["exploitability"][-1]
     results["runtime_seconds"] = time.time() - start
-    # Training the policy network at every evaluation is extra work that a run
-    # without intermediate evaluations doesn't do
+    # Intermediate policy networks and all exploitability computations, which a
+    # run without logging doesn't need
     results["eval_seconds"] = eval_seconds
     return results
 
