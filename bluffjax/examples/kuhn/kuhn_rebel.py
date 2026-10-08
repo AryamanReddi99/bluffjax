@@ -1,34 +1,66 @@
 """
 ReBeL (Recursive Belief-based Learning) for Kuhn Poker.
 
-Full pipeline: depth-limited subgames, CFR-D, value network, self-play.
-Training loop is fully jittable.
+Implements ReBeL from Brown, Bakhtin, Lerer and Gong, "Combining Deep
+Reinforcement Learning and Search for Imperfect-Information Games" (NeurIPS
+2020), following the authors' Liar's Dice code (facebookresearch/rebel,
+csrc/liars_dice):
 
-Combined from kuhn_rebel_tree, kuhn_rebel_core, and main training loop.
+- A public belief state (PBS) is a public betting history plus each player's
+  range: the normalized probability that they reach it with each private
+  card. With card removal the deal distribution at the PBS is proportional
+  to ranges[0, c0] * ranges[1, c1] for c0 != c1.
+- The value network maps a PBS to the value of every infostate in it:
+  values[i, c] is player i's expected return when holding card c, with the
+  opponent's card drawn from their range without c.
+- A subgame is rooted at a PBS and extends max_depth actions; non-terminal
+  nodes at the depth limit are leaves. It is solved with T iterations of
+  Linear CFR-D with alternating updates: in each half-step the leaf PBSs
+  follow from the current policy profile and the value network supplies the
+  leaf infostate values (CFR-D, not CFR-AVG).
+- The training target for the root PBS is the average of its infostate
+  values over the T iterations, weighted linearly as in Linear CFR.
+- Self play: sample a half-step, iteration t's with probability
+  proportional to t + 1, draw a deal from the root PBS and play that
+  half-step's policy profile down to a leaf, with one random player taking a
+  uniformly random action with probability random_action_prob. The leaf
+  PBS, with beliefs updated by the profile, is the root of the next
+  subgame. A terminal leaf ends the game.
+- At test time ReBeL plays the same way without exploration, sampling
+  iteration t and playing its profile. The expected policy of that random
+  procedure is computed exactly, by enumerating the sampled iterations and
+  weighting by reach, and its exploitability is logged.
+
+Deviations from the paper: there is no policy network or warm start, which
+the paper lists as optional. An action that a player's policy never takes
+with any card in their range leaves that player's range unchanged.
 """
 
 import datetime
-import itertools
+import json
+import os
+import time
 from typing import Callable, NamedTuple
 
 import flax.linen as nn
+from flax import serialization
+from flax.linen.initializers import constant, orthogonal
+from flax.training.train_state import TrainState
 import hydra
+from hydra.core.hydra_config import HydraConfig
 import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-from flax.linen.initializers import constant, orthogonal
-from flax.training.train_state import TrainState
 from omegaconf import OmegaConf
 import optax
 
-from bluffjax.utils.typing import FloatArray, IntArray, PRNGKeyArray
+from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 from bluffjax.utils.game_utils.kuhn_exploitability import (
     ACTION_BET,
     ACTION_PASS,
     exploitability,
     get_current_player,
-    get_legal_actions,
     get_returns,
     infoset_key,
     is_terminal,
@@ -36,17 +68,16 @@ from bluffjax.utils.game_utils.kuhn_exploitability import (
 from bluffjax.utils.paths import register_resolvers
 from bluffjax.utils.wandb_multilogger import WandbMultiLogger
 
-
 # =============================================================================
-# Tree structure
+# Public tree
 # =============================================================================
 
-NUM_DEALS = 6
-NUM_HISTORIES = 9
-NUM_INFOSETS = 12
+NUM_CARDS = 3
 NUM_ACTIONS = 2
-NUM_PUBLIC_STATES = 4  # "", "p", "b", "pb" (in subgame with max_depth=2)
+NUM_PLAYERS = 2
 
+# Every betting history of Kuhn Poker, parents before children. The public
+# state of Kuhn is its betting history, so these are the public tree's nodes.
 HISTORIES: tuple[tuple[int, ...], ...] = (
     (),
     (ACTION_PASS,),
@@ -58,716 +89,507 @@ HISTORIES: tuple[tuple[int, ...], ...] = (
     (ACTION_PASS, ACTION_BET, ACTION_PASS),
     (ACTION_PASS, ACTION_BET, ACTION_BET),
 )
+NUM_NODES = len(HISTORIES)
+ROOT_NODE = 0
+MAX_GAME_LENGTH = max(len(h) for h in HISTORIES)
 
-HISTORY_TO_IDX: dict[tuple[int, ...], int] = {h: i for i, h in enumerate(HISTORIES)}
-
-INFOSET_KEYS: tuple[str, ...] = (
-    "0",
-    "1",
-    "2",
-    "0p",
-    "1p",
-    "2p",
-    "0b",
-    "1b",
-    "2b",
-    "0pb",
-    "1pb",
-    "2pb",
+IS_TERMINAL = np.array([is_terminal(h) for h in HISTORIES])
+# Acting player at each node; 0 at terminal nodes, where it is never used.
+ACTING_PLAYER = np.array(
+    [0 if is_terminal(h) else get_current_player(h) for h in HISTORIES]
 )
+CHILD = np.zeros((NUM_NODES, NUM_ACTIONS), dtype=np.int32)
+PARENT = np.full(NUM_NODES, -1)
+PARENT_ACTION = np.full(NUM_NODES, -1)
+for _node, _history in enumerate(HISTORIES):
+    if _history:
+        PARENT[_node] = HISTORIES.index(_history[:-1])
+        PARENT_ACTION[_node] = _history[-1]
+        CHILD[PARENT[_node], _history[-1]] = _node
 
-INFOSET_KEY_TO_IDX: dict[str, int] = {k: i for i, k in enumerate(INFOSET_KEYS)}
-
-DEALS: np.ndarray = np.array(
-    list(itertools.permutations([0, 1, 2], 2)),
-    dtype=np.int32,
+# Non-terminal nodes are the public states a PBS can be at, in the order of
+# the value network's one-hot encoding.
+PUBLIC_STATES: tuple[int, ...] = tuple(
+    n for n in range(NUM_NODES) if not IS_TERMINAL[n]
 )
+PUBLIC_STATE_INDEX = np.zeros(NUM_NODES, dtype=np.int32)
+PUBLIC_STATE_INDEX[list(PUBLIC_STATES)] = np.arange(len(PUBLIC_STATES))
 
-PUBLIC_STATES: tuple[str, ...] = ("", "p", "b", "pb")
-PUBLIC_STATE_TO_IDX: dict[str, int] = {s: i for i, s in enumerate(PUBLIC_STATES)}
+# CARD_REMOVAL[c, o] = 1 if a player holding c can face an opponent holding o.
+CARD_REMOVAL = 1.0 - np.eye(NUM_CARDS, dtype=np.float32)
 
-IS_TERMINAL_ARR: np.ndarray = np.array(
-    [is_terminal(HISTORIES[i]) for i in range(NUM_HISTORIES)],
-    dtype=np.bool_,
-)
+# PAYOFF[i, n, c, o]: return of player i holding card c against an opponent
+# holding card o at terminal node n; 0 at non-terminal nodes and for c == o.
+PAYOFF = np.zeros((NUM_PLAYERS, NUM_NODES, NUM_CARDS, NUM_CARDS), np.float32)
+for _node in np.nonzero(IS_TERMINAL)[0]:
+    for _c0 in range(NUM_CARDS):
+        for _c1 in range(NUM_CARDS):
+            if _c0 != _c1:
+                _r0, _r1 = get_returns((_c0, _c1), HISTORIES[_node])
+                PAYOFF[0, _node, _c0, _c1] = _r0
+                PAYOFF[1, _node, _c1, _c0] = _r1
 
-
-def _depth(hist: tuple[int, ...]) -> int:
-    return len(hist)
-
-
-IS_LEAF_ARR: np.ndarray = np.array(
-    [
-        _depth(HISTORIES[i]) == 2 and not is_terminal(HISTORIES[i])
-        for i in range(NUM_HISTORIES)
-    ],
-    dtype=np.bool_,
-)
-
-CURRENT_PLAYER_ARR: np.ndarray = np.array(
-    [get_current_player(HISTORIES[i]) for i in range(NUM_HISTORIES)],
-    dtype=np.int32,
-)
-
-LEGAL_ACTIONS_ARR: np.ndarray = np.zeros((NUM_HISTORIES, NUM_ACTIONS), dtype=np.bool_)
-for i in range(NUM_HISTORIES):
-    legal = get_legal_actions(HISTORIES[i])
-    for a in legal:
-        LEGAL_ACTIONS_ARR[i, a] = True
-
-LEGAL_ACTIONS_INFOSET_ARR: np.ndarray = np.ones(
-    (NUM_INFOSETS, NUM_ACTIONS), dtype=np.bool_
-)
-
-CHILD_HIST_IDX: np.ndarray = np.full((NUM_HISTORIES, NUM_ACTIONS), -1, dtype=np.int32)
-for i in range(NUM_HISTORIES):
-    hist = HISTORIES[i]
-    if is_terminal(hist):
-        continue
-    for a in get_legal_actions(hist):
-        child = hist + (a,)
-        if child in HISTORY_TO_IDX:
-            CHILD_HIST_IDX[i, a] = HISTORY_TO_IDX[child]
+# Reach masses at or below this count as zero.
+PROB_EPS = 1e-12
 
 
-def _infoset_idx_for_node(deal_idx: int, hist_idx: int) -> int:
-    hands = tuple(DEALS[deal_idx])
-    hist = HISTORIES[hist_idx]
-    if is_terminal(hist):
-        return -1
-    cur = get_current_player(hist)
-    card = hands[cur]
-    key = infoset_key(card, hist)
-    return INFOSET_KEY_TO_IDX[key]
+class SubgameStructure(NamedTuple):
+    """Masks over public nodes of the subgame rooted at each node, [root, node]."""
+
+    decision: np.ndarray
+    leaf: np.ndarray
+    terminal: np.ndarray
 
 
-INFOSET_AT_NODE: np.ndarray = np.zeros((NUM_DEALS, NUM_HISTORIES), dtype=np.int32)
-for d in range(NUM_DEALS):
-    for h in range(NUM_HISTORIES):
-        INFOSET_AT_NODE[d, h] = _infoset_idx_for_node(d, h)
-
-RETURNS_ARR: np.ndarray = np.zeros((NUM_DEALS, NUM_HISTORIES, 2), dtype=np.float32)
-for d in range(NUM_DEALS):
-    for h in range(NUM_HISTORIES):
-        if IS_TERMINAL_ARR[h]:
-            r0, r1 = get_returns(tuple(DEALS[d]), HISTORIES[h])
-            RETURNS_ARR[d, h, 0] = r0
-            RETURNS_ARR[d, h, 1] = r1
-
-DEPTH_ORDER: list[int] = sorted(
-    range(NUM_HISTORIES), key=lambda i: _depth(HISTORIES[i])
-)
-REVERSE_DEPTH_ORDER: list[int] = list(reversed(DEPTH_ORDER))
-
-# Parent history index and action from parent (for reach computation)
-PARENT_HIST_IDX: np.ndarray = np.full(NUM_HISTORIES, -1, dtype=np.int32)
-ACTION_FROM_PARENT: np.ndarray = np.full(NUM_HISTORIES, -1, dtype=np.int32)
-for h in range(1, NUM_HISTORIES):
-    parent_hist = HISTORIES[h][:-1]
-    PARENT_HIST_IDX[h] = HISTORY_TO_IDX[parent_hist]
-    ACTION_FROM_PARENT[h] = HISTORIES[h][-1]
-
-
-# Subtree: IN_SUBTREE[root, h] = True if h is root or a descendant of root
-def _is_descendant(h: int, root: int) -> bool:
-    hr, hh = HISTORIES[root], HISTORIES[h]
-    if len(hh) < len(hr):
-        return False
-    return hh[: len(hr)] == hr
-
-
-IN_SUBTREE: np.ndarray = np.zeros((NUM_HISTORIES, NUM_HISTORIES), dtype=np.bool_)
-for root in range(NUM_HISTORIES):
-    for h in range(NUM_HISTORIES):
-        IN_SUBTREE[root, h] = _is_descendant(h, root)
-
-
-def get_jax_arrays() -> dict[str, jnp.ndarray]:
-    """Return dict of JAX arrays for tree structure."""
-    return {
-        "is_terminal": jnp.array(IS_TERMINAL_ARR),
-        "is_leaf": jnp.array(IS_LEAF_ARR),
-        "current_player": jnp.array(CURRENT_PLAYER_ARR),
-        "legal_actions": jnp.array(LEGAL_ACTIONS_ARR),
-        "legal_actions_infoset": jnp.array(LEGAL_ACTIONS_INFOSET_ARR),
-        "child_hist_idx": jnp.array(CHILD_HIST_IDX),
-        "infoset_at_node": jnp.array(INFOSET_AT_NODE),
-        "returns": jnp.array(RETURNS_ARR),
-        "deals": jnp.array(DEALS),
-        "reverse_depth_order": jnp.array(REVERSE_DEPTH_ORDER),
-        "parent_hist_idx": jnp.array(PARENT_HIST_IDX),
-        "action_from_parent": jnp.array(ACTION_FROM_PARENT),
-        "in_subtree": jnp.array(IN_SUBTREE),
-    }
+def subgame_structure(max_depth: int) -> SubgameStructure:
+    """
+    Subgames extending max_depth actions below their root. Non-terminal nodes
+    at the depth limit are leaves, valued by the value network.
+    """
+    if max_depth < 1:
+        raise ValueError(f"max_depth must be at least 1, got {max_depth}")
+    decision = np.zeros((NUM_NODES, NUM_NODES), dtype=bool)
+    leaf = np.zeros((NUM_NODES, NUM_NODES), dtype=bool)
+    terminal = np.zeros((NUM_NODES, NUM_NODES), dtype=bool)
+    for root, root_history in enumerate(HISTORIES):
+        for node, history in enumerate(HISTORIES):
+            depth = len(history) - len(root_history)
+            if history[: len(root_history)] != root_history or depth > max_depth:
+                continue
+            if IS_TERMINAL[node]:
+                terminal[root, node] = True
+            elif depth < max_depth:
+                decision[root, node] = True
+            else:
+                leaf[root, node] = True
+    return SubgameStructure(decision=decision, leaf=leaf, terminal=terminal)
 
 
 # =============================================================================
-# PBS, value network, CFR-D
+# Public belief states and the value network
 # =============================================================================
 
-PBS_INPUT_DIM = 11
-VALUE_OUTPUT_DIM = 6
+PBS_DIM = len(PUBLIC_STATES) + NUM_PLAYERS * NUM_CARDS
 
 
-class PBSState(NamedTuple):
-    """Public belief state: public_state_idx, beliefs for each player."""
+class PBS(NamedTuple):
+    """Public belief state: public node and both players' ranges, (2, 3)."""
 
-    public_state_idx: IntArray
-    belief_p0: FloatArray
-    belief_p1: FloatArray
+    node: IntArray
+    ranges: FloatArray
 
 
-def decode_pbs(enc: FloatArray) -> PBSState:
-    """Decode PBS from flat vector. enc shape (PBS_INPUT_DIM,)."""
-    pub_idx = jnp.argmax(enc[0:NUM_PUBLIC_STATES])
-    return PBSState(
-        public_state_idx=pub_idx.astype(jnp.int32),
-        belief_p0=enc[NUM_PUBLIC_STATES : NUM_PUBLIC_STATES + 3],
-        belief_p1=enc[NUM_PUBLIC_STATES + 3 : NUM_PUBLIC_STATES + 6],
+def initial_pbs() -> PBS:
+    return PBS(
+        node=jnp.int32(ROOT_NODE),
+        ranges=jnp.full((NUM_PLAYERS, NUM_CARDS), 1.0 / NUM_CARDS),
     )
 
 
-def encode_pbs(pbs: PBSState) -> FloatArray:
-    """Encode PBS as flat vector for value network input. Shape (PBS_INPUT_DIM,)."""
-    pub_oh = jax.nn.one_hot(pbs.public_state_idx, NUM_PUBLIC_STATES, dtype=jnp.float32)
-    acting = jnp.where(
-        (pbs.public_state_idx == 0) | (pbs.public_state_idx == 3),
-        jnp.float32(0.0),
-        jnp.float32(1.0),
-    ).reshape(1)
-    return jnp.concatenate([pub_oh, pbs.belief_p0, pbs.belief_p1, acting], axis=-1)
-
-
-def root_pbs() -> PBSState:
-    """Initial PBS at game root: uniform beliefs."""
-    return PBSState(
-        public_state_idx=jnp.int32(0),
-        belief_p0=jnp.ones(3, dtype=jnp.float32) / 3.0,
-        belief_p1=jnp.ones(3, dtype=jnp.float32) / 3.0,
+def encode_pbs(node: IntArray, ranges: FloatArray) -> FloatArray:
+    """Value network input: one-hot public state and both ranges."""
+    public_state = jax.nn.one_hot(
+        jnp.asarray(PUBLIC_STATE_INDEX)[node], len(PUBLIC_STATES)
     )
+    flat_ranges = ranges.reshape(ranges.shape[:-2] + (NUM_PLAYERS * NUM_CARDS,))
+    return jnp.concatenate([public_state, flat_ranges], axis=-1)
 
 
-def update_belief_after_action(
-    pbs: PBSState,
-    action: IntArray,
-    policy: FloatArray,
-) -> PBSState:
-    """Update belief when transitioning from parent to child via action."""
-    pub_idx = pbs.public_state_idx
-
-    def from_root():
-        def pass_action():
-            probs = policy[0:3, 0]
-            belief_p0_new = probs / (jnp.sum(probs) + 1e-8)
-            return PBSState(
-                public_state_idx=jnp.int32(1),
-                belief_p0=belief_p0_new,
-                belief_p1=jnp.ones(3, dtype=jnp.float32) / 3.0,
-            )
-
-        def bet_action():
-            probs = policy[0:3, 1]
-            belief_p0_new = probs / (jnp.sum(probs) + 1e-8)
-            return PBSState(
-                public_state_idx=jnp.int32(2),
-                belief_p0=belief_p0_new,
-                belief_p1=jnp.ones(3, dtype=jnp.float32) / 3.0,
-            )
-
-        return jax.lax.cond(action == 0, pass_action, bet_action)
-
-    def from_p():
-        def bet_action():
-            probs = policy[3:6, 1]
-            belief_p1_new = probs / (jnp.sum(probs) + 1e-8)
-            return PBSState(
-                public_state_idx=jnp.int32(3),
-                belief_p0=pbs.belief_p0,
-                belief_p1=belief_p1_new,
-            )
-
-        return jax.lax.cond(action == 1, bet_action, lambda: pbs)
-
-    return jax.lax.cond(
-        pub_idx == 0,
-        from_root,
-        lambda: jax.lax.cond(pub_idx == 1, from_p, lambda: pbs),
-    )
+def normalize_ranges(reach: FloatArray, fallback: FloatArray) -> FloatArray:
+    """
+    Bayes' rule over each player's card: normalizes reach probabilities,
+    (..., 2, 3), into ranges. A player whose reach is zero for every card,
+    which happens after an action the policy never takes, keeps the fallback
+    range.
+    """
+    total = jnp.sum(reach, axis=-1, keepdims=True)
+    reached = total > PROB_EPS
+    return jnp.where(reached, reach / jnp.where(reached, total, 1.0), fallback)
 
 
-class ValueNetworkMLP(nn.Module):
-    """MLP that maps PBS encoding to 6 infostate values (3 per player)."""
+class ValueNetwork(nn.Module):
+    """MLP mapping a PBS encoding to infostate values, (..., 2, 3)."""
 
-    hidden_dim: int = 64
+    hidden_dim: int = 128
 
     @nn.compact
     def __call__(self, x: FloatArray) -> FloatArray:
+        for _ in range(2):
+            x = nn.Dense(
+                self.hidden_dim,
+                kernel_init=orthogonal(np.sqrt(2)),
+                bias_init=constant(0.0),
+            )(x)
+            x = nn.LayerNorm()(x)
+            x = nn.gelu(x)
         x = nn.Dense(
-            self.hidden_dim,
-            kernel_init=orthogonal(np.sqrt(2)),
+            NUM_PLAYERS * NUM_CARDS,
+            kernel_init=orthogonal(0.01),
             bias_init=constant(0.0),
         )(x)
-        x = nn.relu(x)
-        x = nn.Dense(
-            self.hidden_dim,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(x)
-        x = nn.relu(x)
-        x = nn.Dense(
-            VALUE_OUTPUT_DIM,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(x)
-        return x
+        return x.reshape(x.shape[:-1] + (NUM_PLAYERS, NUM_CARDS))
 
 
-def regret_matching(regrets: FloatArray, legal_mask: FloatArray) -> FloatArray:
-    """Regret matching: strategy proportional to positive regrets."""
-    pos_regrets = jnp.maximum(regrets, 0.0)
-    pos_regrets = jnp.where(legal_mask, pos_regrets, 0.0)
-    total = jnp.sum(pos_regrets)
-    probs = jnp.where(
-        total > 1e-8,
-        pos_regrets / total,
-        jnp.where(legal_mask, 1.0 / (jnp.sum(legal_mask) + 1e-8), 0.0),
-    )
-    return probs
+# value_fn(nodes (K,), ranges (K, 2, 3)) -> infostate values (K, 2, 3)
+ValueFn = Callable[[IntArray, FloatArray], FloatArray]
 
 
-def _get_tree_arrays() -> dict:
-    arrs = get_jax_arrays()
-    arrs["deals"] = jnp.array(DEALS)
-    arrs["returns"] = jnp.array(RETURNS_ARR)
-    return arrs
+def network_value_fn(network: nn.Module, params) -> ValueFn:
+    def value_fn(nodes: IntArray, ranges: FloatArray) -> FloatArray:
+        return network.apply(params, encode_pbs(nodes, ranges))
+
+    return value_fn
 
 
-# Public state index -> history index: ""->0, "p"->1, "b"->2, "pb"->4
-PUBLIC_STATE_TO_HIST_IDX: tuple[int, ...] = (0, 1, 2, 4)
+# =============================================================================
+# Depth-limited subgame solving with Linear CFR-D
+# =============================================================================
 
 
-def _values_at_pbs_to_target(values: FloatArray, pub_state_idx: IntArray) -> FloatArray:
+class SubgameSolution(NamedTuple):
     """
-    Extract 6-dim value target for a PBS from the CFR values array.
-    values: (NUM_DEALS, NUM_HISTORIES, 2)
-    Returns [P0_card0, P0_card1, P0_card2, P1_card0, P1_card1, P1_card2].
+    profiles: (T, 2, 9, 3, 2) policy profile of player i's half-step on CFR
+        iteration t, (pi_0^t, pi_1^t) for i = 0 and (pi_0^(t+1), pi_1^t) for
+        i = 1. None if not kept.
+    policy_sum: (9, 3, 2) sum over t of (t + 1) * own reach * pi^t, the
+        unnormalized Linear CFR average policy.
+    values: (2, 3) linearly averaged root infostate values, 0 where masked.
+    value_mask: (2, 3) root infostates whose value is defined: the opponent
+        has nonzero range on the cards left after card removal.
     """
-    deals = jnp.array(DEALS)
-    hist_idx = jnp.take(
-        jnp.array(PUBLIC_STATE_TO_HIST_IDX),
-        jnp.int32(pub_state_idx),
-    )
-    v_p0 = values[:, hist_idx, 0]  # (6,)
-    v_p1 = values[:, hist_idx, 1]  # (6,)
-    cards_p0 = deals[:, 0]
-    cards_p1 = deals[:, 1]
 
-    # For each card c in {0,1,2}, average over deals where that player has card c
-    # Kuhn: each card appears exactly twice per player
-    def avg_p0(c):
-        mask = (cards_p0 == c).astype(jnp.float32)
-        return jnp.sum(v_p0 * mask) / jnp.maximum(jnp.sum(mask), 1.0)
+    profiles: FloatArray
+    policy_sum: FloatArray
+    values: FloatArray
+    value_mask: BoolArray
 
-    def avg_p1(c):
-        mask = (cards_p1 == c).astype(jnp.float32)
-        return jnp.sum(v_p1 * mask) / jnp.maximum(jnp.sum(mask), 1.0)
 
-    return jnp.array(
-        [
-            avg_p0(0),
-            avg_p0(1),
-            avg_p0(2),
-            avg_p1(0),
-            avg_p1(1),
-            avg_p1(2),
-        ],
-        dtype=jnp.float32,
+def iteration_weights(num_iterations: int) -> FloatArray:
+    """Linear CFR weight of iteration t = 0..T-1."""
+    return jnp.arange(1, num_iterations + 1, dtype=jnp.float32)
+
+
+def regret_matching(regrets: FloatArray) -> FloatArray:
+    """Policy proportional to positive regret, uniform if there is none."""
+    positive = jnp.maximum(regrets, 0.0)
+    total = jnp.sum(positive, axis=-1, keepdims=True)
+    return jnp.where(
+        total > 0.0,
+        positive / jnp.where(total > 0.0, total, 1.0),
+        1.0 / NUM_ACTIONS,
     )
 
 
-def cfr_d_one_iteration(
-    cumulative_regret: FloatArray,
-    cumulative_policy: FloatArray,
-    root_hist_idx: IntArray,
-    iteration: int,
-    linear_averaging: bool,
-) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray]:
-    """One CFR-D iteration. Returns (new_regret, new_cum_policy, root_values, values)."""
-    tree = _get_tree_arrays()
-    in_subtree = tree["in_subtree"]
-    legal_infoset = tree["legal_actions_infoset"]
-    is_terminal_arr = tree["is_terminal"]
-    current_player = tree["current_player"]
-    child_hist_idx = tree["child_hist_idx"]
-    infoset_at_node = tree["infoset_at_node"]
-    returns_arr = tree["returns"]
-    deals = tree["deals"]
-
-    policy = jax.vmap(
-        lambda r, m: regret_matching(r, m),
-        in_axes=(0, 0),
-    )(cumulative_regret, legal_infoset)
-
-    values = jnp.zeros((NUM_DEALS, NUM_HISTORIES, 2), dtype=jnp.float32)
-
-    def process_hist(values, h):
-        def term_case():
-            return values.at[:, h, :].set(returns_arr[:, h, :])
-
-        def internal_case():
-            # Use terminal returns from children (no value network at leaf)
-            def deal_body(d):
-                infoset = infoset_at_node[d, h]
-                ch = child_hist_idx[h, :]
-                ch_safe = jnp.maximum(ch, 0)
-                contrib0 = policy[infoset, :] * values[d, ch_safe, 0]
-                contrib1 = policy[infoset, :] * values[d, ch_safe, 1]
-                contrib0 = jnp.where(ch >= 0, contrib0, 0.0)
-                contrib1 = jnp.where(ch >= 0, contrib1, 0.0)
-                return jnp.sum(contrib0), jnp.sum(contrib1)
-
-            v0_arr, v1_arr = jax.vmap(deal_body)(jnp.arange(NUM_DEALS))
-            return values.at[:, h, 0].set(v0_arr).at[:, h, 1].set(v1_arr)
-
-        return jax.lax.cond(
-            is_terminal_arr[h],
-            term_case,
-            internal_case,
-        )
-
-    for h in REVERSE_DEPTH_ORDER:
-        values = process_hist(values, h)
-
-    # Compute reach probabilities for subgame rooted at root_hist_idx
-    parent_hist_idx_arr = tree["parent_hist_idx"]
-    action_from_parent_arr = tree["action_from_parent"]
-    reach_p0 = jnp.zeros((NUM_DEALS, NUM_HISTORIES), dtype=jnp.float32)
-    reach_p1 = jnp.zeros((NUM_DEALS, NUM_HISTORIES), dtype=jnp.float32)
-    reach_p0 = reach_p0.at[:, root_hist_idx].set(1.0)
-    reach_p1 = reach_p1.at[:, root_hist_idx].set(1.0)
-    for h in DEPTH_ORDER:
-        parent = parent_hist_idx_arr[h]
-        is_root = (h == root_hist_idx) | (parent < 0)
-        parent_in_subtree = jnp.where(
-            parent >= 0, in_subtree[root_hist_idx, parent], False
-        )
-        action = action_from_parent_arr[h]
-        parent_acting = current_player[parent]
-        infosets_at_parent = infoset_at_node[:, parent]
-        policy_probs = jnp.take(policy[:, action], infosets_at_parent)
-        r0_new = jnp.where(
-            parent_acting == 0,
-            reach_p0[:, parent] * policy_probs,
-            reach_p0[:, parent],
-        )
-        r1_new = jnp.where(
-            parent_acting == 1,
-            reach_p1[:, parent] * policy_probs,
-            reach_p1[:, parent],
-        )
-        use_parent = parent_in_subtree.astype(jnp.float32)
-        in_subtree_h = in_subtree[root_hist_idx, h].astype(jnp.float32)
-        r0_val = jnp.where(is_root, 1.0, use_parent * r0_new + (1 - use_parent) * 1.0)
-        r1_val = jnp.where(is_root, 1.0, use_parent * r1_new + (1 - use_parent) * 1.0)
-        reach_p0 = reach_p0.at[:, h].set(in_subtree_h * r0_val)
-        reach_p1 = reach_p1.at[:, h].set(in_subtree_h * r1_val)
-
-    def update_regrets_for_node(cr, cp, d, h):
-        in_sub = in_subtree[root_hist_idx, h]
-
-        def do_update():
-            cur = current_player[h]
-            infoset = infoset_at_node[d, h]
-            # CF reach: opponent's reach (matches kuhn_cfr.py)
-            opp_reach = jnp.where(cur == 0, reach_p1[d, h], reach_p0[d, h])
-            cf_reach = opp_reach
-            self_reach = jnp.where(cur == 0, reach_p0[d, h], reach_p1[d, h])
-            ch0, ch1 = child_hist_idx[h, 0], child_hist_idx[h, 1]
-            child_v0 = jnp.where(ch0 >= 0, values[d, ch0, cur], 0.0)
-            child_v1 = jnp.where(ch1 >= 0, values[d, ch1, cur], 0.0)
-            node_v = values[d, h, cur]
-            regret0 = jnp.where(
-                jnp.logical_and(legal_infoset[infoset, 0], ch0 >= 0),
-                cf_reach * (child_v0 - node_v),
-                0.0,
-            )
-            regret1 = jnp.where(
-                jnp.logical_and(legal_infoset[infoset, 1], ch1 >= 0),
-                cf_reach * (child_v1 - node_v),
-                0.0,
-            )
-            new_cr = cr.at[infoset, 0].add(regret0).at[infoset, 1].add(regret1)
-            w = jnp.where(
-                linear_averaging,
-                iteration * self_reach,
-                self_reach,
-            )
-            new_cp = (
-                cp.at[infoset, 0]
-                .add(w * policy[infoset, 0])
-                .at[infoset, 1]
-                .add(w * policy[infoset, 1])
-            )
-            return new_cr, new_cp
-
-        return jax.lax.cond(
-            jnp.logical_or(is_terminal_arr[h], jnp.logical_not(in_sub)),
-            lambda: (cr, cp),
-            do_update,
-        )
-
-    new_regret = cumulative_regret
-    new_cum_pol = cumulative_policy
-    for d in range(NUM_DEALS):
-        for h in range(NUM_HISTORIES):
-            new_regret, new_cum_pol = update_regrets_for_node(
-                new_regret, new_cum_pol, d, h
-            )
-
-    root_v0 = jnp.mean(values[:, root_hist_idx, 0])
-    root_v1 = jnp.mean(values[:, root_hist_idx, 1])
-    root_values = jnp.array([root_v0, root_v1], dtype=jnp.float32)
-    return new_regret, new_cum_pol, root_values, values
-
-
-def get_average_policy_from_cfr(
-    cumulative_policy: FloatArray,
-    legal: FloatArray,
-) -> FloatArray:
-    """Convert cumulative policy to average policy. Shape (NUM_INFOSETS, NUM_ACTIONS)."""
-    total = jnp.sum(cumulative_policy, axis=-1, keepdims=True)
-    avg = jnp.where(total > 1e-8, cumulative_policy / total, 0.5)
-    return jnp.where(legal, avg, 0.0)
-
-
-# Precomputed: for each infoset, expected terminal return for each action.
-# Action leads to terminal: use this value. Else: use value network.
-# (infoset_idx, action) -> (is_terminal, value_if_terminal)
-# Deal indices per infoset: acting player has card c -> deals where that player has c
-_INFOSET_DEAL_IDXS: list[tuple[int, ...]] = [
-    (0, 1),  # "0": P0 card 0 -> (0,1),(0,2)
-    (2, 3),  # "1": P0 card 1
-    (4, 5),  # "2": P0 card 2
-    (2, 4),  # "0p": P1 card 0
-    (0, 5),  # "1p": P1 card 1
-    (1, 3),  # "2p": P1 card 2
-    (2, 4),  # "0b"
-    (0, 5),  # "1b"
-    (1, 3),  # "2b"
-    (0, 1),  # "0pb": P0 card 0
-    (2, 3),  # "1pb"
-    (4, 5),  # "2pb"
-]
-# Terminal history index per (infoset, action). -1 means use value network.
-# Histories: pp=3, bp=4, bb=5, pbp=7, pbb=8
-_INFOSET_ACTION_TO_TERM_HIST: list[tuple[int, int]] = [
-    (-1, -1),  # "0": both use network
-    (-1, -1),  # "1"
-    (-1, -1),  # "2"
-    (3, -1),  # "0p": pass->pp, bet->pb (network)
-    (3, -1),  # "1p"
-    (3, -1),  # "2p"
-    (4, 5),  # "0b": pass->bp, bet->bb
-    (4, 5),  # "1b"
-    (4, 5),  # "2b"
-    (7, 8),  # "0pb": pass->pbp, bet->pbb
-    (7, 8),  # "1pb"
-    (7, 8),  # "2pb"
-]
-# Player per infoset: 0 for 0,1,2,9,10,11; 1 for 3,4,5,6,7,8
-_INFOSET_PLAYER: list[int] = [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0]
-_INFOSET_CARD: list[int] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
-
-
-def _terminal_value(infoset_idx: int, action: int) -> float:
-    """Expected return for (infoset, action) when action leads to terminal."""
-    hist = _INFOSET_ACTION_TO_TERM_HIST[infoset_idx][action]
-    if hist < 0:
-        return 0.0  # Unused
-    deal_idxs = _INFOSET_DEAL_IDXS[infoset_idx]
-    player = _INFOSET_PLAYER[infoset_idx]
-    total = 0.0
-    for d in deal_idxs:
-        total += RETURNS_ARR[d, hist, player]
-    return total / len(deal_idxs)
-
-
-TERMINAL_ACTION_VALUES: np.ndarray = np.zeros(
-    (NUM_INFOSETS, NUM_ACTIONS), dtype=np.float32
-)
-for i in range(NUM_INFOSETS):
-    for a in range(NUM_ACTIONS):
-        if _INFOSET_ACTION_TO_TERM_HIST[i][a] >= 0:
-            TERMINAL_ACTION_VALUES[i, a] = _terminal_value(i, a)
-
-
-def policy_from_value_network(
-    network: nn.Module,
-    params: dict,
+def compute_reaches(
+    policy: FloatArray,
+    root: IntArray,
+    ranges: FloatArray,
+    decision: BoolArray,
 ) -> FloatArray:
     """
-    Greedy policy: at each infoset, take action that maximizes value (from network
-    or terminal returns). Uses uniform beliefs for PBS encoding.
+    reach[i, n, c]: probability that player i holds card c under `ranges` and
+    plays from the subgame root to node n. Zero outside the subgame.
     """
-    uniform = jnp.ones(3, dtype=jnp.float32) / 3.0
-    pbs_p = PBSState(
-        public_state_idx=jnp.int32(1),
-        belief_p0=uniform,
-        belief_p1=uniform,
-    )
-    pbs_b = PBSState(
-        public_state_idx=jnp.int32(2),
-        belief_p0=uniform,
-        belief_p1=uniform,
-    )
-    pbs_pb = PBSState(
-        public_state_idx=jnp.int32(3),
-        belief_p0=uniform,
-        belief_p1=uniform,
-    )
-    enc_p = encode_pbs(pbs_p)
-    enc_b = encode_pbs(pbs_b)
-    enc_pb = encode_pbs(pbs_pb)
-    v_p = network.apply(params, enc_p)
-    v_b = network.apply(params, enc_b)
-    v_pb = network.apply(params, enc_pb)
-
-    term_vals = jnp.array(TERMINAL_ACTION_VALUES)
-    legal = _get_tree_arrays()["legal_actions_infoset"]
-
-    # For each infoset: value of pass (action 0) and bet (action 1)
-    # Infosets 0,1,2: pass->v_p, bet->v_b
-    # Infosets 3,4,5: pass->term, bet->v_pb (P1: val_idx 3,4,5)
-    # Infosets 6,7,8: pass->term, bet->term
-    # Infosets 9,10,11: pass->term, bet->term
-    v_pass = jnp.concatenate(
-        [
-            v_p[:3],
-            term_vals[3:6, 0],
-            term_vals[6:9, 0],
-            term_vals[9:12, 0],
-        ]
-    )
-    v_bet = jnp.concatenate(
-        [
-            v_b[:3],
-            v_pb[3:6],
-            term_vals[6:9, 1],
-            term_vals[9:12, 1],
-        ]
-    )
-
-    best = jnp.argmax(jnp.stack([v_pass, v_bet], axis=-1), axis=-1)
-    policy = jnp.eye(NUM_ACTIONS, dtype=jnp.float32)[best]
-    policy = jnp.where(legal, policy, 0.0)
-    row_sum = jnp.sum(policy, axis=-1, keepdims=True)
-    policy = jnp.where(row_sum > 1e-8, policy / row_sum, 0.5)
-    return jnp.where(legal, policy, 0.0)
+    rows = []
+    for n in range(NUM_NODES):
+        if n == ROOT_NODE:
+            below = jnp.zeros_like(ranges)
+        else:
+            parent = PARENT[n]
+            factor = (
+                jnp.ones_like(ranges)
+                .at[ACTING_PLAYER[parent]]
+                .set(policy[parent, :, PARENT_ACTION[n]])
+            )
+            below = jnp.where(decision[parent], rows[parent] * factor, 0.0)
+        rows.append(jnp.where(root == n, ranges, below))
+    return jnp.stack(rows, axis=1)
 
 
-def policy_from_value_params(
-    num_cfr_iterations: int = 64,
+def opponent_mass(reach: FloatArray) -> FloatArray:
+    """mass[i, ..., c]: opponent reach on the cards other than c."""
+    return jnp.einsum("i...o,co->i...c", reach[::-1], CARD_REMOVAL)
+
+
+def counterfactual_values(
+    policy: FloatArray,
+    reach: FloatArray,
+    leaf_values: FloatArray,
+    decision: BoolArray,
+    leaf: BoolArray,
+    terminal: BoolArray,
 ) -> FloatArray:
-    """Run CFR-D from game root and return average policy (12, 2)."""
-    _, cum_pol, _, _ = run_cfr_d(
-        root_hist_idx=jnp.int32(0),
-        num_iterations=num_cfr_iterations,
-        linear_averaging=True,
-    )
-    tree = _get_tree_arrays()
-    return get_average_policy_from_cfr(cum_pol, tree["legal_actions_infoset"])
+    """
+    values[i, n, c]: counterfactual value of player i holding card c at node
+    n, the sum over opponent cards o != c of the opponent's reach times player
+    i's expected return. At leaves the value network's infostate values,
+    leaf_values[n, i, c], are scaled by the opponent's reach on the cards
+    other than c.
+    """
+    terminal_values = jnp.einsum("inco,ino->inc", PAYOFF, reach[::-1])
+    leaf_cfv = opponent_mass(reach) * jnp.swapaxes(leaf_values, 0, 1)
+    rows: list = [None] * NUM_NODES
+    for n in reversed(range(NUM_NODES)):
+        if IS_TERMINAL[n]:
+            rows[n] = jnp.where(terminal[n], terminal_values[:, n], 0.0)
+            continue
+        children = jnp.stack([rows[CHILD[n, a]] for a in range(NUM_ACTIONS)], -1)
+        weights = jnp.ones_like(children).at[ACTING_PLAYER[n]].set(policy[n])
+        internal = jnp.sum(children * weights, axis=-1)
+        rows[n] = jnp.where(
+            leaf[n], leaf_cfv[:, n], jnp.where(decision[n], internal, 0.0)
+        )
+    return jnp.stack(rows, axis=1)
 
 
-def run_cfr_d(
-    root_hist_idx: IntArray,
+def instantaneous_regrets(values: FloatArray, decision: BoolArray) -> FloatArray:
+    """regrets[n, c, a]: acting player's value of a minus their value at n."""
+    rows = []
+    for n in range(NUM_NODES):
+        player = ACTING_PLAYER[n]
+        child_values = values[player][CHILD[n]].T
+        rows.append(
+            jnp.where(decision[n], child_values - values[player, n][:, None], 0.0)
+        )
+    return jnp.stack(rows)
+
+
+def solve_subgame(
+    pbs: PBS,
+    value_fn: ValueFn,
+    structure: SubgameStructure,
     num_iterations: int,
-    linear_averaging: bool = True,
-) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray]:
-    """Run CFR-D for num_iterations from root_hist_idx. Returns (final_regret, final_cum_policy, root_values_avg, final_values)."""
-    cumulative_regret = jnp.zeros((NUM_INFOSETS, NUM_ACTIONS), dtype=jnp.float32)
-    cumulative_policy = jnp.zeros((NUM_INFOSETS, NUM_ACTIONS), dtype=jnp.float32)
-    root_values_sum = jnp.zeros(2, dtype=jnp.float32)
+    leaf_nodes: tuple[int, ...],
+    keep_profiles: bool = True,
+) -> SubgameSolution:
+    """
+    Linear CFR-D with alternating updates in the subgame rooted at pbs. On
+    iteration t player 0 and then player 1 update their regrets with weight
+    t + 1, each from the current profile, whose leaf PBSs are valued by
+    value_fn. leaf_nodes are the nodes value_fn is queried at; every leaf of
+    the subgame must be among them. keep_profiles stores every half-step's
+    profile.
+    """
+    decision = jnp.asarray(structure.decision)[pbs.node]
+    leaf = jnp.asarray(structure.leaf)[pbs.node]
+    terminal = jnp.asarray(structure.terminal)[pbs.node]
+    leaf_index = jnp.asarray(leaf_nodes, dtype=jnp.int32)
+    own_range = jnp.ones_like(pbs.ranges)
+    root_mass = opponent_mass(pbs.ranges)
+    value_mask = root_mass > PROB_EPS
 
-    def body(carry, t):
-        cum_reg, cum_pol, rv_sum = carry
-        it = t + 1
-        new_reg, new_pol, rv, values = cfr_d_one_iteration(
-            cum_reg, cum_pol, root_hist_idx, it, linear_averaging
+    def half_step(player: int, regrets, policy_sum, value_sum, profile, weight):
+        # Player's regrets, average policy and root values from `profile`.
+        player_nodes = decision & (jnp.asarray(ACTING_PLAYER) == player)
+        reach = compute_reaches(profile, pbs.node, pbs.ranges, decision)
+        leaf_values = jnp.zeros((NUM_NODES, NUM_PLAYERS, NUM_CARDS))
+        if leaf_nodes:
+            leaf_ranges = normalize_ranges(
+                jnp.swapaxes(reach[:, leaf_index], 0, 1), pbs.ranges
+            )
+            leaf_values = leaf_values.at[leaf_index].set(
+                value_fn(leaf_index, leaf_ranges)
+            )
+        values = counterfactual_values(
+            profile, reach, leaf_values, decision, leaf, terminal
         )
-        rv_sum = rv_sum + rv
-        return (new_reg, new_pol, rv_sum), (rv, values)
+        regrets = regrets + weight * instantaneous_regrets(values, player_nodes)
+        own_reach = compute_reaches(profile, pbs.node, own_range, decision)
+        policy_sum = policy_sum + weight * jnp.where(
+            player_nodes[:, None, None], own_reach[player][..., None] * profile, 0.0
+        )
+        root_values = values[player, pbs.node] / jnp.where(
+            value_mask[player], root_mass[player], 1.0
+        )
+        value_sum = value_sum.at[player].add(weight * root_values)
+        return regrets, policy_sum, value_sum
 
-    (final_reg, final_pol, rv_sum), (_, values_history) = jax.lax.scan(
-        body,
-        (cumulative_regret, cumulative_policy, root_values_sum),
-        jnp.arange(num_iterations),
+    def iteration(carry, t):
+        regrets, policy_sum, value_sum = carry
+        weight = (t + 1).astype(jnp.float32)
+        profile_p0 = regret_matching(regrets)
+        regrets, policy_sum, value_sum = half_step(
+            0, regrets, policy_sum, value_sum, profile_p0, weight
+        )
+        # Player 0's new policy, player 1's current one.
+        profile_p1 = jnp.where(
+            (jnp.asarray(ACTING_PLAYER) == 0)[:, None, None],
+            regret_matching(regrets),
+            profile_p0,
+        )
+        regrets, policy_sum, value_sum = half_step(
+            1, regrets, policy_sum, value_sum, profile_p1, weight
+        )
+        profiles = jnp.stack([profile_p0, profile_p1]) if keep_profiles else None
+        return (regrets, policy_sum, value_sum), profiles
+
+    zeros = jnp.zeros((NUM_NODES, NUM_CARDS, NUM_ACTIONS))
+    init = (zeros, zeros, jnp.zeros((NUM_PLAYERS, NUM_CARDS)))
+    (_, policy_sum, value_sum), profiles = lax.scan(
+        iteration, init, jnp.arange(num_iterations)
     )
-    root_values_avg = rv_sum / num_iterations
-    final_values = values_history[-1]
-    return final_reg, final_pol, root_values_avg, final_values
+    values = jnp.where(
+        value_mask, value_sum / jnp.sum(iteration_weights(num_iterations)), 0.0
+    )
+    return SubgameSolution(
+        profiles=profiles,
+        policy_sum=policy_sum,
+        values=values,
+        value_mask=value_mask,
+    )
 
 
-def selfplay_step(
-    pbs: PBSState,
+def sample_profile(
+    rng: PRNGKeyArray, solution: SubgameSolution, num_iterations: int
+) -> FloatArray:
+    """
+    Policy profile of a random half-step, iteration t's chosen with
+    probability proportional to t + 1. Self play samples among all half-steps
+    so that every leaf PBS the search queries can become a subgame root.
+    """
+    weights = jnp.repeat(iteration_weights(num_iterations), NUM_PLAYERS)
+    step = jax.random.categorical(rng, jnp.log(weights))
+    return solution.profiles[step // NUM_PLAYERS, step % NUM_PLAYERS]
+
+
+def sample_deal(rng: PRNGKeyArray, ranges: FloatArray) -> IntArray:
+    """Cards (c0, c1) from the PBS deal distribution, with card removal."""
+    joint = ranges[0][:, None] * ranges[1][None, :] * CARD_REMOVAL
+    joint = jnp.where(jnp.sum(joint) > PROB_EPS, joint, CARD_REMOVAL)
+    deal = jax.random.categorical(rng, jnp.log(joint.reshape(-1)))
+    return jnp.stack([deal // NUM_CARDS, deal % NUM_CARDS])
+
+
+def sample_leaf(
     rng: PRNGKeyArray,
-    num_cfr_iterations: int,
+    pbs: PBS,
+    policy: FloatArray,
+    structure: SubgameStructure,
     random_action_prob: float,
-) -> tuple[FloatArray, FloatArray, PBSState, IntArray]:
-    """One self-play step: solve subgame rooted at pbs, collect data, sample leaf."""
-    root_hist_idx = jnp.take(
-        jnp.array(PUBLIC_STATE_TO_HIST_IDX),
-        jnp.int32(pbs.public_state_idx),
+) -> PBS:
+    """
+    ReBeL's SampleLeaf: draws a deal from pbs and plays `policy` from the
+    subgame root to a leaf or terminal node. A random player takes a uniform
+    random action with probability random_action_prob at each of their
+    decisions. Beliefs at the reached node follow from `policy` alone.
+    """
+    rng_explorer, rng_deal, rng_walk = jax.random.split(rng, 3)
+    explorer = jax.random.randint(rng_explorer, (), 0, NUM_PLAYERS)
+    deal = sample_deal(rng_deal, pbs.ranges)
+    decision = jnp.asarray(structure.decision)[pbs.node]
+    node = pbs.node
+    for rng_step in jax.random.split(rng_walk, MAX_GAME_LENGTH):
+        rng_explore, rng_random, rng_policy = jax.random.split(rng_step, 3)
+        player = jnp.asarray(ACTING_PLAYER)[node]
+        explore = (player == explorer) & (
+            jax.random.uniform(rng_explore) < random_action_prob
+        )
+        action = jnp.where(
+            explore,
+            jax.random.randint(rng_random, (), 0, NUM_ACTIONS),
+            jax.random.categorical(rng_policy, jnp.log(policy[node, deal[player]])),
+        )
+        node = jnp.where(decision[node], jnp.asarray(CHILD)[node, action], node)
+    reach = compute_reaches(policy, pbs.node, pbs.ranges, decision)
+    return PBS(node=node, ranges=normalize_ranges(reach[:, node], pbs.ranges))
+
+
+# =============================================================================
+# Test-time policy
+# =============================================================================
+
+
+def test_time_policy(
+    value_fn: ValueFn,
+    structure: SubgameStructure,
+    num_iterations: int,
+) -> FloatArray:
+    """
+    Expected behavior policy, (9, 3, 2), of ReBeL at test time: at every
+    public state reached it solves the subgame rooted at the current PBS,
+    samples an iteration t with probability proportional to t + 1, plays
+    pi^t = (pi_0^t, pi_1^t) and passes the beliefs of pi^t on to the next
+    subgame, as the authors' evaluation does. The sampled iterations are
+    enumerated exactly; each player's policy is the average over them
+    weighted by the player's own reach.
+    """
+    weights = iteration_weights(num_iterations)
+    probs = weights / jnp.sum(weights)
+    numerator = jnp.zeros((NUM_NODES, NUM_CARDS, NUM_ACTIONS))
+    denominator = jnp.zeros((NUM_NODES, NUM_CARDS))
+
+    def expand(root: int, ranges: FloatArray, weight: FloatArray, own: FloatArray):
+        # A batch of PBSs at public node `root`: ranges (N, 2, 3), probability
+        # of the iterations sampled so far (N,) and each player's own reach
+        # from the start of the game (N, 2, 3).
+        nonlocal numerator, denominator
+        leaf_nodes = tuple(int(n) for n in np.nonzero(structure.leaf[root])[0])
+        solution = jax.vmap(
+            lambda r: solve_subgame(
+                PBS(jnp.int32(root), r),
+                value_fn,
+                structure,
+                num_iterations,
+                leaf_nodes,
+                keep_profiles=bool(leaf_nodes),
+            )
+        )(ranges)
+        # Inside the subgame the reach-weighted average over the sampled
+        # iteration is the Linear CFR average policy.
+        scale = weight / jnp.sum(weights)
+        for n in np.nonzero(structure.decision[root])[0]:
+            played = (
+                scale[:, None, None]
+                * own[:, ACTING_PLAYER[n], :, None]
+                * solution.policy_sum[:, n]
+            )
+            numerator = numerator.at[n].add(jnp.sum(played, axis=0))
+            denominator = denominator.at[n].add(jnp.sum(played, axis=(0, 2)))
+        if not leaf_nodes:
+            return
+        decision = jnp.asarray(structure.decision[root])
+        reaches = jax.vmap(
+            jax.vmap(compute_reaches, in_axes=(0, None, None, None)),
+            in_axes=(0, None, 0, None),
+        )
+        profiles = solution.profiles[:, :, 0]
+        reach = reaches(profiles, root, ranges, decision)
+        own_reach = reaches(profiles, root, jnp.ones_like(ranges), decision)
+        batch = ranges.shape[0] * num_iterations
+        for z in leaf_nodes:
+            child_ranges = normalize_ranges(reach[:, :, :, z], ranges[:, None])
+            child_weight = weight[:, None] * probs[None, :]
+            child_own = own[:, None] * own_reach[:, :, :, z]
+            expand(
+                z,
+                child_ranges.reshape(batch, NUM_PLAYERS, NUM_CARDS),
+                child_weight.reshape(batch),
+                child_own.reshape(batch, NUM_PLAYERS, NUM_CARDS),
+            )
+
+    start = initial_pbs()
+    expand(
+        ROOT_NODE,
+        start.ranges[None],
+        jnp.ones(1),
+        jnp.ones((1, NUM_PLAYERS, NUM_CARDS)),
     )
-    cum_reg, cum_pol, _, final_values = run_cfr_d(
-        root_hist_idx=root_hist_idx,
-        num_iterations=num_cfr_iterations,
-        linear_averaging=True,
+    reached = denominator[..., None] > 0.0
+    return jnp.where(
+        reached, numerator / jnp.where(reached, denominator[..., None], 1.0), 0.5
     )
-    legal = _get_tree_arrays()["legal_actions_infoset"]
-    policy = jax.vmap(
-        lambda r, m: regret_matching(r, m),
-        in_axes=(0, 0),
-    )(cum_reg, legal)
 
-    current_pbs = pbs
-    pbs_enc = encode_pbs(current_pbs)
 
-    # Use PBS-specific values as target (per ReBeL: add {βr, v(βr)} for root of subgame)
-    values_target = _values_at_pbs_to_target(final_values, current_pbs.public_state_idx)
-
-    rng, rng_act0, rng_act1, rng_act2, rng_act3, rng_act4 = jax.random.split(rng, 6)
-    explore0 = jax.random.bernoulli(rng_act0, random_action_prob)
-
-    infoset0 = jax.random.randint(rng_act1, (), 0, 3)
-    probs0 = policy[infoset0]
-    probs0 = jnp.where(legal[infoset0], probs0, 0.0)
-    probs0 = probs0 / (jnp.sum(probs0) + 1e-8)
-    action0_policy = jax.random.categorical(rng_act2, jnp.log(probs0 + 1e-8))
-    action0_random = jax.random.randint(rng_act3, (), 0, NUM_ACTIONS)
-    action0 = jnp.where(explore0, action0_random, action0_policy)
-
-    next_pbs = update_belief_after_action(current_pbs, action0, policy)
-
-    def from_p_sample():
-        rng_a, rng_b = jax.random.split(rng_act4)
-        explore1 = jax.random.bernoulli(rng_a, random_action_prob)
-        infoset1 = 3 + jax.random.randint(rng_b, (), 0, 3)
-        probs1 = policy[infoset1]
-        probs1 = jnp.where(legal[infoset1], probs1, 0.0)
-        probs1 = probs1 / (jnp.sum(probs1) + 1e-8)
-        rng_c, rng_d = jax.random.split(rng_b)
-        act_pol = jax.random.categorical(rng_c, jnp.log(probs1 + 1e-8))
-        act_rand = jax.random.randint(rng_d, (), 0, NUM_ACTIONS)
-        act = jnp.where(explore1, act_rand, act_pol)
-        return update_belief_after_action(next_pbs, act, policy)
-
-    next_pbs = jax.lax.cond(
-        next_pbs.public_state_idx == 1,
-        from_p_sample,
-        lambda: next_pbs,
-    )
-    is_terminal_val = next_pbs.public_state_idx == 2
-    return pbs_enc, values_target, next_pbs, is_terminal_val.astype(jnp.int32)
+def policy_exploitability(policy: np.ndarray) -> float:
+    """Exploitability of a (9, 3, 2) policy over (public node, card)."""
+    policy = np.asarray(policy, dtype=np.float64)
+    table = {
+        infoset_key(card, HISTORIES[node]): policy[node, card]
+        / policy[node, card].sum()
+        for node in PUBLIC_STATES
+        for card in range(NUM_CARDS)
+    }
+    return float(exploitability(lambda key: table[key]))
 
 
 # =============================================================================
@@ -775,226 +597,214 @@ def selfplay_step(
 # =============================================================================
 
 
-class ReplayBufferState(NamedTuple):
-    pbs: FloatArray
-    values: FloatArray
-    seen: IntArray
+class ReplayBuffer(NamedTuple):
+    """Circular buffer of (PBS encoding, infostate values, value mask)."""
+
+    inputs: FloatArray
+    targets: FloatArray
+    masks: BoolArray
+    position: IntArray
     size: IntArray
 
 
 class RunnerState(NamedTuple):
-    value_train_state: TrainState
-    replay_buffer: ReplayBufferState
-    pbs_root: FloatArray
+    train_state: TrainState
+    replay_buffer: ReplayBuffer
+    pbs: PBS
     update_step: IntArray
     rng: PRNGKeyArray
 
 
-def huber_loss(x: FloatArray, delta: float = 1.0) -> FloatArray:
-    """Huber loss for value network (per ReBeL paper)."""
-    abs_x = jnp.abs(x)
-    return jnp.where(
-        abs_x <= delta,
-        0.5 * x * x,
-        delta * (abs_x - 0.5 * delta),
-    )
-
-
-def make_train(config: dict) -> Callable[[PRNGKeyArray, IntArray], RunnerState]:
+def make_train(
+    config: dict,
+) -> Callable[[PRNGKeyArray, IntArray], tuple[RunnerState, dict]]:
+    structure = subgame_structure(config["max_depth"])
+    # Nodes that are a leaf of some subgame; the value network is queried
+    # there on every CFR iteration of self play.
+    leaf_nodes = tuple(int(n) for n in np.nonzero(structure.leaf.any(axis=0))[0])
+    num_iterations = config["cfr_iterations"]
+    num_subgames = config["num_subgames_per_update"]
     capacity = config["replay_capacity"]
     batch_size = config["batch_size"]
-    num_subgames_per_update = config["num_subgames_per_update"]
-    num_value_train_steps = config["num_value_train_steps"]
-    cfr_iterations = config["cfr_iterations"]
-    random_action_prob = config["random_action_prob"]
+    log_interval = config["log_interval"]
+    if capacity < num_subgames:
+        raise ValueError("replay_capacity must be at least num_subgames_per_update")
+    if config["num_update_steps"] % log_interval != 0:
+        raise ValueError("num_update_steps must be a multiple of log_interval")
 
-    def init_replay_buffer() -> ReplayBufferState:
-        return ReplayBufferState(
-            pbs=jnp.zeros((capacity, PBS_INPUT_DIM), dtype=jnp.float32),
-            values=jnp.zeros((capacity, VALUE_OUTPUT_DIM), dtype=jnp.float32),
-            seen=jnp.array(0, dtype=jnp.int32),
-            size=jnp.array(0, dtype=jnp.int32),
+    network = ValueNetwork(hidden_dim=config["value_hidden_dim"])
+    # The learning rate halves every value_lr_halving_interval updates (as in
+    # the ReBeL paper); 0 keeps it constant.
+    learning_rate = config["value_lr"]
+    if config["value_lr_halving_interval"] > 0:
+        learning_rate = optax.exponential_decay(
+            init_value=config["value_lr"],
+            transition_steps=config["value_lr_halving_interval"]
+            * config["num_value_train_steps"],
+            decay_rate=0.5,
+            staircase=True,
         )
+    tx = optax.chain(
+        optax.clip_by_global_norm(config["max_grad_norm"]),
+        optax.adam(learning_rate=learning_rate),
+    )
 
-    def append_one(
-        buffer: ReplayBufferState,
-        pbs_s: FloatArray,
-        values_s: FloatArray,
-        rng: PRNGKeyArray,
-    ) -> tuple[ReplayBufferState, PRNGKeyArray]:
-        rng, rng_i = jax.random.split(rng)
-        k = buffer.seen
-        j = jax.random.randint(rng_i, (), 0, k + 1, dtype=jnp.int32)
-        not_full = k < capacity
-        write_idx = jnp.where(not_full, k, j)
-        should_write = not_full | (j < capacity)
-        new_pbs = jnp.where(
-            should_write, buffer.pbs.at[write_idx].set(pbs_s), buffer.pbs
+    def selfplay_step(rng: PRNGKeyArray, pbs: PBS, value_fn: ValueFn):
+        solution = solve_subgame(pbs, value_fn, structure, num_iterations, leaf_nodes)
+        rng_profile, rng_leaf = jax.random.split(rng)
+        next_pbs = sample_leaf(
+            rng_leaf,
+            pbs,
+            sample_profile(rng_profile, solution, num_iterations),
+            structure,
+            config["random_action_prob"],
         )
-        new_values = jnp.where(
-            should_write, buffer.values.at[write_idx].set(values_s), buffer.values
+        done = jnp.asarray(IS_TERMINAL)[next_pbs.node]
+        next_pbs = jax.tree.map(
+            lambda reset, x: jnp.where(done, reset, x), initial_pbs(), next_pbs
         )
-        return (
-            ReplayBufferState(
-                pbs=new_pbs,
-                values=new_values,
-                seen=buffer.seen + 1,
-                size=jnp.minimum(capacity, buffer.size + 1),
-            ),
-            rng,
+        example = (
+            encode_pbs(pbs.node, pbs.ranges),
+            solution.values,
+            solution.value_mask,
         )
+        return example, next_pbs, done
 
-    def sample_batch(
-        rng: PRNGKeyArray,
-        buffer: ReplayBufferState,
-        batch_size: int,
-    ) -> tuple[FloatArray, FloatArray]:
-        max_size = jnp.maximum(buffer.size, 1)
-        indices = jax.random.randint(rng, (batch_size,), 0, max_size, dtype=jnp.int32)
-        return buffer.pbs[indices], buffer.values[indices]
+    def value_loss(params, inputs, targets, masks) -> FloatArray:
+        predictions = network.apply(params, inputs)
+        errors = optax.huber_loss(predictions, targets, delta=1.0)
+        return jnp.sum(jnp.where(masks, errors, 0.0)) / jnp.maximum(jnp.sum(masks), 1)
 
-    log_interval = config.get("log_interval", 100)
-
-    def train(rng: PRNGKeyArray, seed: IntArray) -> RunnerState:
+    def train(rng: PRNGKeyArray, exp_id: IntArray) -> tuple[RunnerState, dict]:
         rng, rng_init = jax.random.split(rng)
-        network = ValueNetworkMLP(hidden_dim=config["value_hidden_dim"])
-        dummy_pbs = encode_pbs(root_pbs())
-        params = network.init(rng_init, dummy_pbs)
-
-        tx = optax.adam(learning_rate=config["value_lr"])
-        train_state = TrainState.create(
-            apply_fn=network.apply,
-            params=params,
-            tx=tx,
+        params = network.init(rng_init, jnp.zeros(PBS_DIM))
+        train_state = TrainState.create(apply_fn=network.apply, params=params, tx=tx)
+        replay_buffer = ReplayBuffer(
+            inputs=jnp.zeros((capacity, PBS_DIM)),
+            targets=jnp.zeros((capacity, NUM_PLAYERS, NUM_CARDS)),
+            masks=jnp.zeros((capacity, NUM_PLAYERS, NUM_CARDS), dtype=jnp.bool_),
+            position=jnp.int32(0),
+            size=jnp.int32(0),
         )
-
-        replay_buffer = init_replay_buffer()
-        pbs_root_enc = encode_pbs(root_pbs())
-
-        def value_loss(params, pbs_batch, values_batch):
-            pred = network.apply(params, pbs_batch)
-            err = pred - values_batch
-            return jnp.mean(huber_loss(err))
-
-        def train_step(
-            train_state: TrainState,
-            pbs_batch: FloatArray,
-            values_batch: FloatArray,
-        ) -> tuple[TrainState, FloatArray]:
-            loss_val, grads = jax.value_and_grad(value_loss)(
-                train_state.params, pbs_batch, values_batch
-            )
-            train_state = train_state.apply_gradients(grads=grads)
-            return train_state, loss_val
+        pbs = jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (num_subgames,) + x.shape), initial_pbs()
+        )
 
         def update_step(runner_state: RunnerState, _) -> tuple[RunnerState, dict]:
-            train_state = runner_state.value_train_state
+            train_state = runner_state.train_state
             buffer = runner_state.replay_buffer
-            pbs_enc = runner_state.pbs_root
-            rng = runner_state.rng
+            rng, rng_selfplay, rng_train = jax.random.split(runner_state.rng, 3)
 
-            def run_selfplay(carry, _):
-                ts, buf, pb_enc, r = carry
-                pbs_struct = decode_pbs(pb_enc)
-                r, r_sp = jax.random.split(r)
-                pbs_out, values_target, next_pbs, is_term = selfplay_step(
-                    pbs_struct,
-                    r_sp,
-                    cfr_iterations,
-                    random_action_prob,
+            # Self play: every game solves the subgame at its current PBS.
+            value_fn = network_value_fn(network, train_state.params)
+            (inputs, targets, masks), pbs, done = jax.vmap(
+                lambda rng, pbs: selfplay_step(rng, pbs, value_fn)
+            )(jax.random.split(rng_selfplay, num_subgames), runner_state.pbs)
+            index = (buffer.position + jnp.arange(num_subgames)) % capacity
+            buffer = ReplayBuffer(
+                inputs=buffer.inputs.at[index].set(inputs),
+                targets=buffer.targets.at[index].set(targets),
+                masks=buffer.masks.at[index].set(masks),
+                position=(buffer.position + num_subgames) % capacity,
+                size=jnp.minimum(buffer.size + num_subgames, capacity),
+            )
+
+            def train_minibatch(train_state: TrainState, rng: PRNGKeyArray):
+                batch = jax.random.randint(rng, (batch_size,), 0, buffer.size)
+                loss, grads = jax.value_and_grad(value_loss)(
+                    train_state.params,
+                    buffer.inputs[batch],
+                    buffer.targets[batch],
+                    buffer.masks[batch],
                 )
-                next_enc = encode_pbs(next_pbs)
-                r, r_ap = jax.random.split(r)
-                buf, _ = append_one(buf, pbs_out, values_target, r_ap)
-                next_root = jnp.where(is_term.astype(jnp.bool_), pbs_root_enc, next_enc)
-                return (ts, buf, next_root, r), ()
+                return train_state.apply_gradients(grads=grads), loss
 
-            (train_state, buffer, pbs_enc, rng), _ = lax.scan(
-                run_selfplay,
-                (train_state, buffer, pbs_enc, rng),
-                None,
-                num_subgames_per_update,
+            train_state, losses = lax.scan(
+                train_minibatch,
+                train_state,
+                jax.random.split(rng_train, config["num_value_train_steps"]),
             )
-
-            def train_value_epoch(carry, _):
-                ts, r = carry
-                r, r_batch = jax.random.split(r)
-                pbs_b, values_b = sample_batch(r_batch, buffer, batch_size)
-                ts, loss = train_step(ts, pbs_b, values_b)
-                return (ts, r), loss
-
-            rng, rng_train = jax.random.split(rng)
-            (train_state, _), losses = lax.scan(
-                train_value_epoch,
-                (train_state, rng_train),
-                None,
-                num_value_train_steps,
-            )
-            mean_loss = jnp.mean(losses)
-
-            metric = {
-                "value_loss": mean_loss,
-                "replay_size": buffer.size.astype(jnp.float32),
-                "update_step": runner_state.update_step,
-                "total_samples": buffer.seen.astype(jnp.float32),
+            metrics = {
+                "value_loss": jnp.mean(losses),
+                "games_finished": jnp.sum(done),
             }
+            runner_state = RunnerState(
+                train_state=train_state,
+                replay_buffer=buffer,
+                pbs=pbs,
+                update_step=runner_state.update_step + 1,
+                rng=rng,
+            )
+            return runner_state, metrics
 
-            should_log = (runner_state.update_step % log_interval) == 0
-            policy_arr = lax.cond(
-                should_log,
-                lambda: policy_from_value_network(network, train_state.params),
-                lambda: jnp.zeros((12, 2), dtype=jnp.float32),
+        def evaluate(runner_state: RunnerState, train_metrics: dict) -> dict:
+            params = runner_state.train_state.params
+            start = initial_pbs()
+            # Player 0's game value as predicted at the initial PBS; the value
+            # of Kuhn Poker is -1/18.
+            root_values = network.apply(params, encode_pbs(start.node, start.ranges))
+            metrics = {
+                **train_metrics,
+                "update_step": runner_state.update_step,
+                "num_subgames": runner_state.update_step * num_subgames,
+                "replay_size": runner_state.replay_buffer.size,
+                "root_value_p0": jnp.mean(root_values[0]),
+            }
+            policy = test_time_policy(
+                network_value_fn(network, params), structure, num_iterations
             )
 
-            def expl_callback(sid: int, m: dict, policy: np.ndarray, st: int) -> None:
-                m = dict(m)
-                if int(st) % log_interval == 0:
-                    # When vmapped, policy has shape (num_seeds, 12, 2); extract (12, 2)
-                    policy_2d = policy[0] if policy.ndim == 3 else policy
-
-                    def policy_fn(key):
-                        idx = list(INFOSET_KEYS).index(key)
-                        return policy_2d[idx].astype(np.float64)
-
-                    m["exploitability"] = exploitability(policy_fn)
-                np_m = {k: np.array(v) for k, v in m.items()}
-                LOGGER.log(int(sid), np_m)
+            def logging_callback(exp_id, metrics, policy):
+                log_dict = {k: np.array(v) for k, v in metrics.items()}
+                log_dict = {k: v for k, v in log_dict.items() if np.isfinite(v)}
+                log_dict["exploitability"] = policy_exploitability(policy)
+                LOGGER.log(int(exp_id), log_dict)
 
             jax.experimental.io_callback(
-                expl_callback,
-                None,
-                seed,
-                metric,
-                policy_arr,
-                runner_state.update_step,
+                logging_callback, None, exp_id, metrics, policy
             )
+            return {**metrics, "policy": policy}
 
-            return (
-                RunnerState(
-                    value_train_state=train_state,
-                    replay_buffer=buffer,
-                    pbs_root=pbs_enc,
-                    update_step=runner_state.update_step + 1,
-                    rng=rng,
-                ),
-                metric,
+        def log_step(carry, _) -> tuple[tuple[RunnerState, dict], dict]:
+            # Evaluates before the block's updates, with the previous block's
+            # training metrics, so that log calls arrive in order.
+            runner_state, train_metrics = carry
+            metrics = evaluate(runner_state, train_metrics)
+            runner_state, block_metrics = lax.scan(
+                update_step, runner_state, None, log_interval
             )
+            train_metrics = {
+                "value_loss": jnp.mean(block_metrics["value_loss"]),
+                "games_finished": jnp.sum(block_metrics["games_finished"]),
+            }
+            return (runner_state, train_metrics), metrics
 
-        initial_state = RunnerState(
-            value_train_state=train_state,
+        runner_state = RunnerState(
+            train_state=train_state,
             replay_buffer=replay_buffer,
-            pbs_root=pbs_root_enc,
-            update_step=jnp.array(0, dtype=jnp.int32),
+            pbs=pbs,
+            update_step=jnp.int32(0),
             rng=rng,
         )
-
-        final_state, _ = lax.scan(
-            update_step,
-            initial_state,
+        # The untrained value network is evaluated first, then every
+        # log_interval updates.
+        no_training = {
+            "value_loss": jnp.float32(jnp.nan),
+            "games_finished": jnp.int32(0),
+        }
+        (runner_state, train_metrics), metrics = lax.scan(
+            log_step,
+            (runner_state, no_training),
             None,
-            config["num_update_steps"],
+            config["num_update_steps"] // log_interval,
         )
-        return final_state
+        final_metrics = evaluate(runner_state, train_metrics)
+        metrics = jax.tree.map(
+            lambda rest, last: jnp.concatenate([rest, last[None]]),
+            metrics,
+            final_metrics,
+        )
+        return runner_state, metrics
 
     return train
 
@@ -1011,7 +821,9 @@ def main(config: dict) -> None:
         exp_ids = jnp.arange(config["num_seeds"])
 
         print("Starting compile...")
-        train_vjit = jax.block_until_ready(jax.jit(jax.vmap(make_train(config))))
+        train_vjit = (
+            jax.jit(jax.vmap(make_train(config))).lower(rng_seeds, exp_ids).compile()
+        )
         print("Compile finished...")
 
         job_type = f"{config['job_type']}_{config['env_name']}"
@@ -1030,9 +842,51 @@ def main(config: dict) -> None:
         )
 
         print("Running...")
-        _ = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        start_time = time.time()
+        runner_state, metrics = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        runtime = time.time() - start_time
+        print(f"Training took {runtime:.1f}s")
+
+        # Exploitability curve of each seed, saved next to the Hydra logs.
+        curves = []
+        for i in range(config["num_seeds"]):
+            value_loss = np.asarray(metrics["value_loss"][i])
+            curves.append(
+                {
+                    "num_subgames": np.asarray(metrics["num_subgames"][i]).tolist(),
+                    "exploitability": [
+                        policy_exploitability(p)
+                        for p in np.asarray(metrics["policy"][i])
+                    ],
+                    "value_loss": [
+                        None if np.isnan(v) else float(v) for v in value_loss
+                    ],
+                    "root_value_p0": np.asarray(metrics["root_value_p0"][i]).tolist(),
+                }
+            )
+            print(
+                f"Seed {i}: final exploitability {curves[i]['exploitability'][-1]:.5f}"
+            )
+        curves_path = os.path.join(HydraConfig.get().runtime.output_dir, "curves.json")
+        with open(curves_path, "w") as f:
+            json.dump(
+                {"config": config, "runtime_seconds": runtime, "seeds": curves}, f
+            )
+        print(f"Saved exploitability curves to {curves_path}")
+
+        if config["save_final"]:
+            os.makedirs(config["save_dir"], exist_ok=True)
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            save_path = os.path.join(
+                config["save_dir"], f"kuhn_rebel_{timestamp}.msgpack"
+            )
+            params = jax.tree.map(lambda x: x[0], runner_state.train_state.params)
+            with open(save_path, "wb") as f:
+                f.write(serialization.to_bytes(params))
+            print(f"Saved value network to {save_path}")
     finally:
-        LOGGER.finish()
+        if LOGGER is not None:
+            LOGGER.finish()
         print("Finished.")
 
 
