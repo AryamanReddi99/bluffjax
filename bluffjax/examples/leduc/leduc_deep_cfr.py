@@ -145,6 +145,15 @@ class ReservoirBuffer:
 
 
 # --- Networks ---
+def torch_linear_init(fan_in: int) -> Callable:
+    """PyTorch's default nn.Linear initialisation for weights and biases,
+    U(-1/sqrt(fan_in), 1/sqrt(fan_in)), as in the Deep CFR paper's network."""
+    bound = 1.0 / np.sqrt(fan_in)
+    return lambda key, shape, dtype=jnp.float32: jax.random.uniform(
+        key, shape, dtype, -bound, bound
+    )
+
+
 class MLP(nn.Module):
     """ReLU MLP with LayerNorm after each hidden layer."""
 
@@ -153,11 +162,12 @@ class MLP(nn.Module):
 
     @nn.compact
     def __call__(self, x: FloatArray) -> FloatArray:
-        kernel_init = nn.initializers.glorot_uniform()
         for size in self.hidden_sizes:
-            x = nn.relu(nn.Dense(size, kernel_init=kernel_init)(x))
+            init = torch_linear_init(x.shape[-1])
+            x = nn.relu(nn.Dense(size, kernel_init=init, bias_init=init)(x))
             x = nn.LayerNorm()(x)
-        return nn.Dense(self.output_size, kernel_init=kernel_init)(x)
+        init = torch_linear_init(x.shape[-1])
+        return nn.Dense(self.output_size, kernel_init=init, bias_init=init)(x)
 
 
 def advantage_loss(
