@@ -1,31 +1,44 @@
-num_update_steps: 1000
-num_subgames_per_update: 2
-cfr_iterations: 2
-max_depth: 4
-random_action_prob: 0.2
+# ReBeL for heads-up Limit Hold'em (implementation: bluffjax/examples/holdem_rebel/).
+#
+# One sample = one value-network training example: a public belief state with
+# both players' values for all 1,326 hands, from one solved subgame (a betting
+# round, or the chance node between rounds). The run stops after num_samples.
+num_samples: 1e7
+
+# Self-play and search
+num_games: 128  # self-play games solved in parallel
+cfr_iters: 128  # Linear CFR-D iterations per subgame (each updates both players)
+explore_prob: 0.25  # ReBeL's epsilon: one player explores at random
+chance_flops: 256  # flops sampled per preflop chance node (0 = all 22,100)
+solve_chunk: 64  # subgames solved at once (bounds GPU memory)
+steps_per_chunk: 8  # self-play steps per jitted call
+
+# Value network (MLP with LayerNorm and GeLU) and its training
+value_hidden_dim: 512
+value_num_layers: 3
 value_lr: 3e-4
-value_hidden_dim: 128
-replay_capacity: 10000
-batch_size: 256
-num_value_train_steps: 4
-log_interval: 1
+lr_halve_at: [0.5, 0.75]  # fractions of training at which the lr halves
+batch_size: 512
+train_ratio: 4  # trained examples per generated example
+grad_clip: 5.0
+replay_capacity: 131072  # FIFO; ~11 kB per example on the GPU
+
+# Evaluation: mirrored deals (each deal played from both seats)
+eval_every: 5e5  # samples
+eval_deals: 256
+final_eval_deals: 2048
+compare_with: ""  # also play this ReBeL checkpoint, e.g. ${repo_root:}/checkpoints/HUL/hul_rebel_<timestamp>.msgpack
+
+log_every_chunks: 10
 save_final: true
 save_dir: ${repo_root:}/checkpoints/HUL
 
 env_name: hul
-num_agents: 2
 seed: 0
-num_seeds: 1
 
 project: bluffjax
 job_type: hul_rebel
 wandb: true
-
-compare: true
-compare_mode: random  # "checkpoint" or "random"
-compare_with: ""  # e.g. ${repo_root:}/checkpoints/HUL/hul_rebel_<timestamp>.msgpack
-compare_steps: 100
-compare_interval: 1  # Run comparison every N update steps (1 = every step)
 
 # Hydra configs and logs go to outputs/ at the repo root
 hydra:

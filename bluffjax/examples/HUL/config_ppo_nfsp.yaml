@@ -30,14 +30,17 @@ num_seeds: 5
 env_kwargs:
   num_agents: 2
 
-# comparison
+# comparison: chips per hand of the average and best-response policies
 compare: true
 compare_mode: random  # "random" or "checkpoint"
-compare_with: ""  # e.g. ${repo_root:}/checkpoints/HUL/hul_rebel_<timestamp>.msgpack
-compare_network_type: value  # "actor_critic" or "value" (value = REBEL value network)
-compare_value_hidden_dim: 128  # hidden dim for REBEL value network (must match checkpoint)
-compare_steps: 100
-compare_interval: 1
+# ReBeL opponent, from hul_rebel.py --config-name config_rebel_opponent, e.g.
+# ${repo_root:}/checkpoints/HUL/hul_rebel_<timestamp>.msgpack (+ .json alongside)
+compare_with: ""
+compare_network_type: rebel  # "rebel" (searches at test time) or "actor_critic"
+compare_cfr_iters: null  # ReBeL CFR iterations per subgame when acting; null = as trained
+compare_solve_chunk: 16  # ReBeL subgames solved at once per seed (GPU memory)
+compare_steps: 64  # deals per evaluation, each played from both seats
+compare_interval: 10
 
 # wandb
 project: bluffjax

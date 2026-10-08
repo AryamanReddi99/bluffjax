@@ -35,12 +35,9 @@ from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import register_resolvers
 from bluffjax.utils.wandb_multilogger import WandbMultiLogger
 
-# For REBEL value network comparison
-from bluffjax.examples.HUL.hul_game_utils import PBS_INPUT_DIM
-from bluffjax.examples.HUL.hul_rebel import (
-    ValueNetworkMLP,
-    _get_action_from_params,
-)
+# ReBeL evaluation opponent
+from bluffjax.examples.holdem_rebel.agent import PolicyPlayer, load_rebel, play_match
+from bluffjax.examples.holdem_rebel.game import make_game
 
 LOGGER = None
 
@@ -112,34 +109,27 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
     compare_network_type = config["compare_network_type"]
 
     baseline_params = None
-    rebel_value_network = None
-    rebel_value_params = None
+    rebel_player = None
     actor_critic_network = None
     if compare_enabled and (not compare_against_random):
         checkpoint_path = config["compare_with"]
-        if compare_network_type == "value":
-            rebel_value_network = ValueNetworkMLP(
-                hidden_dim=config["compare_value_hidden_dim"]
+        if compare_network_type == "rebel":
+            # ReBeL with search at test time (bluffjax/examples/holdem_rebel).
+            # Runs inside the vmap over seeds, so it can't branch per street.
+            rebel_player, baseline_params, rebel_meta = load_rebel(
+                checkpoint_path,
+                cfr_iters=config["compare_cfr_iters"],
+                solve_chunk=config["compare_solve_chunk"],
+                by_street=False,
             )
-            template_pbs = jnp.zeros((PBS_INPUT_DIM,), dtype=jnp.float32)
-            template_params = rebel_value_network.init(
-                jax.random.PRNGKey(0), template_pbs
-            )
-            with open(checkpoint_path, "rb") as f:
-                rebel_value_params = serialization.from_bytes(template_params, f.read())
-
-            def _squeeze_leading_batch(x):
-                if hasattr(x, "shape") and x.ndim > 0 and x.shape[0] == 1:
-                    return jnp.squeeze(x, axis=0)
-                return x
-
-            rebel_value_params = jax.tree_util.tree_map(
-                _squeeze_leading_batch, rebel_value_params
-            )
-            baseline_params = rebel_value_params
+            if rebel_meta["game"] != "hul":
+                raise ValueError(
+                    f"{checkpoint_path} is a {rebel_meta['game']} ReBeL checkpoint"
+                )
             print(
-                f"Loaded REBEL value network baseline from {checkpoint_path} "
-                f"(compare_network_type=value)"
+                f"Loaded ReBeL opponent from {checkpoint_path} "
+                f"({rebel_meta['samples']} samples, "
+                f"{rebel_player.cfr_iters} CFR iterations per subgame)"
             )
         elif compare_network_type == "actor_critic":
             actor_critic_network = ActorCriticDiscreteMLP(
@@ -157,7 +147,7 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
             )
         else:
             raise ValueError(
-                f"compare_network_type must be 'value' or 'actor_critic', "
+                f"compare_network_type must be 'rebel' or 'actor_critic', "
                 f"got '{compare_network_type}'"
             )
 
@@ -288,91 +278,27 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
         probs = probs / jnp.maximum(probs.sum(), 1.0)
         return distrax.Categorical(probs=probs).sample(seed=rng)
 
-    def compare_single_episode(
-        rng: PRNGKeyArray,
-        train_params: Any,
-        checkpoint_params: Any,
-        train_player_idx: IntArray,
-        use_avg_policy: bool,
-        br_net: QNetworkDiscreteMLP,
-        avg_net: ActorDiscreteMLP,
-    ) -> tuple[PRNGKeyArray, FloatArray, FloatArray, FloatArray]:
-        rng, rng_reset = jax.random.split(rng)
-        env_state, obs = env.reset(rng_reset)
+    game = make_game("hul") if rebel_player is None else rebel_player.game
 
-        def play_cond(carry):
-            _, _, _, _, done_flag, _ = carry
-            return ~done_flag
-
-        def play_body(carry):
-            state_s, obs_s, rng_s, step_count, _, terminal_rewards = carry
-            rng_s, rng_train, rng_base, rng_step = jax.random.split(rng_s, 4)
-            current_player = state_s.current_player_idx
-            action_mask = env.get_avail_actions(state_s)
-
-            if use_avg_policy:
-                train_action = sample_action_actor(
-                    avg_net, train_params, obs_s, action_mask, rng_train
-                )
-            else:
-                train_action = sample_action_q_greedy(
-                    br_net, train_params, obs_s, action_mask, rng_train
-                )
-
-            if compare_against_random:
-                baseline_action = sample_random_legal_action(action_mask, rng_base)
-            elif compare_network_type == "value":
-                baseline_action, _ = _get_action_from_params(
-                    env,
-                    state_s,
-                    rebel_value_network,
-                    rebel_value_params,
-                    max_depth=4,
-                    rng=rng_base,
-                )
-            else:
-                baseline_action = sample_masked_action_actor_critic(
-                    actor_critic_network,
-                    checkpoint_params,
-                    obs_s,
-                    action_mask,
-                    rng_base,
-                )
-            action = jnp.where(
-                current_player == train_player_idx, train_action, baseline_action
+    def policy_player(sample_fn: Callable) -> PolicyPlayer:
+        """Plays sample_fn(params, obs, action_mask, rng) from the env obs."""
+        return PolicyPlayer(
+            lambda params, rng, state, avail: sample_fn(
+                params, env.obs_from_state(state), avail, rng
             )
-
-            next_state, next_obs, reward, _, done, _ = env.step(
-                rng_step, state_s, action
-            )
-            new_terminal_rewards = jnp.where(done, reward, terminal_rewards)
-            return (
-                next_state,
-                next_obs,
-                rng_s,
-                step_count + 1,
-                done,
-                new_terminal_rewards,
-            )
-
-        _, _, rng, step_count, done_flag, terminal_rewards = lax.while_loop(
-            play_cond,
-            play_body,
-            (
-                env_state,
-                obs,
-                rng,
-                jnp.array(0, dtype=jnp.int32),
-                jnp.bool_(False),
-                jnp.zeros(env.num_agents, dtype=jnp.float32),
-            ),
         )
-        train_chips = terminal_rewards[train_player_idx]
-        return (
-            rng,
-            train_chips,
-            step_count.astype(jnp.float32),
-            done_flag.astype(jnp.float32),
+
+    if compare_against_random:
+        baseline_player = PolicyPlayer(
+            lambda params, rng, state, avail: sample_random_legal_action(avail, rng)
+        )
+    elif compare_network_type == "rebel":
+        baseline_player = rebel_player
+    else:
+        baseline_player = policy_player(
+            lambda params, obs, mask, rng: sample_masked_action_actor_critic(
+                actor_critic_network, params, obs, mask, rng
+            )
         )
 
     def run_compare_eval(
@@ -383,59 +309,31 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
         br_net: QNetworkDiscreteMLP,
         avg_net: ActorDiscreteMLP,
     ) -> tuple[PRNGKeyArray, FloatArray, FloatArray, FloatArray]:
-        def compare_episode(carry, episode_idx):
-            rng_s, avg_p, br_p, base_p = carry
-            swap = (episode_idx % 2) == 1
-            avg_train_idx = jnp.where(swap, 1, 0)
-            br_train_idx = jnp.where(swap, 1, 0)
+        """Chips per hand of the average (actor) and best-response (greedy Q) policies.
 
-            rng_s, avg_chips, avg_len, avg_done = compare_single_episode(
-                rng_s,
-                avg_p,
-                base_p,
-                avg_train_idx,
-                use_avg_policy=True,
-                br_net=br_net,
-                avg_net=avg_net,
+        compare_steps deals, each played twice with the seats swapped.
+        """
+        avg_player = policy_player(
+            lambda params, obs, mask, rng: sample_action_actor(
+                avg_net, params, obs, mask, rng
             )
-            rng_s, br_chips, br_len, br_done = compare_single_episode(
-                rng_s,
-                br_p,
-                base_p,
-                br_train_idx,
-                use_avg_policy=False,
-                br_net=br_net,
-                avg_net=avg_net,
-            )
-            return (rng_s, avg_p, br_p, base_p), (
-                avg_chips,
-                br_chips,
-                avg_len,
-                br_len,
-                avg_done,
-                br_done,
-            )
-
-        (rng, _, _, _), (
-            avg_chips_arr,
-            br_chips_arr,
-            avg_len_arr,
-            br_len_arr,
-            avg_done_arr,
-            br_done_arr,
-        ) = lax.scan(
-            compare_episode,
-            (rng, avg_params, br_params, checkpoint_params),
-            jnp.arange(config["compare_steps"]),
         )
-        avg_done_count = jnp.maximum(avg_done_arr.sum(), 1.0)
-        br_done_count = jnp.maximum(br_done_arr.sum(), 1.0)
-        avg_chips = avg_chips_arr.sum() / avg_done_count
-        br_chips = br_chips_arr.sum() / br_done_count
-        avg_eval_len = (
-            avg_len_arr.sum() / avg_done_count + br_len_arr.sum() / br_done_count
-        ) / 2
-        return rng, avg_chips, br_chips, avg_eval_len
+        br_player = policy_player(
+            lambda params, obs, mask, rng: sample_action_q_greedy(
+                br_net, params, obs, mask, rng
+            )
+        )
+        rng, rng_avg, rng_br = jax.random.split(rng, 3)
+        avg = play_match(
+            env, game, avg_player, avg_params, baseline_player,
+            checkpoint_params, config["compare_steps"], rng_avg,
+        )
+        br = play_match(
+            env, game, br_player, br_params, baseline_player,
+            checkpoint_params, config["compare_steps"], rng_br,
+        )
+        avg_eval_len = (avg.hand_length.mean() + br.hand_length.mean()) / 2
+        return rng, avg.rewards.mean(), br.rewards.mean(), avg_eval_len
 
     def train(rng: PRNGKeyArray, seed: int) -> RunnerState:
         def train_setup(
