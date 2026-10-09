@@ -69,7 +69,7 @@ Click a game to play it.
 | Game | ID | Players (n) | Obs. size | Actions | API | Metric |
 |---|---|:-:|:-:|:-:|:-:|---|
 | Kuhn Poker | `kuhn_poker` | 2 | 9 | 2 | AEC | exploitability |
-| Leduc Hold'em | `leduc_holdem` | 2 | 36 | 3 | AEC | exploitability |
+| Leduc Hold'em | `leduc_holdem` | 2 | 24 | 3 | AEC | exploitability |
 | Texas Limit Hold'em | `texas_limit_holdem` | 2–10 | 72+n | 4 | AEC | chips/hand |
 | Texas No-Limit Hold'em | `texas_nolimit_holdem` | 2–10 | 54 | 5 | AEC | chips/hand |
 | 5-Card Draw 🆕 | `five_card_draw` | 2–10 | 54 | 37 | AEC | chips/hand |
@@ -192,7 +192,7 @@ uv run --extra baselines python bluffjax/examples/kuhn/kuhn_cfr.py              
 uv run --extra baselines python bluffjax/examples/kuhn/kuhn_ppo_nfsp.py wandb=False   # PPO-NFSP in self-play
 ```
 
-`--extra baselines` adds the training dependencies: `distrax`, `optax`, `chex`, `hydra-core` and `wandb`. Each training script reads its `config_*.yaml` through Hydra, so you can override any key on the command line. Wherever you launch from, runs save checkpoints to `checkpoints/<game>/` and Hydra's config and log to `outputs/`, both at the repo root and gitignored. Pre-trained PPO-NFSP and PQN-NFSP checkpoints for 5-Card Draw, 7-Card Stud, Werewolf and Bluff are in `bluffjax/examples/<game>/checkpoints/`.
+`--extra baselines` adds the training dependencies: `distrax`, `optax`, `chex`, `hydra-core` and `wandb`. Each training script reads its `config_*.yaml` through Hydra, so you can override any key on the command line. Wherever you launch from, scripts that save checkpoints write them to `checkpoints/<game>/`, and Hydra writes its config and log to `outputs/`, both at the repo root and gitignored. Pre-trained PPO-NFSP and PQN-NFSP checkpoints for 5-Card Draw, 7-Card Stud, Werewolf and Bluff are in `bluffjax/examples/<game>/checkpoints/`.
 
 On the solved games, exploitability is measured exactly. The uniform random policy scores 0.4583 on Kuhn and 2.3736 on Leduc, matching OpenSpiel.
 
