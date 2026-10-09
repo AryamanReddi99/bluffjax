@@ -1,32 +1,39 @@
+# 1e7 env samples per seed (152 updates of 1024 envs x 64 steps), 10 seeds
 num_timesteps: 1e7
 num_envs: 1024
 num_steps_per_env_per_update: 64
 num_epochs: 2
 num_minibatches: 2
 
-# PQN BR params
+# PQN BR params (Q-network trained on all decisions, see the script docstring)
 lr: 2.5e-4
-start_e: 1.0
-end_e: 0.05
-exploration_fraction: 0.4
-q_lambda: 1.0
+anneal_lr: true  # linear decay to 0 over all gradient steps
+start_e: 0.06  # epsilon of the epsilon-greedy BR, as in NFSP/OpenSpiel
+end_e: 0.001
+exploration_fraction: 1.0  # linear decay over the whole run
+q_lambda: 0.9
 max_grad_norm: 0.5
+reward_scale: 0.25  # env pays chips; train in units of the round-2 bet (4 chips)
 
 # Shared
-gamma: 1.0
-fc_dim_size: 64
+gamma: 1.0  # poker payoffs are undiscounted
+fc_dim_size: 128
 
 # NFSP params
-anticipatory_eta: 0.1
-sl_reservoir_capacity: 50000
+anticipatory_eta: 0.1  # prob. a player follows the BR for a whole hand
+sl_reservoir_capacity: 100000
 sl_batch_size: 256
-sl_num_steps_per_update: 2
+sl_num_steps_per_update: 512  # 2 SL samples per env step, as in NFSP/OpenSpiel
 sl_lr: 3e-4
+
+# exact exploitability of the average policy and the greedy BR every
+# eval_interval updates and after the last one
+eval_interval: 10
 
 # Env / logging
 env_name: leduc_poker
 seed: 0
-num_seeds: 5
+num_seeds: 10
 env_kwargs: {}
 
 # wandb
