@@ -1,10 +1,11 @@
-"""7-Card Stud: rules, observation and seat neutrality.
+"""7-Card Stud: rules, observation and seat neutrality, and the NFSP training helpers.
 
 RefStud below is a plain-Python model of the game (deal, order of play,
 betting, payoffs and observation). Random rollouts of the env are replayed
 through it and compared at every step, for 2 to 10 players.
 """
 
+import importlib
 import itertools
 from collections import Counter
 
@@ -636,3 +637,297 @@ def test_player_count_limits():
     env = make("seven_card_stud", num_agents=16)
     state, obs = env.reset(jax.random.PRNGKey(0))
     assert obs.shape == (env.obs_dim,)
+
+
+# ---------------------------------------------------------------- NFSP scripts
+
+
+def _script(name):
+    for dep in ("distrax", "optax", "hydra", "wandb"):
+        pytest.importorskip(dep)
+    return importlib.import_module(f"bluffjax.examples.seven_card_stud.{name}")
+
+
+@pytest.fixture(scope="module")
+def ppo_nfsp():
+    return _script("seven_card_stud_ppo_nfsp")
+
+
+@pytest.fixture(scope="module")
+def pqn_nfsp():
+    return _script("seven_card_stud_pqn_nfsp")
+
+
+def _own_decisions(players, rewards, dones, t):
+    """Player p = players[t]: (R, next own decision t' or None, terminal) from
+    walking forward through the rollout; terminal=None means cut off."""
+    steps = len(players)
+    p = players[t]
+    total = 0.0
+    for k in range(t, steps):
+        total += rewards[k, p]
+        if dones[k]:
+            return total, None, True
+        if k + 1 < steps and players[k + 1] == p:
+            return total, k + 1, False
+    return total, None, None
+
+
+def reference_gae(values, rewards, dones, players, last_value, last_player, gamma, lam):
+    """Brute force per env: GAE along each player's own decisions."""
+    steps, envs = values.shape
+    adv = np.zeros((steps, envs))
+    valid = np.zeros((steps, envs), bool)
+    for e in range(envs):
+        for t in reversed(range(steps)):
+            total, nxt, terminal = _own_decisions(
+                players[:, e], rewards[:, e], dones[:, e], t
+            )
+            if terminal:
+                adv[t, e], valid[t, e] = total - values[t, e], True
+            elif nxt is not None:
+                delta = total + gamma * values[nxt, e] - values[t, e]
+                adv[t, e] = delta + gamma * lam * adv[nxt, e]
+                valid[t, e] = True
+            elif players[t, e] == last_player[e]:
+                adv[t, e] = total + gamma * last_value[e] - values[t, e]
+                valid[t, e] = True
+    return adv, adv + values, valid
+
+
+def reference_q_lambda(q_max, rewards, dones, players, traces, last_q, last_player, gamma):
+    """Brute force per env: Peng's Q(lambda) along each player's own decisions."""
+    steps, envs = q_max.shape
+    ret = np.zeros((steps, envs))
+    valid = np.zeros((steps, envs), bool)
+    for e in range(envs):
+        for t in reversed(range(steps)):
+            total, nxt, terminal = _own_decisions(
+                players[:, e], rewards[:, e], dones[:, e], t
+            )
+            if terminal:
+                ret[t, e], valid[t, e] = total, True
+            elif nxt is not None:
+                c = traces[nxt, e]
+                later = ret[nxt, e] if valid[nxt, e] else q_max[nxt, e]
+                ret[t, e] = total + gamma * ((1 - c) * q_max[nxt, e] + c * later)
+                valid[t, e] = True
+            elif players[t, e] == last_player[e]:
+                ret[t, e], valid[t, e] = total + gamma * last_q[e], True
+    return ret, valid
+
+
+# A crafted 3-player rollout (one env): player 1 acts twice in a row, the hand
+# ends on player 2's step paying everyone, a reward is paid to players who
+# aren't acting before the end, and the rollout is cut off with the trailing
+# decisions of players 0 and 1 unfinished (player 2 is to act next); player
+# 0's earlier decision in that hand bootstraps from its trailing one.
+CRAFTED = dict(
+    players=np.array([[0], [1], [1], [2], [0], [2], [1], [0]]),
+    rewards=np.array(
+        [[0, 0, 0], [0, 0, 0], [0.5, 0, -0.5], [-1, 2, -1]] + [[0, 0, 0]] * 4,
+        dtype=np.float32,
+    )[:, None, :],
+    dones=np.array([[0], [0], [0], [1], [0], [0], [0], [0]], dtype=bool),
+    values=np.array([[1], [2], [3], [4], [5], [6], [6.5], [7.5]], dtype=np.float32),
+    last_value=np.array([8.0], dtype=np.float32),
+    last_player=np.array([2]),
+)
+
+
+def test_per_player_gae_crafted(ppo_nfsp):
+    c = CRAFTED
+    adv, targets, valid = ppo_nfsp.per_player_gae(
+        jnp.asarray(c["values"]), jnp.asarray(c["rewards"]), jnp.asarray(c["dones"]),
+        jnp.asarray(c["players"]), jnp.asarray(c["last_value"]),
+        jnp.asarray(c["last_player"]), 1.0, 0.5,
+    )
+    # t=0: hand ends at t=3 before p0 acts again: R = 0.5 - 1, A = R - V = -1.5
+    # t=1: next own decision t=2: A = (0 + 3 - 2) + 0.5 * A_2 = 0.5
+    # t=2: R = 0 + 2 (paid on p2's step), A = 2 - 3 = -1;  t=3: A = -1 - 4 = -5
+    # t=4: next own decision t=7, which has no outcome yet: the trace stops
+    # there, A = 0 + 7.5 - 5 = 2.5;  t=5: cut off, p2 to act: A = 0 + 8 - 6 = 2
+    # t=6, t=7: trailing decisions of players not to act, no outcome yet
+    np.testing.assert_array_equal(np.asarray(adv)[:, 0], [-1.5, 0.5, -1, -5, 2.5, 2, 0, 0])
+    np.testing.assert_array_equal(
+        np.asarray(targets)[:, 0], [-0.5, 2.5, 2, -1, 7.5, 8, 6.5, 7.5]
+    )
+    np.testing.assert_array_equal(np.asarray(valid)[:, 0], [1, 1, 1, 1, 1, 1, 0, 0])
+
+
+def test_per_player_q_lambda_crafted(pqn_nfsp):
+    c = CRAFTED
+    traces = np.full((8, 1), 0.5, dtype=np.float32)
+    traces[2] = 0.25
+    targets, valid = pqn_nfsp.per_player_q_lambda_targets(
+        jnp.asarray(c["values"]), jnp.asarray(c["rewards"]), jnp.asarray(c["dones"]),
+        jnp.asarray(c["players"]), jnp.asarray(traces), jnp.asarray(c["last_value"]),
+        jnp.asarray(c["last_player"]), 1.0,
+    )
+    # t=1: next own decision t=2 (trace 0.25): 0 + 0.75 * q_2 + 0.25 * G_2 = 2.75
+    # t=4: next own decision t=7 has no outcome yet, so no trace: 0 + q_7 = 7.5
+    np.testing.assert_array_equal(
+        np.asarray(targets)[:, 0], [-0.5, 2.75, 2, -1, 7.5, 8, 0, 0]
+    )
+    np.testing.assert_array_equal(np.asarray(valid)[:, 0], [1, 1, 1, 1, 1, 1, 0, 0])
+
+
+def _stud_rollout(n, envs, steps, seed):
+    """Players, rewards and dones of an auto-resetting random 7-Card Stud
+    rollout, with extra rewards on random non-terminal steps, plus the player
+    to act after the last step."""
+    env = make("seven_card_stud", num_agents=n)
+    state, _ = jax.vmap(env.reset)(jax.random.split(jax.random.PRNGKey(seed), envs))
+
+    def one(state, key):
+        k_action, k_step = jax.random.split(key)
+        avail = jax.vmap(env.get_avail_actions)(state)
+        action = jax.random.categorical(k_action, jnp.where(avail, 0.0, -jnp.inf))
+        nxt, _, reward, _, done, _ = jax.vmap(env.step)(
+            jax.random.split(k_step, envs), state, action
+        )
+        return nxt, (state.current_player_idx, reward, done)
+
+    keys = jax.random.split(jax.random.PRNGKey(seed + 1), steps)
+    last, (players, rewards, dones) = jax.lax.scan(one, state, keys)
+    rng = np.random.default_rng(seed)
+    rewards = np.asarray(rewards).copy()
+    extra = rng.normal(size=rewards.shape).astype(np.float32)
+    rewards += np.where(rng.random(rewards.shape[:2])[..., None] < 0.2, extra, 0.0).astype(np.float32)
+    return (np.asarray(players), rewards, np.asarray(dones),
+            np.asarray(last.current_player_idx))
+
+
+@pytest.mark.parametrize("n", (2, 3, 6))
+def test_nfsp_targets_match_brute_force_on_stud_rollouts(ppo_nfsp, pqn_nfsp, n):
+    players, rewards, dones, last_player = _stud_rollout(n, 48, 96, seed=n)
+    assert dones.any() and (players[1:] == players[:-1]).any()  # same player twice
+    rng = np.random.default_rng(n)
+    values = rng.normal(size=players.shape).astype(np.float32)
+    last_value = rng.normal(size=last_player.shape).astype(np.float32)
+    traces = np.where(rng.random(players.shape) < 0.5, 0.9, 0.0).astype(np.float32)
+    gamma, lam = 0.99, 0.95
+    adv, targets, valid = ppo_nfsp.per_player_gae(
+        *map(jnp.asarray, (values, rewards, dones, players, last_value, last_player)),
+        gamma, lam,
+    )
+    ref_adv, ref_targets, ref_valid = reference_gae(
+        values, rewards, dones, players, last_value, last_player, gamma, lam
+    )
+    np.testing.assert_array_equal(np.asarray(valid), ref_valid)
+    np.testing.assert_allclose(np.asarray(adv), ref_adv, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(targets), ref_targets, rtol=1e-5, atol=1e-5)
+    # at the cut-off only the player to act can bootstrap
+    assert (~ref_valid).any()
+
+    q_targets, q_valid = pqn_nfsp.per_player_q_lambda_targets(
+        *map(jnp.asarray, (values, rewards, dones, players, traces, last_value, last_player)),
+        gamma,
+    )
+    ref_q, ref_q_valid = reference_q_lambda(
+        values, rewards, dones, players, traces, last_value, last_player, gamma
+    )
+    np.testing.assert_array_equal(np.asarray(q_valid), ref_q_valid)
+    np.testing.assert_allclose(np.asarray(q_targets), ref_q, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("script", ("seven_card_stud_ppo_nfsp", "seven_card_stud_pqn_nfsp"))
+def test_reservoir_is_algorithm_r(script):
+    """Batched reservoir_append equals Algorithm R run item by item with the
+    same random draws, while filling and after the buffer is full."""
+    mod = _script(script)
+    capacity, batch = 50, 40
+    buffer = mod.SLBufferState(
+        obs=jnp.zeros((capacity, 3), jnp.float16),
+        action_mask=jnp.zeros((capacity, 4), bool),
+        action=jnp.full((capacity,), -1, jnp.int32),
+        seen=jnp.int32(0),
+        size=jnp.int32(0),
+    )
+    ref = np.full(capacity, -1)
+    seen = collisions = 0
+    rng = np.random.default_rng(0)
+    for i in range(8):
+        key = jax.random.PRNGKey(i)
+        valid = rng.random(batch) < 0.7
+        items = np.arange(i * batch, (i + 1) * batch, dtype=np.int32)
+        obs = np.stack([items, items, items], -1).astype(np.float16) % 1024
+        buffer = mod.reservoir_append(
+            buffer, jnp.asarray(obs), jnp.ones((batch, 4), bool), jnp.asarray(items),
+            jnp.asarray(valid), key,
+        )
+        # the draws reservoir_append makes: j ~ U{0..k} for the k-th valid item
+        k = seen + np.cumsum(valid) - valid
+        j = np.asarray(jax.random.randint(key, (batch,), 0, jnp.asarray(k) + 1, dtype=jnp.int32))
+        written = []
+        for item, v, jj in zip(items, valid, j):
+            if not v:
+                continue
+            if seen < capacity:
+                ref[seen] = item
+            elif jj < capacity:
+                ref[jj] = item
+                written.append(jj)
+            seen += 1
+        collisions += len(written) - len(set(written))
+        np.testing.assert_array_equal(np.asarray(buffer.action), ref)
+        np.testing.assert_array_equal(np.asarray(buffer.obs[:, 0]), (ref % 1024) * (ref >= 0))
+        assert int(buffer.seen) == seen and int(buffer.size) == min(seen, capacity)
+    assert seen > 3 * capacity
+    assert collisions > 0  # items of one batch replacing the same slot: the latest wins
+
+
+@pytest.mark.parametrize("script", ("seven_card_stud_ppo_nfsp", "seven_card_stud_pqn_nfsp"))
+def test_br_mode_is_drawn_once_per_hand(script):
+    """Each player's BR/average-policy choice stays fixed for a whole hand and
+    is redrawn (BR with probability eta) when a new hand starts."""
+    mod = _script(script)
+    n, envs, steps, eta = 3, 256, 200, 0.3
+    env = make("seven_card_stud", num_agents=n)
+    state, _ = jax.vmap(env.reset)(jax.random.split(jax.random.PRNGKey(0), envs))
+    mode = jax.random.bernoulli(jax.random.PRNGKey(1), eta, (envs, n))
+
+    def one(carry, key):
+        state, mode = carry
+        k_action, k_step, k_mode = jax.random.split(key, 3)
+        avail = jax.vmap(env.get_avail_actions)(state)
+        action = jax.random.categorical(k_action, jnp.where(avail, 0.0, -jnp.inf))
+        nxt, _, _, _, done, _ = jax.vmap(env.step)(jax.random.split(k_step, envs), state, action)
+        return (nxt, mod.redraw_br_mode(k_mode, mode, done, eta)), (mode, done)
+
+    _, (modes, dones) = jax.lax.scan(
+        one, (state, mode), jax.random.split(jax.random.PRNGKey(2), steps)
+    )
+    modes, dones = np.asarray(modes), np.asarray(dones)
+    same = np.all(modes[1:] == modes[:-1], axis=-1)
+    assert np.all(same[~dones[:-1]])  # constant within a hand
+    new_hand_modes = modes[1:][dones[:-1]]
+    assert len(new_hand_modes) > 1000
+    assert abs(new_hand_modes.mean() - eta) < 0.03
+    assert not np.all(same[dones[:-1]])  # and redrawn between hands
+
+
+@pytest.mark.parametrize("script", ("seven_card_stud_ppo_nfsp", "seven_card_stud_pqn_nfsp"))
+def test_load_params_is_strict(script, tmp_path):
+    from flax import serialization
+
+    from bluffjax.networks.mlp import ActorDiscreteMLP, QNetworkDiscreteMLP
+
+    mod = _script(script)
+    obs = jnp.zeros((76 + 262 * 2,))
+    actor = ActorDiscreteMLP(action_dim=4, hidden_dim=8).init(jax.random.PRNGKey(0), obs)
+    q_net = QNetworkDiscreteMLP(action_dim=4, hidden_dim=8).init(jax.random.PRNGKey(0), obs)
+    path = tmp_path / "actor.msgpack"
+    path.write_bytes(serialization.to_bytes(actor))
+    loaded = mod.load_params(str(path), actor)
+    assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda a, b: jnp.all(a == b), loaded, actor))
+    with pytest.raises(ValueError):  # a Q-network file as an actor
+        q_path = tmp_path / "q.msgpack"
+        q_path.write_bytes(serialization.to_bytes(q_net))
+        mod.load_params(str(q_path), actor)
+    with pytest.raises(ValueError):  # a seed axis / another observation size
+        seeds = jax.tree_util.tree_map(lambda x: jnp.stack([x, x]), actor)
+        path.write_bytes(serialization.to_bytes(seeds))
+        mod.load_params(str(path), actor)
+    with pytest.raises(FileNotFoundError):
+        mod.load_params(str(tmp_path / "missing.msgpack"), actor)
