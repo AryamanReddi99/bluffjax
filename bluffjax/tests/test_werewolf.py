@@ -1,4 +1,4 @@
-"""Tests of the Werewolf environment.
+"""Tests of the Werewolf environment and of the Werewolf NFSP training targets.
 
 Most checks run on random legal play: every reachable state of a few thousand
 games is checked against the rules, so they cover all roles at all indices.
@@ -553,3 +553,303 @@ def test_win_rates_equal_across_indices():
         pooled = (win & on_team).sum() / on_team.sum()
         sigma = np.sqrt(pooled * (1 - pooled) / games)
         assert (np.abs(rate - pooled) < 5 * sigma).all(), (team, rate, pooled)
+
+
+# ---------------------------------------------------------------- NFSP targets
+
+
+def _training_modules():
+    for dep in ("distrax", "hydra", "optax", "wandb"):
+        pytest.importorskip(dep)
+    from bluffjax.examples.werewolf import werewolf_ppo_nfsp as ppo
+    from bluffjax.examples.werewolf import werewolf_pqn_nfsp as pqn
+
+    return ppo, pqn
+
+
+def _next_decisions(dones, players, last_player):
+    """For each (t, b): the step of the acting player's next decision in the
+    same game (-1 if none in the rollout), whether the game ends before it,
+    and whether it is the decision at the rollout cut-off (t' = T)."""
+    T, B = players.shape
+    nxt = np.full((T, B), -1)
+    terminal = np.zeros((T, B), bool)
+    cutoff = np.zeros((T, B), bool)
+    for b in range(B):
+        for t in range(T):
+            p = players[t, b]
+            for u in range(t, T):
+                if u > t and players[u, b] == p:
+                    nxt[t, b] = u
+                    break
+                if dones[u, b]:
+                    terminal[t, b] = True
+                    break
+            else:
+                cutoff[t, b] = last_player[b] == p
+    return nxt, terminal, cutoff
+
+
+def _reward_until(rewards, t, end, b, p):
+    """Player p's rewards from step t to step end (inclusive)."""
+    return float(rewards[t : end + 1, b, p].sum())
+
+
+def reference_gae(values, rewards, dones, players, last_value, last_player, gamma, lam):
+    """Brute force per-player GAE, in float64, following each player's own
+    decisions (see per_player_gae)."""
+    T, B = players.shape
+    nxt, terminal, cutoff = _next_decisions(dones, players, last_player)
+    adv = np.zeros((T, B))
+    valid = np.zeros((T, B), bool)
+    for b in range(B):
+        for t in reversed(range(T)):
+            p = players[t, b]
+            if terminal[t, b]:
+                end = t + int(np.argmax(dones[t:, b]))
+                adv[t, b] = _reward_until(rewards, t, end, b, p) - values[t, b]
+            elif nxt[t, b] >= 0:
+                u = nxt[t, b]
+                delta = (
+                    _reward_until(rewards, t, u - 1, b, p)
+                    + gamma * values[u, b]
+                    - values[t, b]
+                )
+                adv[t, b] = delta + gamma * lam * (adv[u, b] if valid[u, b] else 0.0)
+            elif cutoff[t, b]:
+                adv[t, b] = (
+                    _reward_until(rewards, t, T - 1, b, p)
+                    + gamma * last_value[b]
+                    - values[t, b]
+                )
+            else:
+                continue
+            valid[t, b] = True
+    return adv, adv + values, valid
+
+
+def reference_q_lambda(
+    q_max, rewards, dones, players, traces, last_q, last_player, gamma
+):
+    """Brute force per-player Q(lambda) targets (see per_player_q_lambda_targets)."""
+    T, B = players.shape
+    nxt, terminal, cutoff = _next_decisions(dones, players, last_player)
+    ret = np.zeros((T, B))
+    valid = np.zeros((T, B), bool)
+    for b in range(B):
+        for t in reversed(range(T)):
+            p = players[t, b]
+            if terminal[t, b]:
+                end = t + int(np.argmax(dones[t:, b]))
+                ret[t, b] = _reward_until(rewards, t, end, b, p)
+            elif nxt[t, b] >= 0:
+                u = nxt[t, b]
+                c = traces[u, b] if valid[u, b] else 0.0
+                boot = (1 - c) * q_max[u, b] + c * ret[u, b]
+                ret[t, b] = _reward_until(rewards, t, u - 1, b, p) + gamma * boot
+            elif cutoff[t, b]:
+                ret[t, b] = _reward_until(rewards, t, T - 1, b, p) + gamma * last_q[b]
+            else:
+                continue
+            valid[t, b] = True
+    return np.where(valid, ret, 0.0), valid
+
+
+@functools.lru_cache(maxsize=None)
+def werewolf_rollout(T=96, B=48, seed=0):
+    """Random play with auto-reset: (rewards, dones, players, last_player)."""
+    env = _env()
+    state, _ = jax.vmap(env.reset)(jax.random.split(jax.random.PRNGKey(seed), B))
+
+    def one(s, key):
+        k_act, k_step = jax.random.split(key)
+        avail = jax.vmap(env.get_avail_actions)(s)
+        a = jax.random.categorical(k_act, jnp.where(avail, 0.0, -jnp.inf), axis=-1)
+        ns, _, r, _, d, _ = jax.vmap(env.step)(jax.random.split(k_step, B), s, a)
+        return ns, (r, d, s.current_player_idx)
+
+    last, (r, d, p) = jax.lax.scan(
+        one, state, jax.random.split(jax.random.PRNGKey(seed + 1), T)
+    )
+    return (
+        np.asarray(r),
+        np.asarray(d),
+        np.asarray(p),
+        np.asarray(last.current_player_idx),
+    )
+
+
+def _crafted():
+    """Two envs, three players: same-team and dead-player gaps, rewards paid
+    to players who aren't acting, a game ending mid-rollout, a cut-off."""
+    players = np.array([[0, 1], [1, 1], [2, 0], [0, 2], [2, 2], [1, 0]])
+    dones = np.zeros((6, 2), bool)
+    dones[3, 0] = True  # env 0: a game ends at step 3 (on player 0's move)
+    rewards = np.zeros((6, 2, 3))
+    rewards[3, 0] = [10, -10, 10]
+    rewards[1, 1] = [0, 1, 2]  # non-terminal rewards, also to non-actors
+    last_player = np.array([0, 1])
+    return rewards, dones, players, last_player
+
+
+@pytest.mark.parametrize("case", ["crafted", "rollout"])
+def test_per_player_gae_matches_brute_force(case):
+    ppo, _ = _training_modules()
+    rewards, dones, players, last_player = (
+        _crafted() if case == "crafted" else werewolf_rollout()
+    )
+    rng = np.random.default_rng(0)
+    T, B = players.shape
+    values = rng.integers(-5, 6, (T, B)).astype(np.float32)
+    last_value = rng.integers(-5, 6, B).astype(np.float32)
+    for gamma, lam in [(1.0, 1.0), (1.0, 0.0), (0.99, 0.95)]:
+        adv, targets, valid = ppo.per_player_gae(
+            jnp.asarray(values),
+            jnp.asarray(rewards, jnp.float32),
+            jnp.asarray(dones),
+            jnp.asarray(players),
+            jnp.asarray(last_value),
+            jnp.asarray(last_player),
+            gamma,
+            lam,
+        )
+        ref_adv, ref_targets, ref_valid = reference_gae(
+            values, rewards, dones, players, last_value, last_player, gamma, lam
+        )
+        np.testing.assert_array_equal(valid, ref_valid)
+        tol = 0 if gamma == 1.0 else 1e-4
+        np.testing.assert_allclose(
+            np.where(ref_valid, adv, 0), ref_adv, rtol=0, atol=tol
+        )
+        np.testing.assert_allclose(
+            np.where(ref_valid, targets, 0),
+            np.where(ref_valid, ref_targets, 0),
+            rtol=0,
+            atol=tol,
+        )
+    if case == "crafted":
+        # env 0: the game ends on player 0's move at t=3, which pays players
+        # 1 and 2 (t=1, 2) too; t=4, 5 are the next game, unfinished at the
+        # cut-off where player 0 is to act.
+        np.testing.assert_array_equal(ref_valid[:, 0], [1, 1, 1, 1, 0, 0])
+        np.testing.assert_array_equal(ref_targets[1:4, 0], [-10, 10, 10])
+        # env 1: player 1 acts twice in a row and is to act at the cut-off;
+        # the trailing decisions of players 2 and 0 have no outcome yet.
+        np.testing.assert_array_equal(ref_valid[:, 1], [1, 1, 1, 1, 0, 0])
+
+
+@pytest.mark.parametrize("case", ["crafted", "rollout"])
+def test_per_player_q_lambda_matches_brute_force(case):
+    _, pqn = _training_modules()
+    rewards, dones, players, last_player = (
+        _crafted() if case == "crafted" else werewolf_rollout()
+    )
+    rng = np.random.default_rng(1)
+    T, B = players.shape
+    q_max = rng.integers(-5, 6, (T, B)).astype(np.float32)
+    last_q = rng.integers(-5, 6, B).astype(np.float32)
+    is_br = rng.random((T, B)) < 0.5
+    for gamma, lam in [(1.0, 1.0), (1.0, 0.0), (1.0, 0.5), (0.99, 0.9)]:
+        traces = (lam * is_br).astype(np.float32)
+        targets, valid = pqn.per_player_q_lambda_targets(
+            jnp.asarray(q_max),
+            jnp.asarray(rewards, jnp.float32),
+            jnp.asarray(dones),
+            jnp.asarray(players),
+            jnp.asarray(traces),
+            jnp.asarray(last_q),
+            jnp.asarray(last_player),
+            gamma,
+        )
+        ref, ref_valid = reference_q_lambda(
+            q_max, rewards, dones, players, traces, last_q, last_player, gamma
+        )
+        np.testing.assert_array_equal(valid, ref_valid)
+        tol = 0 if gamma == 1.0 and lam in (0.0, 1.0, 0.5) else 1e-4
+        np.testing.assert_allclose(targets, ref, rtol=0, atol=tol)
+
+
+def test_reservoir_matches_algorithm_r():
+    ppo, pqn = _training_modules()
+    capacity, batch, obs_dim, actions = 50, 64, 3, 4
+    for module in (ppo, pqn):
+        buf = module.SLBufferState(
+            obs=jnp.zeros((capacity, obs_dim)),
+            action_mask=jnp.zeros((capacity, actions), bool),
+            action=jnp.full((capacity,), -1, jnp.int32),
+            seen=jnp.int32(0),
+            size=jnp.int32(0),
+        )
+        ref_obs = np.zeros((capacity, obs_dim))
+        ref_action = np.full(capacity, -1)
+        seen = 0
+        rng = np.random.default_rng(2)
+        for i in range(8):
+            obs = rng.normal(size=(batch, obs_dim)).astype(np.float32)
+            mask = rng.random((batch, actions)) < 0.5
+            action = rng.integers(0, actions, batch).astype(np.int32)
+            valid = rng.random(batch) < 0.7
+            key = jax.random.PRNGKey(i)
+            buf = module.reservoir_append(
+                buf,
+                jnp.asarray(obs),
+                jnp.asarray(mask),
+                jnp.asarray(action),
+                jnp.asarray(valid),
+                key,
+            )
+            # Algorithm R one item at a time, with the same uniform draws
+            valid_i = jnp.asarray(valid, jnp.int32)
+            k = jnp.int32(seen) + jnp.cumsum(valid_i) - valid_i
+            j = np.asarray(jax.random.randint(key, k.shape, 0, k + 1, dtype=jnp.int32))
+            for r in range(batch):
+                if not valid[r]:
+                    continue
+                slot = seen if seen < capacity else j[r]
+                if slot < capacity:
+                    ref_obs[slot], ref_action[slot] = obs[r], action[r]
+                seen += 1
+            np.testing.assert_array_equal(
+                np.asarray(buf.obs), ref_obs.astype(np.float32)
+            )
+            np.testing.assert_array_equal(np.asarray(buf.action), ref_action)
+            assert int(buf.seen) == seen and int(buf.size) == min(seen, capacity)
+
+
+def test_seat_rotated_evaluation_matches_random_play():
+    """A uniformly random learner evaluated against random opponents, with the
+    learner's seat rotating over the games, wins as often as random play does,
+    as a werewolf and as a human."""
+    ppo, pqn = _training_modules()
+    roles, total = random_outcomes(6, 2, num_games=20000, num_steps=80, seed=11)
+    ww = roles == WEREWOLF
+    p_ww = (total > 0)[ww].mean()
+    p_human = (total > 0)[~ww].mean()
+    env = _env()
+
+    def act(params, obs, action_mask, rng):
+        return jax.random.categorical(rng, jnp.where(action_mask, 0.0, -jnp.inf))
+
+    num_games = 6000
+    for i, module in enumerate((ppo, pqn)):
+        play = jax.jit(module.play_eval_games, static_argnums=(0, 1, 3, 5))
+        res = _np(
+            play(env, num_games, jax.random.PRNGKey(20 + i), act, None, act, None)
+        )
+        frac = res["learner_werewolf_frac"]
+        assert abs(frac - 1 / 3) < 5 * np.sqrt(2 / 9 / num_games), frac
+        for key, p, games in [
+            ("win_rate_as_werewolf", p_ww, frac * num_games),
+            ("win_rate_as_human", p_human, (1 - frac) * num_games),
+        ]:
+            assert abs(res[key] - p) < 5 * np.sqrt(p * (1 - p) / games), (
+                key,
+                res[key],
+                p,
+            )
+        np.testing.assert_allclose(
+            res["win_rate"],
+            frac * res["win_rate_as_werewolf"] + (1 - frac) * res["win_rate_as_human"],
+            rtol=1e-5,
+        )
+        np.testing.assert_allclose(res["return"], 20 * res["win_rate"] - 10, rtol=1e-5)

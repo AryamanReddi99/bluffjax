@@ -4,8 +4,9 @@ num_steps_per_env_per_update: 64
 num_epochs: 2
 num_minibatches: 2
 
-# PQN BR params
+# PQN BR params (Q-network trained on all decisions, see the script docstring)
 lr: 2.5e-4
+anneal_lr: true  # linear decay to 0 over all gradient steps (false: constant)
 start_e: 1.0
 end_e: 0.05
 exploration_fraction: 0.2
@@ -17,7 +18,7 @@ gamma: 0.99
 fc_dim_size: 128
 
 # NFSP params
-anticipatory_eta: 0.1
+anticipatory_eta: 0.1  # prob. a player follows the BR for a whole game
 sl_reservoir_capacity: 100000
 sl_batch_size: 256
 sl_num_steps_per_update: 2
@@ -31,20 +32,25 @@ env_kwargs:
   num_werewolves: 2
   horizon: 200
 
-# comparison
+# comparison: win rate of the average and (greedy) best-response policies,
+# overall and by the learner's team, in compare_steps games with the learner
+# in seat i % num_agents of game i and the opponent in all the other seats
 compare: true
-compare_mode: random # "random" or "checkpoint"
+compare_mode: random  # "random" or "checkpoint"
+# checkpoint opponent: a .msgpack file written by save_checkpoints of
+# werewolf_ppo_nfsp.py (actor_critic) or werewolf_pqn_nfsp.py (q_network for
+# br_<i>, actor for avg_policy_<i>)
 compare_with: ""
-compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
+compare_network_type: actor_critic  # "actor_critic", "q_network", or "actor"
 compare_steps: 50
-compare_interval: 10
+compare_interval: 10  # and after the last update
 
 # wandb
 project: bluffjax
 job_type: werewolf_pqn_nfsp
 wandb: true
 
-# optional checkpoint save
+# optional checkpoint save (see save_checkpoints in the script)
 save_final: false
 save_dir: ${repo_root:}/checkpoints/werewolf
 
