@@ -837,7 +837,6 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
                 transitions.done[..., None], transitions.reward, 0.0
             )
             done_count = jnp.maximum(transitions.done.sum(), 1)
-            returns_avg = masked_returns.sum() / done_count
             returns_avg_agent_one = masked_returns[..., 0].sum() / done_count
             returns_avg_agent_two = masked_returns[..., 1].sum() / done_count
 
@@ -886,7 +885,6 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
             )
 
             metric = {
-                "returns_avg": returns_avg,
                 "returns_avg_agent_one": returns_avg_agent_one,
                 "returns_avg_agent_two": returns_avg_agent_two,
                 "ep_length_avg": ep_length_avg,
