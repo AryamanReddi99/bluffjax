@@ -54,6 +54,7 @@ import jax.numpy as jnp
 import numpy as np
 from omegaconf import OmegaConf
 import optax
+import wandb
 
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 from bluffjax.utils.game_utils.kuhn_exploitability import (
@@ -65,8 +66,7 @@ from bluffjax.utils.game_utils.kuhn_exploitability import (
     infoset_key,
     is_terminal,
 )
-from bluffjax.utils.paths import register_resolvers
-from bluffjax.utils.wandb_multilogger import WandbMultiLogger
+from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
 # =============================================================================
 # Public tree
@@ -758,7 +758,7 @@ def make_train(
                 log_dict = {k: np.array(v) for k, v in metrics.items()}
                 log_dict = {k: v for k, v in log_dict.items() if np.isfinite(v)}
                 log_dict["exploitability"] = policy_exploitability(policy)
-                LOGGER.log(int(exp_id), log_dict)
+                WANDB_RUNS[int(exp_id)].log(log_dict)
 
             jax.experimental.io_callback(
                 logging_callback, None, exp_id, metrics, policy
@@ -809,7 +809,7 @@ def make_train(
     return train
 
 
-LOGGER: WandbMultiLogger | None = None
+WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
 
 
 @hydra.main(version_base=None, config_path="./", config_name="config_rebel")
@@ -830,16 +830,20 @@ def main(config: dict) -> None:
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
         )
-        global LOGGER
-        LOGGER = WandbMultiLogger(
-            project=config["project"],
-            group=group,
-            job_type=job_type,
-            config=config,
-            mode=(lambda: "online" if config["wandb"] else "disabled")(),
-            seed=config["seed"],
-            num_seeds=config["num_seeds"],
-        )
+        global WANDB_RUNS
+        WANDB_RUNS = [
+            wandb.init(
+                project=config["project"],
+                group=group,
+                job_type=job_type,
+                name=f"{config['seed']}_{i}",
+                config=config,
+                mode=None if config["wandb"] else "disabled",
+                dir=str(REPO_ROOT),
+                reinit="create_new",
+            )
+            for i in range(config["num_seeds"])
+        ]
 
         print("Running...")
         start_time = time.time()
@@ -885,8 +889,8 @@ def main(config: dict) -> None:
                 f.write(serialization.to_bytes(params))
             print(f"Saved value network to {save_path}")
     finally:
-        if LOGGER is not None:
-            LOGGER.finish()
+        for run in WANDB_RUNS:
+            run.finish()
         print("Finished.")
 
 

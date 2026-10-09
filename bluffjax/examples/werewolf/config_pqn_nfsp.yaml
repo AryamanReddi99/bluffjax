@@ -48,7 +48,7 @@ compare_interval: 10  # and after the last update
 # wandb
 project: bluffjax
 job_type: werewolf_pqn_nfsp
-wandb: true
+wandb: false
 
 # optional checkpoint save (see save_checkpoints in the script)
 save_final: false

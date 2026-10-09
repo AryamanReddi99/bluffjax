@@ -292,7 +292,7 @@ def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
 # =============================================================================
 
 
-def log_update(logger, evals_by_seed: dict, seed_val, metric_dict: dict) -> None:
+def log_update(wandb_runs: list, evals_by_seed: dict, seed_val, metric_dict: dict) -> None:
     """Logs the metrics of one update of one seed.
 
     metric_dict["evaluated"] says whether the evaluation metrics (keys with
@@ -314,7 +314,7 @@ def log_update(logger, evals_by_seed: dict, seed_val, metric_dict: dict) -> None
     else:
         for k in eval_keys:
             del metrics[k]
-    logger.log(seed, metrics)
+    wandb_runs[seed].log(metrics)
 
 
 def format_eval(evals: dict[str, float]) -> str:

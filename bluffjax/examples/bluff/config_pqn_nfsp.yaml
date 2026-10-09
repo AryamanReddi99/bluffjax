@@ -47,7 +47,7 @@ compare_interval: 10
 # wandb
 project: bluffjax
 job_type: bluff_pqn_nfsp
-wandb: true
+wandb: false
 
 # optional checkpoint save
 save_final: false

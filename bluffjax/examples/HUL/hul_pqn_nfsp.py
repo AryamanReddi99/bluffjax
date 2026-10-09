@@ -44,6 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 from omegaconf import OmegaConf
 import optax
+import wandb
 
 from bluffjax.utils.typing import (
     BoolArray,
@@ -61,14 +62,13 @@ from bluffjax.networks.mlp import (
     QNetworkDiscreteMLP,
 )
 from bluffjax.utils.jax_utils import pytree_norm
-from bluffjax.utils.paths import register_resolvers
-from bluffjax.utils.wandb_multilogger import WandbMultiLogger
+from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
 # ReBeL evaluation opponent
 from bluffjax.examples.holdem_rebel.agent import PolicyPlayer, load_rebel, play_match
 from bluffjax.examples.holdem_rebel.game import make_game
 
-LOGGER = None
+WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
 
 
 class Transition(NamedTuple):
@@ -320,7 +320,7 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
 
     def wandb_callback(exp_id: int, metrics: dict) -> None:
         np_log_dict = {k: np.array(v) for k, v in metrics.items()}
-        LOGGER.log(int(exp_id), np_log_dict)
+        WANDB_RUNS[int(exp_id)].log(np_log_dict)
 
     def init_sl_buffer(obs_dim: int, action_dim: int) -> SLBufferState:
         capacity = config["sl_reservoir_capacity"]
@@ -1025,7 +1025,7 @@ def save_checkpoints(config: dict, final_runner_state: RunnerState) -> str:
 
 @hydra.main(version_base=None, config_path="./", config_name="config_pqn_nfsp")
 def main(config: dict) -> None:
-    global LOGGER
+    global WANDB_RUNS
     try:
         config = OmegaConf.to_container(config, resolve=True)
         config["num_update_steps"] = int(
@@ -1059,15 +1059,19 @@ def main(config: dict) -> None:
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
         )
-        LOGGER = WandbMultiLogger(
-            project=config["project"],
-            group=group,
-            job_type=job_type,
-            config=config,
-            mode=(lambda: "online" if config["wandb"] else "disabled")(),
-            seed=config["seed"],
-            num_seeds=config["num_seeds"],
-        )
+        WANDB_RUNS = [
+            wandb.init(
+                project=config["project"],
+                group=group,
+                job_type=job_type,
+                name=f"{config['seed']}_{i}",
+                config=config,
+                mode=None if config["wandb"] else "disabled",
+                dir=str(REPO_ROOT),
+                reinit="create_new",
+            )
+            for i in range(config["num_seeds"])
+        ]
 
         print("Running...")
         start = time.time()
@@ -1082,8 +1086,8 @@ def main(config: dict) -> None:
             run_dir = save_checkpoints(config, final_runner_state)
             print(f"Saved checkpoints to {run_dir}")
     finally:
-        if LOGGER is not None:
-            LOGGER.finish()
+        for run in WANDB_RUNS:
+            run.finish()
         print("Finished.")
 
 

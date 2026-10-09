@@ -39,7 +39,7 @@ env_kwargs: {}
 # wandb
 project: bluffjax
 job_type: leduc_ppo_nfsp
-wandb: True
+wandb: false
 
 # Hydra configs and logs go to outputs/ at the repo root
 hydra:

@@ -50,7 +50,7 @@ compare_interval: 10
 # wandb
 project: bluffjax
 job_type: hul_ppo_nfsp
-wandb: true
+wandb: false
 
 # Hydra configs and logs go to outputs/ at the repo root
 hydra:

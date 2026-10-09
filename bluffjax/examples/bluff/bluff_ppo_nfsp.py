@@ -42,6 +42,7 @@ from jax import lax
 import jax.numpy as jnp
 from omegaconf import OmegaConf
 import optax
+import wandb
 
 from bluffjax.utils.typing import (
     Any,
@@ -74,10 +75,9 @@ from bluffjax.networks.mlp import (
     QNetworkDiscreteMLP,
 )
 from bluffjax.utils.jax_utils import pytree_norm
-from bluffjax.utils.paths import register_resolvers
-from bluffjax.utils.wandb_multilogger import WandbMultiLogger
+from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
-LOGGER = None
+WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
 # EVALS[seed] = [(env_steps, {metric: value}), ...]
 EVALS: dict[int, list[tuple[int, dict[str, float]]]] = {}
 
@@ -767,12 +767,12 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
 
 
 def logging_callback(seed_val, metric_dict) -> None:
-    log_update(LOGGER, EVALS, seed_val, metric_dict)
+    log_update(WANDB_RUNS, EVALS, seed_val, metric_dict)
 
 
 @hydra.main(version_base=None, config_path="./", config_name="config_ppo_nfsp")
 def main(config: dict) -> None:
-    global LOGGER
+    global WANDB_RUNS
     try:
         config = OmegaConf.to_container(config, resolve=True)
         config["num_update_steps"] = int(
@@ -806,15 +806,19 @@ def main(config: dict) -> None:
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
         )
-        LOGGER = WandbMultiLogger(
-            project=config["project"],
-            group=group,
-            job_type=job_type,
-            config=config,
-            mode=(lambda: "online" if config["wandb"] else "disabled")(),
-            seed=config["seed"],
-            num_seeds=config["num_seeds"],
-        )
+        WANDB_RUNS = [
+            wandb.init(
+                project=config["project"],
+                group=group,
+                job_type=job_type,
+                name=f"{config['seed']}_{i}",
+                config=config,
+                mode=None if config["wandb"] else "disabled",
+                dir=str(REPO_ROOT),
+                reinit="create_new",
+            )
+            for i in range(config["num_seeds"])
+        ]
 
         print("Running...")
         start = time.time()
@@ -834,8 +838,8 @@ def main(config: dict) -> None:
             )
             print(f"Saved checkpoints to {run_dir}")
     finally:
-        if LOGGER is not None:
-            LOGGER.finish()
+        for run in WANDB_RUNS:
+            run.finish()
         print("Finished.")
 
 

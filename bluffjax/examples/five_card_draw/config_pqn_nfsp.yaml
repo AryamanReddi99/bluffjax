@@ -43,7 +43,7 @@ compare_interval: 10
 # wandb
 project: bluffjax
 job_type: five_card_draw_pqn_nfsp
-wandb: true
+wandb: false
 
 # optional checkpoint save
 save_final: false

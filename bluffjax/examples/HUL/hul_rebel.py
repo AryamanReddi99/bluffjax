@@ -7,10 +7,10 @@ CFR-D subgames to the end of each betting round, a value network over the
 acting. The implementation is shared with No-Limit in
 bluffjax/examples/holdem_rebel/.
 
-    uv run --extra baselines python bluffjax/examples/HUL/hul_rebel.py wandb=False
+    uv run --extra baselines python bluffjax/examples/HUL/hul_rebel.py
     # evaluation opponent of the paper (5e6 samples):
     uv run --extra baselines python bluffjax/examples/HUL/hul_rebel.py \
-        --config-name config_rebel_opponent wandb=False
+        --config-name config_rebel_opponent
 """
 
 import hydra

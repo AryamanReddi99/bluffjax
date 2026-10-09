@@ -34,6 +34,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import optax
+import wandb
 from jax import lax
 
 from bluffjax import make
@@ -73,8 +74,8 @@ from bluffjax.examples.holdem_rebel.solver import (
     masked_map,
     solve,
 )
+from bluffjax.utils.paths import REPO_ROOT
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
-from bluffjax.utils.wandb_multilogger import WandbMultiLogger
 
 
 class Games(NamedTuple):
@@ -420,24 +421,23 @@ def checkpoint_meta(game: HoldemGame, cfg: dict, samples: int) -> dict:
 
 def run_training(game: HoldemGame, cfg: dict) -> str:
     """Train ReBeL for cfg['num_samples'] samples; returns the checkpoint path."""
-    # The logger forks worker processes; do it before JAX starts its threads.
-    logger = WandbMultiLogger(
+    run = wandb.init(
         project=cfg["project"],
         group=f"{cfg['env_name']}_rebel"
         + datetime.datetime.now().strftime("_%Y-%m-%d_%H-%M-%S"),
         job_type=f"{cfg['job_type']}_{cfg['env_name']}",
+        name=f"{cfg['seed']}_0",
         config=cfg,
-        mode="online" if cfg["wandb"] else "disabled",
-        seed=cfg["seed"],
-        num_seeds=1,
+        mode=None if cfg["wandb"] else "disabled",
+        dir=str(REPO_ROOT),
     )
     try:
-        return _train(game, cfg, logger)
+        return _train(game, cfg, run)
     finally:
-        logger.finish()
+        run.finish()
 
 
-def _train(game: HoldemGame, cfg: dict, logger: WandbMultiLogger) -> str:
+def _train(game: HoldemGame, cfg: dict, run: wandb.Run) -> str:
     rng = jax.random.PRNGKey(cfg["seed"])
     tpl_player = RebelPlayer(
         game,
@@ -565,7 +565,7 @@ def _train(game: HoldemGame, cfg: dict, logger: WandbMultiLogger) -> str:
             next_eval += float(cfg["eval_every"])
             if cfg["save_final"]:
                 save_checkpoint(save_path, params, checkpoint_meta(game, cfg, samples))
-        logger.log(0, metrics)
+        run.log(metrics)
     if cfg["save_final"]:
         save_checkpoint(save_path, params, checkpoint_meta(game, cfg, samples))
         print(f"Saved model to {save_path}")
@@ -573,7 +573,7 @@ def _train(game: HoldemGame, cfg: dict, logger: WandbMultiLogger) -> str:
         print(f"final evaluation ({cfg['final_eval_deals']} deals, mirrored):")
         rng, k_eval = jax.random.split(rng)
         final = evaluate(params, k_eval, cfg["final_eval_deals"])
-        logger.log(0, {f"final/{k[5:]}": v for k, v in final.items()})
+        run.log({f"final/{k[5:]}": v for k, v in final.items()})
     print(
         f"total {time.time() - t_start:.0f}s for {samples} samples "
         f"({(time.time() - t_start) / max(samples, 1) * 1e5:.1f}s per 1e5)"

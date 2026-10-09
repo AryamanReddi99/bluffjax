@@ -400,10 +400,12 @@ def test_reservoir_uniform_under_vmap() -> None:
 
 # ------------------------------------------------------------ NFSP mixing
 class _Recorder:
+    """Stands in for the wandb run of seed 0."""
+
     def __init__(self):
         self.rows = []
 
-    def log(self, seed, metrics):
+    def log(self, metrics):
         self.rows.append(metrics)
 
 
@@ -475,7 +477,7 @@ def test_nfsp_mixing_per_hand(monkeypatch, name: str) -> None:
             start_e=1.0, end_e=0.05, exploration_fraction=0.5, q_lambda=0.9
         )
     logger = _Recorder()
-    monkeypatch.setattr(mod, "LOGGER", logger)
+    monkeypatch.setattr(mod, "WANDB_RUNS", [logger])
     jax.block_until_ready(
         jax.jit(mod.make_train(config))(jax.random.PRNGKey(0), jnp.int32(0))
     )

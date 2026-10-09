@@ -188,11 +188,11 @@ Training scripts live in [`bluffjax/examples/`](bluffjax/examples):
 | 5-Card Draw, 7-Card Stud, Werewolf, Bluff | | | | | ✅ | ✅ | |
 
 ```bash
-uv run --extra baselines python bluffjax/examples/kuhn/kuhn_cfr.py                    # tabular CFR
-uv run --extra baselines python bluffjax/examples/kuhn/kuhn_ppo_nfsp.py wandb=False   # PPO-NFSP in self-play
+uv run --extra baselines python bluffjax/examples/kuhn/kuhn_cfr.py         # tabular CFR
+uv run --extra baselines python bluffjax/examples/kuhn/kuhn_ppo_nfsp.py    # PPO-NFSP in self-play
 ```
 
-`--extra baselines` adds the training dependencies: `distrax`, `optax`, `chex`, `hydra-core` and `wandb`. Each training script reads its `config_*.yaml` through Hydra, so you can override any key on the command line. Wherever you launch from, scripts that save checkpoints write them to `checkpoints/<game>/`, and Hydra writes its config and log to `outputs/`, both at the repo root and gitignored.
+`--extra baselines` adds the training dependencies: `distrax`, `optax`, `chex`, `hydra-core` and `wandb`. Each training script reads its `config_*.yaml` through Hydra, so you can override any key on the command line. A script trains `num_seeds` seeds in parallel on one GPU with `jax.vmap`. Add `wandb=true` to log them to [Weights & Biases](https://wandb.ai), one run per seed, grouped by job. Set `WANDB_MODE=offline` to keep the runs local. Wherever you launch from, scripts that save checkpoints write them to `checkpoints/<game>/`, and Hydra writes its config and log to `outputs/`, both at the repo root and gitignored.
 
 On the solved games, exploitability is measured exactly. The uniform random policy scores 0.4583 on Kuhn and 2.3736 on Leduc, matching OpenSpiel.
 

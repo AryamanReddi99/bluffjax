@@ -44,7 +44,7 @@ compare_interval: 10
 # wandb
 project: bluffjax
 job_type: seven_card_stud_pqn_nfsp
-wandb: true
+wandb: false
 
 # optional checkpoint save
 save_final: false

@@ -39,7 +39,7 @@ seed: 0
 
 project: bluffjax
 job_type: hul_rebel
-wandb: true
+wandb: false
 
 # Hydra configs and logs go to outputs/ at the repo root
 hydra:

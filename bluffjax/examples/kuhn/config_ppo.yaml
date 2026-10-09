@@ -25,7 +25,7 @@ env_kwargs: {}
 # wandb
 project: kuhn
 job_type: ppo
-wandb: True # True, False
+wandb: false # True, False
 
 # Hydra configs and logs go to outputs/ at the repo root
 hydra:

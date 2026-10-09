@@ -21,7 +21,7 @@ env_kwargs: {}
 
 project: bluffjax
 job_type: kuhn_rebel
-wandb: True
+wandb: false
 
 # Hydra configs and logs go to outputs/ at the repo root
 hydra:
