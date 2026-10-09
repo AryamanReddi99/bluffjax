@@ -1,13 +1,15 @@
 """
-Leduc Hold'em - OpenSpiel rules (matches new_test.py / new_cfr.py).
-
-Exact port of OpenSpiel leduc_poker:
+Leduc Hold'em with OpenSpiel's leduc_poker rules:
 - 6-card deck: [J1, J2, Q1, Q2, K1, K2] encoded as [0..5]
 - Ante 1 chip each, starting money 100
 - Two betting rounds, max 2 raises per round
 - Raise size 2 in round 1, 4 in round 2
 - Actions: 0=Fold, 1=Call, 2=Raise (fold only when facing a bet)
 - Returns = money - 100
+
+The player who acts first is drawn at random each hand and also opens round 2,
+so player indices are an internal ordering only. The observation is perfect
+recall: position, own card, public card and both rounds' betting sequences.
 """
 
 import jax
@@ -30,16 +32,13 @@ ANTE = 1
 RAISE_AMOUNT_R1 = 2
 RAISE_AMOUNT_R2 = 4
 MAX_RAISES = 2
+MAX_ACTIONS_PER_ROUND = 4  # e.g. call, raise, raise, call
 
 
-def _rank_hand(
-    agent_cards: IntArray, public_card: IntArray, player: IntArray
-) -> IntArray:
-    """Hand rank for comparison (matches new_test._rank_hand). Pair beats high card."""
-    hand_0 = jnp.where(player == 0, public_card, agent_cards[1 - player])
-    hand_1 = jnp.where(player == 0, agent_cards[player], public_card)
-    lo = jnp.minimum(hand_0, hand_1)
-    hi = jnp.maximum(hand_0, hand_1)
+def _rank_hand(own_card: IntArray, public_card: IntArray) -> IntArray:
+    """Rank of a player's hand (own card and the public card). Pair beats high card."""
+    lo = jnp.minimum(own_card, public_card)
+    hi = jnp.maximum(own_card, public_card)
     # Pair: lo%2==0 and hi==lo+1
     is_pair = (lo % 2 == 0) & (hi == lo + 1)
     pair_rank = 6 * 6 + lo
@@ -50,14 +49,14 @@ def _rank_hand(
 def _leduc_compare(
     agent_cards: IntArray, public_card: IntArray, folded: BoolArray
 ) -> FloatArray:
-    """Determine winners (matches new_test hand ranking). Pair beats high card; ties split."""
+    """Determine winners. Pair beats high card; ties split."""
     num_active = jnp.sum(~folded)
     single_winner = jnp.where(
         num_active == 1, (~folded).astype(jnp.float32), jnp.zeros(2, dtype=jnp.float32)
     )
 
-    rank0 = _rank_hand(agent_cards, public_card, jnp.int32(0))
-    rank1 = _rank_hand(agent_cards, public_card, jnp.int32(1))
+    rank0 = _rank_hand(agent_cards[0], public_card)
+    rank1 = _rank_hand(agent_cards[1], public_card)
     p0_wins = ((rank0 > rank1) & ~folded[0]).astype(jnp.float32)
     p1_wins = ((rank1 > rank0) & ~folded[1]).astype(jnp.float32)
     tie = (rank0 == rank1) & ~folded[0] & ~folded[1]
@@ -79,45 +78,51 @@ class LeducHoldemState:
     num_calls: IntArray
     num_raises: IntArray
     folded: BoolArray
+    start_player_idx: IntArray  # acts first in both rounds
     current_player_idx: IntArray
+    history: IntArray  # (2, 4) actions per round: 0 = none, 1 = call, 2 = raise
+    history_len: IntArray  # actions taken so far in the current round
     absorbing: BoolArray
     done: bool
     timestep: int
 
 
 class LeducHoldem(AECEnv):
-    """Leduc Hold'em: OpenSpiel rules (ante-based, 3 actions). Matches new_test.py exactly."""
+    """Leduc Hold'em: OpenSpiel rules (ante-based, 3 actions), random first player."""
 
     def __init__(self, num_agents: int = 2, horizon: int = 50) -> None:
+        if num_agents != 2:
+            raise ValueError(f"Leduc Hold'em is a 2-player game, got num_agents={num_agents}")
         super().__init__(num_agents=num_agents, horizon=horizon)
         self.ante_amount = ANTE
         self.raise_amount_r1 = RAISE_AMOUNT_R1
         self.raise_amount_r2 = RAISE_AMOUNT_R2
         self.max_raises = MAX_RAISES
         self.starting_money = STARTING_MONEY
-        self.obs_dim = 36
+        self.obs_dim = 2 + 3 + 3 + 2 * MAX_ACTIONS_PER_ROUND * 2  # 24
         self.num_actions = 3  # Fold, Call, Raise
 
     @partial(jax.jit, static_argnums=(0,))
     def obs_from_state(self, state: LeducHoldemState) -> FloatArray:
-        """36-dim: hand rank (0-2), public rank (3-5), my_ante (6-20), opp_ante (21-35). Matches new_test._infoset_key_to_obs."""
+        """
+        24-dim perfect-recall observation for the current player:
+        position one-hot (0-1: first / second to act), own card rank (2-4),
+        public card rank (5-7, zeros in round 1), then each round's betting
+        sequence as 4 action slots of [call, raise] bits (8-15 round 1, 16-23
+        round 2). Matches leduc_exploitability._infoset_key_to_obs.
+        """
         current = state.current_player_idx
-        opp = 1 - current
-        hand = state.agent_cards[current]
-        rank_hand = hand // 2  # physical 0-5 -> rank 0-2
-        my_ante = jnp.minimum(state.ante[current].astype(jnp.int32), 14)
-        opp_ante = jnp.minimum(state.ante[opp].astype(jnp.int32), 14)
+        position = (current - state.start_player_idx) % 2
+        rank_hand = state.agent_cards[current] // 2  # physical 0-5 -> rank 0-2
 
         obs = jnp.zeros(self.obs_dim, dtype=jnp.float32)
-        obs = obs.at[rank_hand].set(1.0)
-        rank_public = jnp.where(state.public_card >= 0, state.public_card // 2, -1)
-        obs = jnp.where(
-            state.public_card >= 0,
-            obs.at[3 + rank_public].set(1.0),
-            obs,
-        )
-        obs = obs.at[6 + my_ante].set(1.0)
-        obs = obs.at[21 + opp_ante].set(1.0)
+        obs = obs.at[position].set(1.0)
+        obs = obs.at[2 + rank_hand].set(1.0)
+        rank_public = jnp.where(state.public_card >= 0, state.public_card // 2, 0)
+        obs = jnp.where(state.public_card >= 0, obs.at[5 + rank_public].set(1.0), obs)
+        history = state.history.reshape(-1)  # (8,) round 1 slots, then round 2
+        bits = jnp.stack([history == 1, history == 2], axis=-1).reshape(-1)  # (16,)
+        obs = obs.at[8:].set(bits.astype(jnp.float32))
         return obs
 
     @partial(jax.jit, static_argnums=(0,))
@@ -134,7 +139,7 @@ class LeducHoldem(AECEnv):
         avail = avail.at[1].set(True)  # Call always
         can_raise = num_raises < self.max_raises
         avail = avail.at[2].set(can_raise)
-        return avail
+        return avail & ~state.done
 
     def _ready_for_next_round(
         self, num_calls: IntArray, num_raises: IntArray, remaining: IntArray
@@ -146,11 +151,12 @@ class LeducHoldem(AECEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, rng: PRNGKeyArray) -> tuple[LeducHoldemState, FloatArray]:
-        """Deal cards, post ante. Player 0 starts round 1 (no blinds)."""
-        rng_shuffle, _ = jax.random.split(rng)
+        """Deal cards, post ante, and draw the player who acts first (no blinds)."""
+        rng_shuffle, rng_start = jax.random.split(rng)
         deck = jnp.arange(6, dtype=jnp.int32)  # physical cards 0-5
         shuffled_deck = jax.random.permutation(rng_shuffle, deck)
         agent_cards = shuffled_deck[:2]
+        start_player = jax.random.randint(rng_start, (), 0, 2, dtype=jnp.int32)
 
         state = LeducHoldemState(
             agent_cards=agent_cards,
@@ -162,7 +168,10 @@ class LeducHoldem(AECEnv):
             num_calls=jnp.int32(0),
             num_raises=jnp.int32(0),
             folded=jnp.zeros(2, dtype=bool),
-            current_player_idx=jnp.int32(0),
+            start_player_idx=start_player,
+            current_player_idx=start_player,
+            history=jnp.zeros((2, MAX_ACTIONS_PER_ROUND), dtype=jnp.int32),
+            history_len=jnp.int32(0),
             absorbing=jnp.zeros(2, dtype=bool),
             done=False,
             timestep=0,
@@ -191,7 +200,6 @@ class LeducHoldem(AECEnv):
         raise_amt = jnp.where(
             state.stage == 1, self.raise_amount_r1, self.raise_amount_r2
         )
-        remaining = 2 - jnp.sum(state.folded)
 
         def process_fold():
             new_folded = state.folded.at[current].set(True)
@@ -224,6 +232,10 @@ class LeducHoldem(AECEnv):
             action, [process_fold, process_call, process_raise]
         )
 
+        # Record the action in this round's betting sequence. A fold is stored
+        # as 0 (no action): it ends the hand, so no later observation needs it.
+        new_history = state.history.at[state.stage - 1, state.history_len].set(action)
+
         remaining_after = 2 - jnp.sum(new_folded)
         round_over = self._ready_for_next_round(
             new_num_calls, new_num_raises, remaining_after
@@ -234,16 +246,19 @@ class LeducHoldem(AECEnv):
         new_stage = jnp.where(round1_ended, jnp.int32(2), state.stage)
         new_num_calls = jnp.where(round_over, jnp.int32(0), new_num_calls)
         new_num_raises = jnp.where(round_over, jnp.int32(0), new_num_raises)
+        new_history_len = jnp.where(round_over, jnp.int32(0), state.history_len + 1)
 
-        def next_player(start: IntArray, folded_mask: BoolArray) -> IntArray:
-            other = 1 - start
-            return jnp.where(folded_mask[other], start, other)
-
-        next_after = next_player(current, new_folded)
-        next_new_round = next_player(jnp.int32(0), new_folded)
+        # The other player acts next within a round; a new round is opened by
+        # the hand's first player (OpenSpiel: player 0 opens both rounds).
+        other = 1 - current
+        next_after = jnp.where(new_folded[other], current, other)
+        start = state.start_player_idx
+        next_new_round = jnp.where(new_folded[start], 1 - start, start)
         new_current = lax.select(round_over, next_new_round, next_after)
 
         game_done = (remaining_after <= 1) | ((state.stage == 2) & round_over)
+        next_timestep = state.timestep + 1
+        done = game_done | (next_timestep >= self.horizon)
 
         def compute_rewards() -> FloatArray:
             pot = jnp.sum(new_ante)
@@ -260,6 +275,7 @@ class LeducHoldem(AECEnv):
             lambda: jnp.zeros(2, dtype=jnp.float32),
         )
 
+        absorbing = jnp.broadcast_to(game_done, (2,))
         next_state = LeducHoldemState(
             agent_cards=state.agent_cards,
             public_card=public_card,
@@ -270,15 +286,17 @@ class LeducHoldem(AECEnv):
             num_calls=new_num_calls,
             num_raises=new_num_raises,
             folded=new_folded,
+            start_player_idx=state.start_player_idx,
             current_player_idx=new_current,
-            absorbing=jnp.broadcast_to(game_done, (2,)),
-            done=game_done,
-            timestep=state.timestep + 1,
+            history=new_history,
+            history_len=new_history_len,
+            absorbing=absorbing,
+            done=done,
+            timestep=next_timestep,
         )
         obs = self.obs_from_state(next_state)
-        absorbing = jnp.broadcast_to(game_done, (2,))
         info = {"timestep": next_state.timestep, "returns": rewards}
-        return next_state, obs, rewards, absorbing, game_done, info
+        return next_state, obs, rewards, absorbing, done, info
 
     def observation_space(self) -> Discrete:
         return Discrete(self.obs_dim)
