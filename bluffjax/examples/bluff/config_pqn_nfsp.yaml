@@ -6,6 +6,7 @@ num_minibatches: 2
 
 # PQN BR params
 lr: 2.5e-4
+anneal_lr: true  # linear decay to 0 over all gradient steps
 start_e: 1.0
 end_e: 0.05
 exploration_fraction: 0.2
@@ -35,8 +36,10 @@ env_kwargs:
 
 # comparison
 compare: true
-compare_mode: checkpoint # "random" or "checkpoint"
-compare_with: ${repo_root:}/bluffjax/examples/bluff/checkpoints/bluff_ppo_nfsp_br_2026-03-03_21-29-57.msgpack
+compare_mode: random # "random" or "checkpoint"
+# checkpoint mode: a file written by save_final, e.g.
+# ${repo_root:}/checkpoints/bluff/<run>/avg_policy_0.msgpack
+compare_with: null
 compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
 compare_steps: 200
 compare_interval: 10

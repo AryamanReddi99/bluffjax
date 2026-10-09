@@ -6,6 +6,7 @@ num_minibatches: 2
 
 # BR (PPO) optimizer
 lr: 2.5e-4
+anneal_lr: true  # linear decay to 0 over all gradient steps
 gamma: 0.99
 gae_lambda: 0.95
 clip_eps: 0.2
@@ -30,14 +31,15 @@ num_seeds: 1
 env_kwargs:
   num_agents: 2
   horizon: 100000
-  init_chips: 100
 
 # comparison
 compare: true
 compare_mode: random # "random" or "checkpoint"
+# compare_with: a network file from save_checkpoints (same env_kwargs), e.g.
+# ${repo_root:}/checkpoints/seven_card_stud/<job_type>_<timestamp>/avg_policy_0.msgpack
 compare_with: ""
 compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
-compare_episodes: 10
+compare_episodes: 10  # deals per evaluation, each played with the learner in every seat
 compare_interval: 10
 
 # wandb

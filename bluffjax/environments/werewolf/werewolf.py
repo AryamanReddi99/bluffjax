@@ -1,9 +1,32 @@
 """
 Werewolf (Mafia) social deduction environment.
 
-Roles: werewolves (2), doctor (1), seer (1), villagers (2).
-Phases: night (doctor -> seer -> werewolves), accuse, vote.
-All observations and actions are relative to the current player.
+Roles: num_werewolves werewolves, one doctor, one seer and villagers for the
+rest, dealt uniformly at random to the player indices. The doctor, the seer
+and the villagers are the humans.
+
+A game cycles night -> accuse -> vote until a team has won:
+- Night: the doctor protects a living player (itself included), the seer
+  learns whether another living player is a werewolf, and each werewolf picks
+  a living human to attack. The victim is the werewolves' most picked target
+  (ties broken uniformly at random) and dies unless the doctor protected it.
+- Accuse: each living player in turn accuses another living player or passes.
+  Everyone sees which players have been accused so far that day.
+- Vote: each living player in turn votes for another living player. The most
+  voted player (ties broken uniformly at random) is eliminated.
+
+The humans win as soon as no werewolf is alive and the werewolves as soon as
+they are at least as many as the living humans. Winners get +10 and losers
+-10. A game that reaches the horizon ends with no winner and no reward.
+
+Turn order: the player index is only an internal ordering. The first speaker
+of the first day is drawn at reset and moves on to the next living player
+every day; the accuse and vote turns go round the living players starting
+from the day's first speaker. At night the doctor acts first, then the seer,
+then the werewolves in an order drawn at reset. Dead players never get a turn.
+
+Observations and actions are relative to the player to act: relative index j
+is the player j seats after it (0 is itself), and action n is the no-op.
 """
 
 import jax
@@ -32,47 +55,51 @@ PHASE_NIGHT = 0
 PHASE_ACCUSE = 1
 PHASE_VOTE = 2
 
-# Night subphase: who acts (doctor, seer, werewolf0, werewolf1)
+# Night slots (index into night_order): doctor, seer, then the werewolves
 NIGHT_DOCTOR = 0
 NIGHT_SEER = 1
-NIGHT_WEREWOLF_0 = 2
-NIGHT_WEREWOLF_1 = 3
+NIGHT_WEREWOLF = 2
+
+WIN_REWARD = 10.0
 
 
 @struct.dataclass
 class WerewolfState:
-    """Werewolf game state."""
+    """Werewolf game state. Player references are absolute indices, -1 = none."""
 
     roles: IntArray  # (num_agents,) 0=villager, 1=werewolf, 2=doctor, 3=seer
     alive: BoolArray  # (num_agents,)
     phase: IntArray  # 0=night, 1=accuse, 2=vote
-    night_subphase: IntArray  # 0=doctor, 1=seer, 2=ww0, 3=ww1
+    night_subphase: IntArray  # night slot of the player to act (see night_order)
     current_player_idx: IntArray
+    # First speaker of the current day; during the night, the player from
+    # which the next day's first speaker is searched (first living one).
+    start_player_idx: IntArray
 
-    # Night order: [doctor_idx, seer_idx, werewolf0_idx, werewolf1_idx]
-    night_order: IntArray  # (4,)
+    # Night order: [doctor, seer, werewolf_0, ..., werewolf_{k-1}]
+    night_order: IntArray  # (2 + num_werewolves,)
 
-    # Night actions (absolute target indices, -1 = not yet chosen)
+    # Tonight's choices
     doctor_target: IntArray
     seer_target: IntArray
-    werewolf_targets: IntArray  # (2,) - each werewolf's target
+    werewolf_targets: IntArray  # (num_werewolves,) pick of night_order[2 + i]
 
-    # Seer's investigation results: (num_agents,) -1=villager, 0=unchecked, 1=werewolf
+    # Seer's investigation results: (num_agents,) -1=human, 0=unchecked, 1=werewolf
     seer_results: FloatArray
 
-    # Accuse phase: (num_agents,) who each player accused (-1 = no accusation)
+    # Accuse phase: (num_agents,) who each player accused today
     accusations: IntArray
 
-    # Vote phase: (num_agents,) who each player voted for
+    # Vote phase: (num_agents,) who each player voted for today
     votes: IntArray
 
-    # Phase progress: for accuse/vote, how many have acted
+    # Turns taken in the current accuse or vote phase
     phase_progress: IntArray
 
     absorbing: BoolArray
-    done: bool
-    game_winner: IntArray  # 0=humans, 1=werewolves
-    timestep: int
+    done: BoolArray
+    game_winner: IntArray  # -1=none (yet, or timeout), 0=humans, 1=werewolves
+    timestep: IntArray
 
 
 class Werewolf(AECEnv):
@@ -85,27 +112,35 @@ class Werewolf(AECEnv):
         horizon: int = 200,
     ) -> None:
         super().__init__(num_agents=num_agents, horizon=horizon)
+        if num_werewolves < 1:
+            raise ValueError(f"num_werewolves must be >= 1, got {num_werewolves}")
+        if 2 * num_werewolves >= num_agents:
+            raise ValueError(
+                f"{num_werewolves} werewolves among {num_agents} players would "
+                "win before the first night; the humans must outnumber them"
+            )
         self.num_werewolves = num_werewolves
         self.num_roles = 4  # villager, werewolf, doctor, seer
+        self.num_night_actors = 2 + num_werewolves  # doctor, seer, werewolves
 
-        # Action: 0 to num_agents-1 = relative target, num_agents = noop (accuse only)
+        # Role of the player at night_order[i] for i < num_night_actors
+        self.role_template = jnp.array(
+            [DOCTOR, SEER]
+            + [WEREWOLF] * num_werewolves
+            + [VILLAGER] * (num_agents - 2 - num_werewolves),
+            dtype=jnp.int32,
+        )
+
+        # Action: 0 to num_agents-1 = relative target, num_agents = noop
         self.num_actions = num_agents + 1
 
         # Obs dim: role(4) + phase(3) + alive(num_agents) + werewolf_teammates(num_agents)
         # + seer_results(num_agents*3 for ternary) + accusations(num_agents)
         self.obs_dim = 4 + 3 + num_agents + num_agents + num_agents * 3 + num_agents
 
-    def _to_relative(
-        self, absolute_idx: IntArray, current_player: IntArray
-    ) -> IntArray:
-        """Convert absolute index to relative (0 = self)."""
-        return (absolute_idx - current_player) % self.num_agents
-
-    def _to_absolute(
-        self, relative_idx: IntArray, current_player: IntArray
-    ) -> IntArray:
-        """Convert relative index to absolute."""
-        return (current_player + relative_idx) % self.num_agents
+    def _seats_from(self, start: IntArray) -> IntArray:
+        """Absolute indices start, start + 1, ..., start + n - 1 (mod n)."""
+        return (start + self.agent_idxs) % self.num_agents
 
     def _roll_for_perspective(
         self, arr: FloatArray, current_player: IntArray
@@ -113,35 +148,38 @@ class Werewolf(AECEnv):
         """Roll array so current player is at index 0 (relative perspective)."""
         return jnp.roll(arr, -current_player, axis=0)
 
-    def _get_next_alive_player(self, current: IntArray, alive: BoolArray) -> IntArray:
-        """Get next alive player starting from (current + 1) % n."""
+    def _first_alive_from(self, start: IntArray, alive: BoolArray) -> IntArray:
+        """First living player at or after start, going round the table."""
+        seats = self._seats_from(start)
+        return seats[jnp.argmax(alive[seats])]
 
-        def scan_fn(carry, offset):
-            idx = (current + 1 + offset) % self.num_agents
-            is_alive = alive[idx]
-            found_idx, found = carry
-            new_found = jnp.where(~found & is_alive, idx, found_idx)
-            new_found_flag = found | is_alive
-            return (new_found, new_found_flag), None
+    def _next_night_slot(
+        self, slot: IntArray, alive: BoolArray, night_order: IntArray
+    ) -> IntArray:
+        """First night slot after slot whose player is alive, or
+        num_night_actors if there is none."""
+        slots = jnp.arange(self.num_night_actors)
+        candidate = (slots > slot) & alive[night_order]
+        return jnp.where(
+            candidate.any(), jnp.argmax(candidate), self.num_night_actors
+        ).astype(jnp.int32)
 
-        (result, _), _ = lax.scan(
-            scan_fn, (current, False), jnp.arange(self.num_agents)
-        )
-        return result
+    def _most_chosen(
+        self, counts: FloatArray, rng: PRNGKeyArray, start: IntArray
+    ) -> IntArray:
+        """Player with the most choices, ties broken uniformly at random
+        (-1 if nobody was chosen). The tie-break draws are taken in seat order
+        from start, so they don't favour any fixed index."""
+        noise = jnp.roll(jax.random.uniform(rng, (self.num_agents,)), start)
+        choice = jnp.argmax(counts + 0.5 * noise)
+        return jnp.where(counts.max() > 0, choice, -1).astype(jnp.int32)
 
-    def _get_first_alive_from(self, start: IntArray, alive: BoolArray) -> IntArray:
-        """Get first alive player at or after start."""
-
-        def scan_fn(carry, offset):
-            idx = (start + offset) % self.num_agents
-            is_alive = alive[idx]
-            found_idx, found = carry
-            new_found = jnp.where(~found & is_alive, idx, found_idx)
-            new_found_flag = found | is_alive
-            return (new_found, new_found_flag), None
-
-        (result, _), _ = lax.scan(scan_fn, (start, False), jnp.arange(self.num_agents))
-        return result
+    def _winner(self, alive: BoolArray, roles: IntArray) -> IntArray:
+        """0 if the humans have won, 1 if the werewolves have, -1 otherwise."""
+        num_ww = jnp.sum(alive & (roles == WEREWOLF))
+        num_humans = jnp.sum(alive & (roles != WEREWOLF))
+        winner = jnp.where(num_ww >= num_humans, 1, -1)
+        return jnp.where(num_ww == 0, 0, winner).astype(jnp.int32)
 
     @partial(jax.jit, static_argnums=(0,))
     def obs_from_state(self, state: WerewolfState) -> FloatArray:
@@ -170,21 +208,14 @@ class Werewolf(AECEnv):
         # 5. Seer results: ternary per player (-1, 0, 1), relative. Encode as 3 values each.
         seer_rel = self._roll_for_perspective(state.seer_results, cp)
         is_seer = state.roles[cp] == SEER
-
-        # Encode each of num_agents positions: 3 dims for -1/0/1
-        def encode_ternary(val):
-            return jax.nn.one_hot((val + 1).astype(jnp.int32), 3, dtype=jnp.float32)
-
-        seer_encoded = jax.vmap(encode_ternary)(seer_rel).reshape(-1)
+        seer_encoded = jax.nn.one_hot(
+            (seer_rel + 1).astype(jnp.int32), 3, dtype=jnp.float32
+        ).reshape(-1)
         seer_obs = jnp.where(is_seer, seer_encoded, jnp.zeros(self.num_agents * 3))
 
-        # 6. Accusations: binary relative - who was accused
-        # accused_by_any[j] = 1 if any player accused j
-        valid_acc = state.accusations >= 0
+        # 6. Accusations: binary relative - who has been accused today
         accused_by_any = jnp.any(
-            (state.accusations[None, :] == jnp.arange(self.num_agents)[:, None])
-            & valid_acc[None, :],
-            axis=1,
+            state.accusations[None, :] == self.agent_idxs[:, None], axis=1
         ).astype(jnp.float32)
         accusations_relative = self._roll_for_perspective(accused_by_any, cp)
 
@@ -202,243 +233,148 @@ class Werewolf(AECEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_avail_actions(self, state: WerewolfState) -> BoolArray:
-        """Available actions for current player. Action i = relative target i, num_agents = noop."""
+        """Available actions of the player to act. Action i targets the player
+        i seats after it (relative index i); action num_agents is the no-op.
+
+        Night: the doctor may protect any living player (itself included), the
+        seer may investigate any other living player and a werewolf may attack
+        any living human. Accuse: any other living player, or pass (no-op).
+        Vote: any other living player. The no-op is also available when no
+        target is (never the case in a reachable state)."""
         cp = state.current_player_idx
-
-        def night_avail():
-            actor_idx = state.night_order[state.night_subphase]
-            is_actor = (cp == actor_idx) & state.alive[actor_idx]
-            doctor_mask = state.alive
-            seer_mask = state.alive
-            werewolf_mask = state.alive & (state.roles != WEREWOLF)
-            night_mask = jnp.where(
-                state.night_subphase == NIGHT_DOCTOR,
-                doctor_mask,
-                jnp.where(
-                    state.night_subphase == NIGHT_SEER,
-                    seer_mask,
-                    werewolf_mask,
-                ),
-            )
-            avail = jnp.concatenate(
-                [
-                    jnp.where(
-                        is_actor, night_mask, jnp.zeros(self.num_agents, dtype=bool)
-                    ),
-                    jnp.array([~is_actor], dtype=bool),
-                ]
-            )
-            return avail
-
-        def accuse_avail():
-            abs_indices = (cp + jnp.arange(self.num_agents)) % self.num_agents
-            can_accuse = state.alive[abs_indices] & (jnp.arange(self.num_agents) != 0)
-            avail = jnp.concatenate(
-                [
-                    jnp.where(
-                        state.alive[cp],
-                        can_accuse,
-                        jnp.zeros(self.num_agents, dtype=bool),
-                    ),
-                    jnp.array([True], dtype=bool),
-                ]
-            )
-            return avail
-
-        def vote_avail():
-            abs_indices = (cp + jnp.arange(self.num_agents)) % self.num_agents
-            can_vote = state.alive[abs_indices] & (jnp.arange(self.num_agents) != 0)
-            avail = jnp.concatenate(
-                [
-                    jnp.where(
-                        state.alive[cp],
-                        can_vote,
-                        jnp.zeros(self.num_agents, dtype=bool),
-                    ),
-                    jnp.array([~state.alive[cp]], dtype=bool),
-                ]
-            )
-            return avail
-
-        return lax.switch(
-            state.phase,
-            [night_avail, accuse_avail, vote_avail],
+        seats = self._seats_from(cp)  # absolute index of each relative target
+        alive = state.alive[seats]
+        not_self = self.agent_idxs != 0
+        slot = state.night_subphase
+        night_targets = jnp.where(
+            slot == NIGHT_DOCTOR,
+            alive,
+            jnp.where(
+                slot == NIGHT_SEER,
+                alive & not_self,
+                alive & (state.roles[seats] != WEREWOLF),
+            ),
         )
+        day_targets = alive & not_self
+        targets = jnp.where(state.phase == PHASE_NIGHT, night_targets, day_targets)
+        noop = (state.phase == PHASE_ACCUSE) | ~targets.any()
+        return jnp.concatenate([targets, noop[None]])
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, rng: PRNGKeyArray) -> tuple[WerewolfState, FloatArray]:
-        """Initialize game with random role assignment."""
-        rng_roles, rng_order = jax.random.split(rng)
+        """Initialize game with random role assignment and first speaker."""
+        rng_roles, rng_start = jax.random.split(rng)
 
-        # Roles: 2 werewolves, 1 doctor, 1 seer, 2 villagers
-        roles_template = jnp.array(
-            [VILLAGER, VILLAGER, WEREWOLF, WEREWOLF, DOCTOR, SEER],
-            dtype=jnp.int32,
+        # The player at seats[i] gets role_template[i]: the first two are the
+        # doctor and the seer, the next num_werewolves the werewolves in their
+        # (random) night order.
+        seats = jax.random.permutation(rng_roles, self.num_agents).astype(jnp.int32)
+        roles = (
+            jnp.zeros(self.num_agents, dtype=jnp.int32)
+            .at[seats]
+            .set(self.role_template)
         )
-        roles = jax.random.permutation(rng_roles, roles_template)
-
-        alive = jnp.ones(self.num_agents, dtype=bool)
-        night_order = jnp.zeros(4, dtype=jnp.int32)
-        doctor_idx = jnp.argmax(roles == DOCTOR)
-        seer_idx = jnp.argmax(roles == SEER)
-        ww_mask = roles == WEREWOLF
-        ww_indices = jnp.where(ww_mask, self.agent_idxs, self.num_agents)
-        ww0 = jnp.min(ww_indices)
-        ww1 = jnp.min(jnp.where(ww_indices != ww0, ww_indices, self.num_agents + 1))
-        night_order = night_order.at[0].set(doctor_idx)
-        night_order = night_order.at[1].set(seer_idx)
-        night_order = night_order.at[2].set(ww0)
-        night_order = night_order.at[3].set(ww1)
+        night_order = seats[: self.num_night_actors]
+        start_player = jax.random.randint(rng_start, (), 0, self.num_agents).astype(
+            jnp.int32
+        )
 
         state = WerewolfState(
             roles=roles,
-            alive=alive,
+            alive=jnp.ones(self.num_agents, dtype=bool),
             phase=jnp.int32(PHASE_NIGHT),
-            night_subphase=jnp.int32(0),
-            current_player_idx=night_order[0],
+            night_subphase=jnp.int32(NIGHT_DOCTOR),
+            current_player_idx=night_order[NIGHT_DOCTOR],
+            start_player_idx=start_player,
             night_order=night_order,
             doctor_target=jnp.int32(-1),
             seer_target=jnp.int32(-1),
-            werewolf_targets=jnp.array([-1, -1], dtype=jnp.int32),
+            werewolf_targets=jnp.full(self.num_werewolves, -1, dtype=jnp.int32),
             seer_results=jnp.zeros(self.num_agents, dtype=jnp.float32),
             accusations=jnp.full(self.num_agents, -1, dtype=jnp.int32),
             votes=jnp.full(self.num_agents, -1, dtype=jnp.int32),
             phase_progress=jnp.int32(0),
             absorbing=jnp.zeros(self.num_agents, dtype=bool),
-            done=False,
-            game_winner=jnp.array(-1, dtype=jnp.int32),
-            timestep=0,
+            done=jnp.bool_(False),
+            game_winner=jnp.int32(-1),
+            timestep=jnp.int32(0),
         )
-
-        # Current player might be dead (shouldn't happen at start) - advance to first alive in night order
-        first_actor = night_order[0]
-        current = jnp.where(
-            state.alive[first_actor],
-            first_actor,
-            self._get_first_alive_from(0, state.alive),
-        )
-        state = state.replace(current_player_idx=current)
-
         obs = self.obs_from_state(state)
         return state, obs
 
-    def _resolve_night(
-        self, state: WerewolfState, rng: PRNGKeyArray
-    ) -> tuple[WerewolfState, PRNGKeyArray]:
-        """Resolve night: apply kill (unless healed), update seer results."""
-        rng_tie, rng_next = jax.random.split(rng)
-
-        # Werewolf target: majority vote, random if tied
-        ww0_tgt = state.werewolf_targets[0]
-        ww1_tgt = state.werewolf_targets[1]
-        # If only one werewolf alive, use their vote
-        ww0_alive = state.alive[state.night_order[2]]
-        ww1_alive = state.alive[state.night_order[3]]
-        vote0 = jnp.where(ww0_alive, ww0_tgt, -1)
-        vote1 = jnp.where(ww1_alive, ww1_tgt, -1)
-
-        # Pick target: if same, use it; if different, random
-        same_vote = (vote0 == vote1) & (vote0 >= 0)
-        kill_target = jnp.where(
-            same_vote,
-            vote0,
-            jnp.where(
-                vote0 < 0,
-                vote1,
-                jnp.where(
-                    vote1 < 0,
-                    vote0,
-                    jax.random.choice(
-                        rng_tie,
-                        jnp.array([vote0, vote1]),
-                        shape=(),
-                    ),
-                ),
+    def _end_or(self, state: WerewolfState, continue_fn) -> WerewolfState:
+        """Ends the game if a team has won, otherwise applies continue_fn."""
+        winner = self._winner(state.alive, state.roles)
+        return lax.cond(
+            winner >= 0,
+            lambda s: s.replace(
+                done=jnp.bool_(True),
+                absorbing=jnp.ones(self.num_agents, dtype=bool),
+                game_winner=winner,
             ),
+            continue_fn,
+            state,
         )
 
-        # Doctor protection
-        healed = (state.doctor_target >= 0) & (kill_target == state.doctor_target)
-        actual_kill = jnp.where(healed, -1, kill_target)
-
-        # Apply death
-        new_alive = jnp.where(
-            (self.agent_idxs == actual_kill) & (actual_kill >= 0),
-            False,
-            state.alive,
-        )
-
-        # Seer results already updated when seer acted in step_env
-
-        # Check win: werewolves win if ww >= humans
-        num_ww = jnp.sum((state.roles == WEREWOLF) & new_alive)
-        num_humans = jnp.sum((state.roles != WEREWOLF) & new_alive)
-        werewolves_win = num_ww >= num_humans
-
-        next_state = state.replace(
-            alive=new_alive,
+    def _start_day(self, state: WerewolfState) -> WerewolfState:
+        """Accuse phase from the first living player at or after start_player_idx."""
+        first = self._first_alive_from(state.start_player_idx, state.alive)
+        return state.replace(
             phase=jnp.int32(PHASE_ACCUSE),
-            current_player_idx=jnp.int32(0),
+            start_player_idx=first,
+            current_player_idx=first,
             accusations=jnp.full(self.num_agents, -1, dtype=jnp.int32),
             phase_progress=jnp.int32(0),
-            absorbing=jnp.broadcast_to(werewolves_win, (self.num_agents,)),
-            done=werewolves_win,
-            game_winner=jnp.where(werewolves_win, 1, -1),
-        )
-        return next_state, rng_next
-
-    def _resolve_vote(
-        self, state: WerewolfState, rng: PRNGKeyArray
-    ) -> tuple[WerewolfState, PRNGKeyArray]:
-        """Resolve vote: eliminate player with most votes, random if tied."""
-        rng_tie, rng_next = jax.random.split(rng)
-
-        # Count votes per player (only from alive voters)
-        vote_counts = jnp.zeros(self.num_agents, dtype=jnp.float32)
-        for i in range(self.num_agents):
-            v = state.votes[i]
-            vote_counts = jnp.where(
-                state.alive[i] & (v >= 0),
-                vote_counts.at[v].add(1.0),
-                vote_counts,
-            )
-
-        # Break ties with random noise
-        noise = jax.random.uniform(rng_tie, (self.num_agents,)) * 0.1
-        vote_counts_noisy = vote_counts + noise
-        elim_idx = jnp.argmax(vote_counts_noisy)
-        max_votes = jnp.max(vote_counts)
-
-        new_alive = jnp.where(
-            (self.agent_idxs == elim_idx) & (max_votes > 0),
-            False,
-            state.alive,
         )
 
-        # Check win: humans win if no werewolves left
-        num_ww = jnp.sum((state.roles == WEREWOLF) & new_alive)
-        humans_win = num_ww == 0
-        num_humans = jnp.sum((state.roles != WEREWOLF) & new_alive)
-        werewolves_win = num_ww >= num_humans
-
-        game_over = humans_win | werewolves_win
-        winner = jnp.where(humans_win, 0, jnp.where(werewolves_win, 1, -1))
-
-        next_state = state.replace(
-            alive=new_alive,
-            phase=jnp.int32(PHASE_NIGHT),
-            night_subphase=jnp.int32(0),
-            current_player_idx=state.night_order[0],
-            doctor_target=jnp.int32(-1),
-            seer_target=jnp.int32(-1),
-            werewolf_targets=jnp.array([-1, -1], dtype=jnp.int32),
+    def _start_vote(self, state: WerewolfState) -> WerewolfState:
+        """Vote phase from the day's first speaker."""
+        return state.replace(
+            phase=jnp.int32(PHASE_VOTE),
+            current_player_idx=state.start_player_idx,
             votes=jnp.full(self.num_agents, -1, dtype=jnp.int32),
             phase_progress=jnp.int32(0),
-            absorbing=jnp.broadcast_to(game_over, (self.num_agents,)),
-            done=game_over,
-            game_winner=winner,
         )
-        return next_state, rng_next
+
+    def _start_night(self, state: WerewolfState) -> WerewolfState:
+        """Night from its first living actor; the next day's first speaker
+        moves on to the next living player."""
+        slot = self._next_night_slot(jnp.int32(-1), state.alive, state.night_order)
+        return state.replace(
+            phase=jnp.int32(PHASE_NIGHT),
+            night_subphase=slot,
+            current_player_idx=state.night_order[slot],
+            start_player_idx=self._first_alive_from(
+                state.start_player_idx + 1, state.alive
+            ),
+            doctor_target=jnp.int32(-1),
+            seer_target=jnp.int32(-1),
+            werewolf_targets=jnp.full(self.num_werewolves, -1, dtype=jnp.int32),
+            phase_progress=jnp.int32(0),
+        )
+
+    def _resolve_night(self, state: WerewolfState, rng: PRNGKeyArray) -> WerewolfState:
+        """Resolve night: apply the attack unless healed, then check for a win."""
+        werewolves = state.night_order[NIGHT_WEREWOLF:]
+        picks = jnp.where(state.alive[werewolves], state.werewolf_targets, -1)
+        counts = jnp.sum(
+            picks[:, None] == self.agent_idxs[None, :], axis=0, dtype=jnp.float32
+        )
+        victim = self._most_chosen(counts, rng, state.start_player_idx)
+        healed = victim == state.doctor_target
+        killed = (self.agent_idxs == victim) & ~healed
+        state = state.replace(alive=state.alive & ~killed)
+        return self._end_or(state, self._start_day)
+
+    def _resolve_vote(self, state: WerewolfState, rng: PRNGKeyArray) -> WerewolfState:
+        """Resolve vote: eliminate the most voted player, then check for a win."""
+        valid = state.alive[:, None] & (
+            state.votes[:, None] == self.agent_idxs[None, :]
+        )
+        counts = jnp.sum(valid, axis=0, dtype=jnp.float32)
+        eliminated = self._most_chosen(counts, rng, state.start_player_idx)
+        state = state.replace(alive=state.alive & (self.agent_idxs != eliminated))
+        return self._end_or(state, self._start_night)
 
     @partial(jax.jit, static_argnums=(0,))
     def step_env(
@@ -453,177 +389,105 @@ class Werewolf(AECEnv):
     ]:
         """Execute one step."""
         cp = state.current_player_idx
+        # Relative action -> absolute target (-1 for the no-op)
+        target = jnp.where(
+            action < self.num_agents, (cp + action) % self.num_agents, -1
+        ).astype(jnp.int32)
 
-        # Convert relative action to absolute (for action < num_agents)
-        abs_target = self._to_absolute(jnp.minimum(action, self.num_agents - 1), cp)
-        is_noop = action >= self.num_agents
-
-        rewards = jnp.zeros(self.num_agents, dtype=jnp.float32)
-
-        def do_night():
-            actor_idx = state.night_order[state.night_subphase]
-            is_actor = (cp == actor_idx) & state.alive[actor_idx]
-
-            def doctor_step():
-                return state.replace(
-                    doctor_target=jnp.where(is_noop, -1, abs_target),
-                    night_subphase=jnp.int32(NIGHT_SEER),
-                    current_player_idx=state.night_order[NIGHT_SEER],
-                )
-
-            def seer_step():
-                new_seer = jnp.where(
-                    (abs_target >= 0) & (self.agent_idxs == abs_target),
-                    (state.roles == WEREWOLF).astype(jnp.float32) * 2 - 1,
-                    state.seer_results,
-                )
-                return state.replace(
-                    seer_target=jnp.where(is_noop, -1, abs_target),
-                    seer_results=new_seer,
-                    night_subphase=jnp.int32(NIGHT_WEREWOLF_0),
-                    current_player_idx=state.night_order[NIGHT_WEREWOLF_0],
-                )
-
-            def werewolf_step():
-                ww_idx = state.night_subphase - NIGHT_WEREWOLF_0
-                new_targets = state.werewolf_targets.at[ww_idx].set(
-                    jnp.where(is_noop, -1, abs_target)
-                )
-                next_sub = state.night_subphase + 1
-                return state.replace(
-                    werewolf_targets=new_targets,
-                    night_subphase=next_sub,
-                    current_player_idx=jnp.where(
-                        next_sub < 4,
-                        state.night_order[next_sub],
-                        cp,
-                    ),
-                )
-
-            def skip_action():
-                next_sub = state.night_subphase + 1
-                next_actor = jnp.where(
-                    next_sub < 4,
-                    state.night_order[next_sub],
-                    state.night_order[0],
-                )
-                # When next_sub >= 4, set night_subphase=4 to trigger resolve
-                return state.replace(
-                    night_subphase=jnp.minimum(next_sub, 4),
-                    current_player_idx=next_actor,
-                )
-
-            ns = lax.cond(
-                is_actor,
-                lambda: lax.switch(
-                    jnp.clip(state.night_subphase, 0, 2),
-                    [doctor_step, seer_step, werewolf_step],
+        def do_night(s: WerewolfState) -> WerewolfState:
+            slot = s.night_subphase
+            is_seer = slot == NIGHT_SEER
+            checked = is_seer & (self.agent_idxs == target)
+            seer_results = jnp.where(
+                checked,
+                jnp.where(s.roles == WEREWOLF, 1.0, -1.0),
+                s.seer_results,
+            )
+            werewolf_slot = jnp.arange(self.num_werewolves) == slot - NIGHT_WEREWOLF
+            s = s.replace(
+                doctor_target=jnp.where(slot == NIGHT_DOCTOR, target, s.doctor_target),
+                seer_target=jnp.where(is_seer, target, s.seer_target),
+                seer_results=seer_results,
+                werewolf_targets=jnp.where(werewolf_slot, target, s.werewolf_targets),
+            )
+            next_slot = self._next_night_slot(slot, s.alive, s.night_order)
+            return lax.cond(
+                next_slot < self.num_night_actors,
+                lambda s_: s_.replace(
+                    night_subphase=next_slot,
+                    current_player_idx=s_.night_order[
+                        jnp.minimum(next_slot, self.num_night_actors - 1)
+                    ],
                 ),
-                skip_action,
+                lambda s_: self._resolve_night(s_, rng),
+                s,
             )
-            ns, rng_out = lax.cond(
-                ns.night_subphase >= 4,
-                lambda s, r: self._resolve_night(s, r),
-                lambda s, r: (s, r),
-                ns,
-                rng,
-            )
-            ns = lax.cond(
-                ns.phase == PHASE_ACCUSE,
-                lambda s: s.replace(
-                    current_player_idx=self._get_first_alive_from(0, s.alive),
-                ),
-                lambda s: s,
-                ns,
-            )
-            return ns, rng_out
 
-        def do_accuse():
-            new_accusations = state.accusations.at[cp].set(
-                jnp.where(is_noop, -1, abs_target)
+        def next_speaker(s: WerewolfState) -> WerewolfState:
+            return s.replace(
+                current_player_idx=self._first_alive_from(
+                    s.current_player_idx + 1, s.alive
+                )
             )
-            # Iterate 0,1,2,...,num_agents-1 (each player acts once)
-            next_idx = cp + 1
-            all_done = next_idx >= self.num_agents
-            next_player = jnp.where(all_done, 0, next_idx)
-            ns = state.replace(
-                accusations=new_accusations,
-                current_player_idx=next_player,
-            )
-            ns = lax.cond(
-                all_done,
-                lambda s: s.replace(
-                    phase=jnp.int32(PHASE_VOTE),
-                    current_player_idx=jnp.int32(0),
-                    votes=jnp.full(self.num_agents, -1, dtype=jnp.int32),
-                ),
-                lambda s: s,
-                ns,
-            )
-            return ns, rng
 
-        def do_vote():
-            new_votes = state.votes.at[cp].set(jnp.where(is_noop, -1, abs_target))
-            next_idx = cp + 1
-            all_done = next_idx >= self.num_agents
-            next_player = jnp.where(all_done, 0, next_idx)
-            ns = state.replace(
-                votes=new_votes,
-                current_player_idx=next_player,
+        def do_accuse(s: WerewolfState) -> WerewolfState:
+            s = s.replace(
+                accusations=s.accusations.at[cp].set(target),
+                phase_progress=s.phase_progress + 1,
             )
-            ns, rng_out = lax.cond(
-                all_done,
-                lambda s, r: self._resolve_vote(s, r),
-                lambda s, r: (s, r),
-                ns,
-                rng,
+            return lax.cond(
+                s.phase_progress >= jnp.sum(s.alive),
+                self._start_vote,
+                next_speaker,
+                s,
             )
-            return ns, rng_out
 
-        next_state, rng = lax.switch(
-            state.phase,
-            [do_night, do_accuse, do_vote],
+        def do_vote(s: WerewolfState) -> WerewolfState:
+            s = s.replace(
+                votes=s.votes.at[cp].set(target),
+                phase_progress=s.phase_progress + 1,
+            )
+            return lax.cond(
+                s.phase_progress >= jnp.sum(s.alive),
+                lambda s_: self._resolve_vote(s_, rng),
+                next_speaker,
+                s,
+            )
+
+        next_state = lax.switch(state.phase, [do_night, do_accuse, do_vote], state)
+
+        # Rewards when a team wins at this step
+        decided = (next_state.game_winner >= 0) & (state.game_winner < 0)
+        team_won = jnp.where(
+            state.roles == WEREWOLF,
+            next_state.game_winner == 1,
+            next_state.game_winner == 0,
         )
+        rewards = jnp.where(
+            decided, jnp.where(team_won, WIN_REWARD, -WIN_REWARD), 0.0
+        ).astype(jnp.float32)
 
-        # Compute rewards at episode end
-        def compute_rewards():
-            is_ww = state.roles == WEREWOLF
-            humans_win = next_state.game_winner == 0
-            werewolves_win = next_state.game_winner == 1
-            win = jnp.where(is_ww, werewolves_win, humans_win)
-            return jnp.where(win, 10.0, -10.0).astype(jnp.float32)
-
-        rewards = lax.cond(
-            next_state.done,
-            compute_rewards,
-            lambda: jnp.zeros(self.num_agents, dtype=jnp.float32),
-        )
-
+        # Horizon: the game ends with no winner and no reward
         next_timestep = state.timestep + 1
-        horizon_done = next_timestep >= self.horizon
-        next_state = next_state.replace(timestep=next_timestep)
-        next_state = lax.cond(
-            horizon_done,
-            lambda: next_state.replace(
-                done=True,
-                absorbing=jnp.ones(self.num_agents, dtype=bool),
-                game_winner=jnp.int32(0),  # humans win on timeout?
-            ),
-            lambda: next_state,
+        done = next_state.done | (next_timestep >= self.horizon)
+        next_state = next_state.replace(
+            timestep=next_timestep,
+            done=done,
+            absorbing=jnp.broadcast_to(done, (self.num_agents,)),
         )
 
         obs = self.obs_from_state(next_state)
-        absorbing = jnp.broadcast_to(next_state.done, (self.num_agents,))
-        human_win = (next_state.game_winner == 0).astype(jnp.float32)
-        werewolf_win = (next_state.game_winner == 1).astype(jnp.float32)
-        is_werewolf = (next_state.roles == WEREWOLF).astype(jnp.float32)
-        game_winner = is_werewolf * werewolf_win + (1.0 - is_werewolf) * human_win
+        player_won = jnp.where(
+            next_state.roles == WEREWOLF,
+            next_state.game_winner == 1,
+            next_state.game_winner == 0,
+        ).astype(jnp.float32)
         info = {
             "returns": rewards,
             "timestep": next_state.timestep,
-            "game_winner": game_winner,
+            "game_winner": player_won,  # 1 for each player whose team has won
         }
-        return next_state, obs, rewards, absorbing, next_state.done, info
+        return next_state, obs, rewards, next_state.absorbing, next_state.done, info
 
     @partial(jax.jit, static_argnums=(0,))
     def step(

@@ -6,6 +6,7 @@ num_minibatches: 2
 
 # BR (PPO) optimizer
 lr: 2.5e-4
+anneal_lr: true  # linear decay to 0 over all gradient steps
 gamma: 0.99
 gae_lambda: 0.95
 clip_eps: 0.2

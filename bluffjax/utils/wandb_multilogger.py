@@ -6,16 +6,25 @@ started from one python process can be logged separately
 Wandb typically only allows one process to spawn for each python
 process, so this allows us to spawn multiple processes for each
 wandb run, place them in a queue awaiting inputs, and log to them.
+
+The workers are started with the "spawn" method: forking a process after JAX
+has started its threads can deadlock. They are daemons, so a crashed training
+run can't hang on them; finish() joins them so every queued log is sent.
+With spawn, a script that creates the logger must guard its entry point
+with `if __name__ == "__main__":` (all training scripts do).
 """
 
-import wandb
 import multiprocessing as mp
+
+import wandb
 
 from bluffjax.utils.paths import REPO_ROOT
 
+_CTX = mp.get_context("spawn")
+
 
 def worker(
-    project: str, group: str, job_type: str, name: str, config: dict, mode: str, queue: mp.Queue
+    project: str, group: str, job_type: str, name: str, config: dict, mode: str, queue
 ) -> None:
     wandb.init(
         project=project,
@@ -37,7 +46,6 @@ def worker(
     finally:
         # Ensure W&B run is properly closed
         wandb.finish()
-        return
 
 
 class WandbMultiLogger:
@@ -49,9 +57,9 @@ class WandbMultiLogger:
 
     def __init__(
         self,
-        project: int,
-        group: int,
-        job_type: int,
+        project: str,
+        group: str,
+        job_type: str,
         config: dict,
         mode: str,
         seed: int,
@@ -67,10 +75,10 @@ class WandbMultiLogger:
         self.processes = {}
         self.queues = {}
         for i in range(num_seeds):
-            q = mp.Queue()
+            q = _CTX.Queue()
             self.queues[i] = q
             wandb_settings.update({"name": f"{seed}_{i}", "queue": q})
-            p = mp.Process(target=worker, kwargs=wandb_settings)
+            p = _CTX.Process(target=worker, kwargs=wandb_settings, daemon=True)
             p.start()
             self.processes[i] = p
 

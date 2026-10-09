@@ -1,5 +1,42 @@
 """
-7-Card Stud poker environment.
+7-Card Stud poker environment (limit betting, 2 to 10 players).
+
+Deal
+- Cards are dealt from one shuffled deck, street by street. On 3rd street
+  every player gets two face-down hole cards and a face-up door card; on 4th,
+  5th and 6th street one face-up card and on 7th street one face-down card,
+  each only to the players still in the hand.
+- Running out of cards: when the deck can't give every player still in the
+  hand a card and keep one card for each later street, the street is dealt as
+  a single face-up community card that all of them use as their card of that
+  street. With up to 7 players this never happens. With 8 it can only happen on
+  7th street and only when the deck is short, which is the standard stud rule.
+  With 9 or 10 players it can also happen on 6th street. The deal works for
+  up to 16 players.
+
+Order of play
+- Every player antes; the lowest door card (suits break ties, card // 13)
+  posts the bring-in, and the player after it acts first on 3rd street.
+- On 4th to 7th street the best hand showing acts first: pairs, two pair,
+  trips and quads, then high cards (a 7th-street community card makes it a
+  five-card board, ranked as a poker hand). Ties go to the tied player who
+  comes first clockwise after the bring-in. The cards decide the bring-in, so
+  no seat index is favoured.
+
+Betting: limit, bets of small_bet on 3rd and 4th street and big_bet after,
+at most allowed_raise_num raises per street. Rewards are net chips divided by
+big_bet (big bets).
+
+Observation (for the player to act; seat j is the player j places clockwise
+from it, seat 0 is itself):
+- [0, 52): own face-down cards (multi-hot).
+- [52, 52 + 260 n): face-up cards, 52 * (5 j + t) + card for seat j and street
+  t = 0 (3rd street, the door card) to 4 (7th street, only a community card).
+  Only cards dealt so far are shown; a community card shows for every player
+  who got it. Folded players' face-up cards stay visible.
+- next n - 1: seat j = 1, ..., n - 1 has folded.
+- next 25: raise count of each street (5 streets x one-hot of 0-4).
+- next n: own position clockwise from the bring-in (one-hot).
 """
 
 import jax
@@ -17,15 +54,27 @@ from bluffjax.utils.typing import (
 from bluffjax.environments.env import AECEnv
 from bluffjax.environments.spaces import Discrete
 from bluffjax.utils.game_utils.poker_utils import (
+    _card_rank,
+    _card_suit,
     _compare_hands,
     _get_bring_in_idx,
+    _score_five_card_hand,
     _score_visible_upcards,
 )
+
+# Card slots of a player: 0, 1 hole cards and 2 door card (3rd street), then
+# one slot per street: 3 (4th), 4 (5th), 5 (6th), 6 (7th).
+SLOT_STREET = jnp.array([0, 0, 0, 1, 2, 3, 4], dtype=jnp.int32)
+# Face up unless the street's card was a community card (always face up).
+SLOT_FACE_UP = jnp.array([False, False, True, True, True, True, False])
 
 
 @struct.dataclass
 class SevenCardStudState:
-    agent_cards: IntArray  # (num_agents, 7) - all 7 cards per player
+    deck: IntArray  # (52,) shuffled deck, dealt from the front
+    num_dealt: IntArray  # cards taken from the deck so far
+    agent_cards: IntArray  # (num_agents, 7) card per slot, -1 = not dealt
+    community: BoolArray  # (5,) the street was dealt as one community card
     chips_in: FloatArray  # (num_agents,) - per-player contribution this hand
     bring_in_idx: IntArray  # who posts bring-in (3rd street)
     current_player_idx: IntArray
@@ -38,16 +87,14 @@ class SevenCardStudState:
     timestep: int
 
 
-# Visibility: stage 0 -> indices [2], stage 1 -> [2,3], stage 2 -> [2,3,4], stage 3,4 -> [2,3,4,5]
-NUM_VISIBLE_BY_STAGE = jnp.array([1, 2, 3, 4, 4], dtype=jnp.int32)
-
-
 class SevenCardStud(AECEnv):
-    def __init__(
-        self, num_agents: int = 2, horizon: int = 100_000, init_chips: int = 100
-    ) -> None:
+    def __init__(self, num_agents: int = 2, horizon: int = 100_000) -> None:
         super().__init__(num_agents=num_agents, horizon=horizon)
         self.deck_size = 52
+        self.num_streets = 5
+        if not 2 <= num_agents <= (self.deck_size - (self.num_streets - 1)) // 3:
+            # 3rd street must leave one card for each later street.
+            raise ValueError(f"7-Card Stud needs 2 to 16 players, got {num_agents}")
         self.small_bet = 1
         self.big_bet = 2
         self.ante = 0.5
@@ -55,107 +102,102 @@ class SevenCardStud(AECEnv):
         self.raise_amount_small = self.small_bet
         self.raise_amount_big = self.big_bet
         self.allowed_raise_num = 4
-        self.init_chips = init_chips
-        self.num_betting_rounds = 5
-        # obs: 52 own + (num_agents-1)*4*52 others' visible + 25 raise history + num_agents position
-        self.base_obs_dim = 52 + (num_agents - 1) * 4 * 52 + 25
-        self.obs_dim = self.base_obs_dim + num_agents
+        self.num_betting_rounds = self.num_streets
+        # own face-down cards, face-up cards (n seats x 5 streets), opponents
+        # folded, raise history, position after the bring-in
+        self.obs_dim = (
+            52
+            + num_agents * self.num_streets * 52
+            + (num_agents - 1)
+            + self.num_betting_rounds * (self.allowed_raise_num + 1)
+            + num_agents
+        )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def _get_visible_slice(self, stage: IntArray) -> IntArray:
-        """Returns end index for visible cards: stage 0->1, 1->2, 2->3, 3->4, 4->4."""
-        return NUM_VISIBLE_BY_STAGE[stage] + 2  # 2 is start index
+    def _next_active(self, idx: IntArray, folded: BoolArray) -> IntArray:
+        """First player clockwise after idx who hasn't folded."""
+        candidates = (idx + jnp.arange(1, self.num_agents + 1)) % self.num_agents
+        return candidates[jnp.argmax(~folded[candidates])]
 
-    @partial(jax.jit, static_argnums=(0,))
-    def _get_first_to_act_after_bring_in(
-        self, bring_in_idx: IntArray, folded: BoolArray
-    ) -> IntArray:
-        """First non-folded player after bring-in (clockwise)."""
-        start_idx = (bring_in_idx + 1) % self.num_agents
+    def _after_bring_in(self, bring_in_idx: IntArray) -> IntArray:
+        """All seats clockwise, starting after the bring-in."""
+        return (bring_in_idx + 1 + jnp.arange(self.num_agents)) % self.num_agents
 
-        def check_player(carry, offset):
-            idx = (start_idx + offset) % self.num_agents
-            is_folded = folded[idx]
-            found_idx, found = carry
-            new_found_idx = jnp.where(~found & ~is_folded, idx, found_idx)
-            new_found = found | ~is_folded
-            return (new_found_idx, new_found), None
+    def _deal_street(
+        self, state: SevenCardStudState, street: IntArray, folded: BoolArray
+    ) -> tuple[IntArray, IntArray, BoolArray]:
+        """Deals street (1-4) to the players still in the hand.
 
-        offsets = jnp.arange(self.num_agents)
-        (final_idx, _), _ = lax.scan(check_player, (start_idx, False), offsets)
-        return final_idx
+        Returns the new agent_cards, num_dealt and community.
+        """
+        active = ~folded
+        num_active = jnp.sum(active)
+        later_streets = self.num_streets - 1 - street
+        use_community = (
+            self.deck_size - state.num_dealt - num_active < later_streets
+        )
+        # Individual cards go out clockwise from the bring-in's left.
+        order = self._after_bring_in(state.bring_in_idx)
+        rank = jnp.zeros(self.num_agents, dtype=jnp.int32).at[order].set(
+            jnp.cumsum(active[order]) - 1
+        )
+        pos = state.num_dealt + jnp.where(use_community, 0, rank)
+        cards = jnp.where(active, state.deck[jnp.minimum(pos, self.deck_size - 1)], -1)
+        street = jnp.minimum(street, self.num_streets - 1)
+        agent_cards = state.agent_cards.at[:, street + 2].set(cards)
+        num_dealt = state.num_dealt + jnp.where(use_community, 1, num_active)
+        community = state.community.at[street].set(use_community)
+        return agent_cards, num_dealt, community
 
-    @partial(jax.jit, static_argnums=(0,))
-    def _get_first_to_act_by_upcards(
+    def _first_to_act_by_upcards(
         self,
         agent_cards: IntArray,
+        community: BoolArray,
         folded: BoolArray,
-        stage: IntArray,
+        street: IntArray,
+        bring_in_idx: IntArray,
     ) -> IntArray:
-        """Player with best visible upcards acts first. Stage 1->2 cards, 2->3, 3,4->4."""
-        stage_clamped = jnp.minimum(stage, 4)
+        """Best hand showing on street 1-4; ties go to the first tied player
+        clockwise after the bring-in."""
+        up = jnp.maximum(agent_cards[:, 2:], 0)  # face-up card of streets 0-4
+        num_up = jnp.where(
+            (street == 4) & community[4], 5, jnp.minimum(street + 1, 4)
+        )
 
-        visible_2 = agent_cards[:, 2:4]  # 2 cards
-        visible_3 = agent_cards[:, 2:5]  # 3 cards
-        visible_4 = agent_cards[:, 2:6]  # 4 cards
+        def score_board(k):
+            return jax.vmap(_score_visible_upcards)(up[:, :k])
 
-        scores_2 = jax.vmap(_score_visible_upcards)(visible_2)
-        scores_3 = jax.vmap(_score_visible_upcards)(visible_3)
-        scores_4 = jax.vmap(_score_visible_upcards)(visible_4)
-
-        scores = jnp.where(
-            stage_clamped == 1,
-            scores_2,
-            jnp.where(
-                stage_clamped == 2,
-                scores_3,
-                scores_4,
+        scores = jnp.select(
+            [num_up == 2, num_up == 3, num_up == 4],
+            [score_board(2), score_board(3), score_board(4)],
+            jax.vmap(lambda c: _score_five_card_hand(_card_rank(c), _card_suit(c)))(
+                up
             ),
         )
-        # Folded players get -1 so they never win
         scores = jnp.where(folded, -1, scores)
-        return jnp.argmax(scores)
+        order = self._after_bring_in(bring_in_idx)
+        return order[jnp.argmax(scores[order])]
 
     @partial(jax.jit, static_argnums=(0,))
     def obs_from_state(self, state: SevenCardStudState) -> FloatArray:
-        """
-        Observation from perspective of current_player_idx.
-        - Own 7 cards (one-hot 0-51)
-        - Others' visible cards in relative order: (current+1)%n, (current+2)%n, ...
-        - Raise history (5 rounds * 5 values)
-        - Position relative to bring-in
-        """
+        """Observation of the player to act (layout in the module docstring)."""
         current = state.current_player_idx
-        stage = state.stage
-        num_visible = NUM_VISIBLE_BY_STAGE[stage]
-
-        obs = jnp.zeros(self.obs_dim, dtype=jnp.float32)
-
-        # Own cards (all 7)
-        own_cards = state.agent_cards[current]
-        obs = obs.at[own_cards].set(1.0)
-
-        # Others' visible cards in relative order (always 4 slots per other, mask by num_visible)
-        base = 52
-        for i in range(self.num_agents - 1):
-            other_idx = (current + 1 + i) % self.num_agents
-            other_visible = state.agent_cards[other_idx, 2:6]  # indices 2,3,4,5
-            for j in range(4):
-                include = jnp.int32(j) < num_visible
-                idx = base + i * 4 * 52 + j * 52 + other_visible[j]
-                new_obs = obs.at[idx].set(1.0)
-                obs = jnp.where(include, new_obs, obs)
-
-        # Raise history
-        raise_base = 52 + (self.num_agents - 1) * 4 * 52
-        for s in range(5):
-            obs = obs.at[raise_base + s * 5 + state.raise_nums[s]].set(1.0)
-
-        # Position relative to bring-in
-        rel_pos = (current - state.bring_in_idx) % self.num_agents
-        obs = obs.at[self.base_obs_dim + rel_pos].set(1.0)
-
-        return obs
+        seats = (current + jnp.arange(self.num_agents)) % self.num_agents
+        cards = state.agent_cards[seats]  # (n, 7), relative seat order
+        face_up = SLOT_FACE_UP | state.community[SLOT_STREET]
+        own_down = jnp.where(face_up, -1, cards[0])
+        up = jnp.where(face_up[2:], cards[:, 2:], -1)  # (n, 5) by street
+        position = (current - state.bring_in_idx) % self.num_agents
+        return jnp.concatenate(
+            [
+                jax.nn.one_hot(own_down, 52).sum(axis=0),
+                jax.nn.one_hot(up, 52).reshape(-1),
+                state.folded[seats[1:]].astype(jnp.float32),
+                jax.nn.one_hot(state.raise_nums, self.allowed_raise_num + 1).reshape(
+                    -1
+                ),
+                jax.nn.one_hot(position, self.num_agents),
+            ]
+        ).astype(jnp.float32)
 
     @partial(jax.jit, static_argnums=(0,))
     def get_avail_actions(self, state: SevenCardStudState) -> BoolArray:
@@ -177,43 +219,40 @@ class SevenCardStud(AECEnv):
         return avail_actions
 
     @partial(jax.jit, static_argnums=(0,))
-    def avail_actions(self, state: SevenCardStudState) -> BoolArray:
-        """AECEnv interface: returns available actions for current player."""
-        return self.get_avail_actions(state)
-
-    @partial(jax.jit, static_argnums=(0,))
     def reset(self, rng: PRNGKeyArray) -> tuple[SevenCardStudState, FloatArray]:
-        """Reset: deal all 7 cards, compute bring-in, post ante and bring-in."""
+        """Reset: shuffle, deal 3rd street, post antes and the bring-in."""
         rng_shuffle, _ = jax.random.split(rng)
-        shuffled_deck = jax.random.permutation(rng_shuffle, self.deck_size)
+        deck = jax.random.permutation(rng_shuffle, self.deck_size).astype(jnp.int32)
+        num_dealt = 3 * self.num_agents
+        agent_cards = (
+            jnp.full((self.num_agents, 7), -1, dtype=jnp.int32)
+            .at[:, :3]
+            .set(deck[:num_dealt].reshape(self.num_agents, 3))
+        )
 
-        # Deal 7 cards per player (all predetermined)
-        agent_cards = shuffled_deck[: 7 * self.num_agents].reshape(self.num_agents, 7)
-
-        # Bring-in: lowest door card (index 2)
-        door_cards = agent_cards[:, 2]
-        bring_in_idx = _get_bring_in_idx(door_cards)
+        # Bring-in: lowest door card (slot 2)
+        bring_in_idx = _get_bring_in_idx(agent_cards[:, 2])
 
         # Ante: each player posts ante; bring-in: bring_in_idx posts bring-in
         chips_in = jnp.full(self.num_agents, self.ante, dtype=jnp.float32)
         chips_in = chips_in.at[bring_in_idx].add(self.bring_in)
 
-        # First to act: first non-folded after bring-in (3rd street)
+        # First to act on 3rd street: the player after the bring-in
         folded = jnp.zeros(self.num_agents, dtype=bool)
-        current_player_idx = self._get_first_to_act_after_bring_in(bring_in_idx, folded)
-
-        raise_nums = jnp.zeros(self.num_betting_rounds, dtype=jnp.int32)
-        not_raise_num = jnp.int32(0)
+        current_player_idx = self._next_active(bring_in_idx, folded)
 
         state = SevenCardStudState(
+            deck=deck,
+            num_dealt=jnp.int32(num_dealt),
             agent_cards=agent_cards,
+            community=jnp.zeros(self.num_streets, dtype=bool),
             chips_in=chips_in,
             bring_in_idx=bring_in_idx,
             current_player_idx=current_player_idx,
             stage=jnp.int32(0),
-            raise_nums=raise_nums,
+            raise_nums=jnp.zeros(self.num_betting_rounds, dtype=jnp.int32),
             folded=folded,
-            not_raise_num=not_raise_num,
+            not_raise_num=jnp.int32(0),
             absorbing=jnp.zeros(self.num_agents, dtype=bool),
             done=jnp.array(False),
             timestep=0,
@@ -275,44 +314,28 @@ class SevenCardStud(AECEnv):
 
         new_stage = jnp.where(round_over, state.stage + 1, state.stage)
         new_not_raise_num = jnp.where(round_over, jnp.int32(0), new_not_raise_num)
+        game_done = (num_active_players <= 1) | (new_stage >= self.num_streets)
 
-        def get_next_player(current_idx: IntArray, folded_mask: BoolArray) -> IntArray:
-            start_idx = (current_idx + 1) % self.num_agents
-
-            def check_player(carry, offset):
-                idx = (start_idx + offset) % self.num_agents
-                is_folded = folded_mask[idx]
-                found_idx, found = carry
-                new_found_idx = jnp.where(~found & ~is_folded, idx, found_idx)
-                new_found = found | ~is_folded
-                return (new_found_idx, new_found), None
-
-            offsets = jnp.arange(self.num_agents)
-            (final_idx, _), _ = lax.scan(check_player, (start_idx, False), offsets)
-            return final_idx
-
-        # First to act for new round: when round_over, we're moving to next stage.
-        # new_stage is always >= 1 when round_over (we never round_over into stage 0).
-        # 4th-7th street: player with best visible upcards acts first.
-        first_to_act_upcards = self._get_first_to_act_by_upcards(
-            state.agent_cards, new_folded, new_stage
+        # Next street: deal it, then the best hand showing acts first.
+        deal = round_over & ~game_done
+        dealt_cards, dealt_num, dealt_community = self._deal_street(
+            state, new_stage, new_folded
         )
-        next_player_new_round = jnp.where(
-            ~new_folded[first_to_act_upcards],
-            first_to_act_upcards,
-            get_next_player(first_to_act_upcards, new_folded),
+        agent_cards = jnp.where(deal, dealt_cards, state.agent_cards)
+        num_dealt = jnp.where(deal, dealt_num, state.num_dealt)
+        community = jnp.where(deal, dealt_community, state.community)
+        first_to_act = self._first_to_act_by_upcards(
+            agent_cards, community, new_folded, new_stage, state.bring_in_idx
         )
-
-        next_player_after_action = get_next_player(current_player, new_folded)
-
         new_current_player_idx = jnp.where(
-            round_over, next_player_new_round, next_player_after_action
+            round_over, first_to_act, self._next_active(current_player, new_folded)
         )
-
-        game_done = (num_active_players <= 1) | (new_stage >= 5)
 
         next_state = SevenCardStudState(
-            agent_cards=state.agent_cards,
+            deck=state.deck,
+            num_dealt=num_dealt,
+            agent_cards=agent_cards,
+            community=community,
             chips_in=new_chips_in,
             bring_in_idx=state.bring_in_idx,
             current_player_idx=new_current_player_idx,
@@ -328,7 +351,9 @@ class SevenCardStud(AECEnv):
         obs = self.obs_from_state(next_state)
 
         def compute_rewards() -> FloatArray:
-            winners_by_score = _compare_hands(state.agent_cards, new_folded)
+            # At a showdown every player still in has all 7 cards.
+            hands = jnp.maximum(agent_cards, 0)
+            winners_by_score = _compare_hands(hands, new_folded)
             winners = jnp.where(num_active_players == 1, ~new_folded, winners_by_score)
             pot_total = jnp.sum(new_chips_in).astype(jnp.float32)
             num_winners = jnp.sum(winners).astype(jnp.float32)
@@ -351,30 +376,6 @@ class SevenCardStud(AECEnv):
             "game_winner": game_winner,
         }
         return next_state, obs, rewards, absorbing, done, info
-
-    @partial(jax.jit, static_argnums=(0,))
-    def step(
-        self,
-        rng: PRNGKeyArray,
-        state: SevenCardStudState,
-        action: IntArray,
-    ) -> tuple[
-        SevenCardStudState,
-        FloatArray,
-        FloatArray,
-        BoolArray,
-        bool,
-        dict[str, Any],
-    ]:
-        """AEC step: run step_env, reset on done."""
-        rng_step, rng_reset = jax.random.split(rng)
-        state_next, obs, rewards, absorbing, done, info = self.step_env(
-            rng_step, state, action
-        )
-        state_reset, obs_reset = self.reset(rng_reset)
-        state_final = lax.cond(done, lambda: state_reset, lambda: state_next)
-        obs_final = lax.cond(done, lambda: obs_reset, lambda: obs)
-        return state_final, obs_final, rewards, absorbing, done, info
 
     def observation_space(self) -> Discrete:
         return Discrete(self.obs_dim)
