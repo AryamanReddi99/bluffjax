@@ -6,9 +6,6 @@ import jax
 import jax.numpy as jnp
 from bluffjax.utils.typing import (
     Array,
-    FloatArray,
-    IntArray,
-    BoolArray,
     PRNGKeyArray,
 )
 

@@ -10,7 +10,6 @@ from functools import partial
 from flax import struct
 from bluffjax.utils.typing import (
     Any,
-    Array,
     FloatArray,
     IntArray,
     BoolArray,

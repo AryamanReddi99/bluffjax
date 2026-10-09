@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/JAX-0.7.2-8a2be2?style=for-the-badge" alt="JAX 0.7.2"/>
 </p>
 
-BluffJAX is a suite of ten adversarial imperfect-information games for reinforcement learning research, written in pure JAX so the whole game runs on your accelerator. It has the well-studied benchmarks (Kuhn, Leduc and Texas Hold'em) and five games that have never been studied in RL before: **Bluff**, **Kemps**, multi-round **Werewolf**, **5-Card Draw** and **7-Card Stud**. Baselines are included as well: CFR, Deep CFR, PPO, PQN, NFSP variants and ReBeL, plus pre-trained checkpoints.
+BluffJAX is a suite of ten adversarial imperfect-information games for reinforcement learning research, written in pure JAX so the whole game runs on your accelerator. It has the well-studied benchmarks (Kuhn, Leduc and Texas Hold'em) and five games that have never been studied in RL before: **Bluff**, **Kemps**, multi-round **Werewolf**, **5-Card Draw** and **7-Card Stud**. Baselines are included as well: CFR, Deep CFR, PPO, PQN, NFSP variants and ReBeL.
 
 ## 🃏 Play it in your browser
 
@@ -41,7 +41,7 @@ BluffJAX is a suite of ten adversarial imperfect-information games for reinforce
 - **🎭 Built around deception.** Lying about your cards, signalling a partner under the noses of your opponents, hiding a role. These are the mechanics where today's RL baselines still struggle.
 - **🧩 Simple.** `make`, `reset`, `step`, `get_avail_actions`. Episode resets happen inside `step`, so a rollout is just a `lax.scan`.
 - **🛠 Extensible.** Every game subclasses a generic `AECEnv` or `ParallelEnv`, so adding a new one means writing the rules, not the plumbing.
-- **🔁 Reproducible.** Baseline algorithms and pre-trained checkpoints give you a fixed bar to measure against.
+- **🔁 Reproducible.** Baseline algorithms give you a fixed bar to measure against.
 
 <br clear="right"/>
 
@@ -73,11 +73,11 @@ Click a game to play it.
 | Texas Limit Hold'em | `texas_limit_holdem` | 2–10 | 72+n | 4 | AEC | chips/hand |
 | Texas No-Limit Hold'em | `texas_nolimit_holdem` | 2–10 | 54 | 5 | AEC | chips/hand |
 | 5-Card Draw 🆕 | `five_card_draw` | 2–10 | 54 | 37 | AEC | chips/hand |
-| 7-Card Stud 🆕 | `seven_card_stud` | 2–10 | 77+208(n−1)+n | 4 | AEC | chips/hand |
-| Goofspiel | `goofspiel` | 2 | 39 | 13 | Parallel | win rate |
-| Bluff 🆕 | `bluff` | ≥3 | 263 | 13 | AEC | win rate |
-| Werewolf 🆕 | `werewolf` | 6 | 43 | 7 | AEC | win rate |
-| Kemps 🆕 | `kemps` | 4, 6, 8, … | 52(n+1)+n·c | 172·c | Parallel | win rate |
+| 7-Card Stud 🆕 | `seven_card_stud` | 2–10 | 76+262n | 4 | AEC | chips/hand |
+| Goofspiel | `goofspiel` | ≥2 | 13(n+2)+n | 13 | Parallel | win rate |
+| Bluff 🆕 | `bluff` | ≥2 | 270+54n | 13 | AEC | win rate |
+| Werewolf 🆕 | `werewolf` | ≥3, more humans than werewolves | 7+6n | n+1 | AEC | win rate |
+| Kemps 🆕 | `kemps` | 4, 6, 8, … | 104+n·c | (170+n/2)·c | Parallel | win rate |
 
 <sub>🆕 not previously studied in RL. Sizes are for the default settings; <i>c</i> is the size of Kemps' communication channel (default 2).</sub>
 
@@ -192,7 +192,7 @@ uv run --extra baselines python bluffjax/examples/kuhn/kuhn_cfr.py              
 uv run --extra baselines python bluffjax/examples/kuhn/kuhn_ppo_nfsp.py wandb=False   # PPO-NFSP in self-play
 ```
 
-`--extra baselines` adds the training dependencies: `distrax`, `optax`, `chex`, `hydra-core` and `wandb`. Each training script reads its `config_*.yaml` through Hydra, so you can override any key on the command line. Wherever you launch from, scripts that save checkpoints write them to `checkpoints/<game>/`, and Hydra writes its config and log to `outputs/`, both at the repo root and gitignored. Pre-trained PPO-NFSP and PQN-NFSP checkpoints for 5-Card Draw, 7-Card Stud, Werewolf and Bluff are in `bluffjax/examples/<game>/checkpoints/`.
+`--extra baselines` adds the training dependencies: `distrax`, `optax`, `chex`, `hydra-core` and `wandb`. Each training script reads its `config_*.yaml` through Hydra, so you can override any key on the command line. Wherever you launch from, scripts that save checkpoints write them to `checkpoints/<game>/`, and Hydra writes its config and log to `outputs/`, both at the repo root and gitignored.
 
 On the solved games, exploitability is measured exactly. The uniform random policy scores 0.4583 on Kuhn and 2.3736 on Leduc, matching OpenSpiel.
 

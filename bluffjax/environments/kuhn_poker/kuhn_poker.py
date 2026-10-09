@@ -15,7 +15,6 @@ Actions:
 
 import jax
 import jax.numpy as jnp
-from jax import lax
 from flax import struct
 from functools import partial
 from bluffjax.utils.typing import (

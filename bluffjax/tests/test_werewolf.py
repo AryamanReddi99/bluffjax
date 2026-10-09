@@ -16,7 +16,6 @@ from bluffjax.environments.werewolf.werewolf import (
     DOCTOR,
     PHASE_ACCUSE,
     PHASE_NIGHT,
-    PHASE_VOTE,
     SEER,
     VILLAGER,
     WEREWOLF,

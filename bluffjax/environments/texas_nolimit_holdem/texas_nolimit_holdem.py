@@ -2,7 +2,6 @@
 Texas No-Limit Hold'em environment.
 """
 
-from jax._src.basearray import Array
 import jax
 import jax.numpy as jnp
 from jax import lax

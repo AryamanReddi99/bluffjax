@@ -489,36 +489,8 @@ class Werewolf(AECEnv):
         }
         return next_state, obs, rewards, next_state.absorbing, next_state.done, info
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(
-        self,
-        rng: PRNGKeyArray,
-        state: WerewolfState,
-        action: IntArray,
-    ) -> tuple[
-        WerewolfState,
-        FloatArray,
-        FloatArray,
-        BoolArray,
-        bool,
-        dict[str, Any],
-    ]:
-        """AEC step with reset on done."""
-        rng_step, rng_reset = jax.random.split(rng)
-        state_next, obs, rewards, absorbing, done, info = self.step_env(
-            rng_step, state, action
-        )
-        state_reset, obs_reset = self.reset(rng_reset)
-        state_final = lax.cond(done, lambda: state_reset, lambda: state_next)
-        obs_final = lax.cond(done, lambda: obs_reset, lambda: obs)
-        return state_final, obs_final, rewards, absorbing, done, info
-
     def observation_space(self) -> Discrete:
         return Discrete(self.obs_dim)
 
     def action_space(self) -> Discrete:
         return Discrete(self.num_actions)
-
-    def avail_actions(self, state: WerewolfState) -> BoolArray:
-        """Alias for get_avail_actions for AECEnv compatibility."""
-        return self.get_avail_actions(state)
