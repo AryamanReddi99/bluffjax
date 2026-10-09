@@ -1,4 +1,4 @@
-"""Checks for the Bluff environment.
+"""Checks for the Bluff environment and the Bluff NFSP training code.
 
 - crafted claims: the win bonus, caught lies and truthful claims, free leads,
   truncation, the observation during card selection and public information;
@@ -6,7 +6,10 @@
   documented observation layout, card conservation, legal-action masks and
   rewards;
 - seat rotation: shifting every per-player field by k seats shifts the next
-  state and the rewards by k and leaves the observation unchanged.
+  state and the rewards by k and leaves the observation unchanged;
+- the NFSP targets (per-player GAE and Q(lambda)) against a brute-force
+  per-player reference, the reservoir against Algorithm R, the per-game policy
+  mixing, checkpoint loading and the evaluation's win/loss/draw accounting.
 """
 
 import numpy as np
@@ -712,3 +715,355 @@ def test_seat_rotation_equivariance(games, name):
         jax.vmap(check)(states, jnp.asarray(actions), jax.random.split(KEY, len(rows)))
     )
     assert ok.all(), ok.reshape(-1, ok.shape[-1]).mean(0)
+
+
+# =============================================================================
+# NFSP training code
+# =============================================================================
+
+
+@pytest.fixture(scope="module")
+def nfsp():
+    """The training scripts need the `baselines` extra (distrax, optax, hydra)."""
+    for module in ("distrax", "optax", "hydra"):
+        pytest.importorskip(module)
+    from bluffjax.examples.bluff import bluff_nfsp_common, bluff_ppo_nfsp, bluff_pqn_nfsp
+
+    return bluff_nfsp_common, bluff_ppo_nfsp, bluff_pqn_nfsp
+
+
+def training_rollout(env, num_envs, num_steps, seed):
+    """Random play with env.step (auto-reset), as in the training scripts."""
+
+    @jax.jit
+    def run(key):
+        key_reset, key_play = jax.random.split(key)
+        state, _ = jax.vmap(env.reset)(jax.random.split(key_reset, num_envs))
+
+        def one(s, k):
+            mask = jax.vmap(env.get_avail_actions)(s)
+            k_action, k_step = jax.random.split(k)
+            action = jax.random.categorical(
+                k_action, jnp.where(mask, 0.0, -jnp.inf), axis=-1
+            )
+            ns, _, reward, _, done, info = jax.vmap(env.step)(
+                jax.random.split(k_step, num_envs), s, action
+            )
+            return ns, (reward, done, info["truncated"], s.current_player_idx)
+
+        last, (reward, done, truncated, player) = jax.lax.scan(
+            one, state, jax.random.split(key_play, num_steps)
+        )
+        return reward, done, truncated, player, last.current_player_idx
+
+    return [np.asarray(x) for x in run(jax.random.PRNGKey(seed))]
+
+
+def _decision_end(dones, truncated, players, last_player, t, n):
+    """End step u of player players[t, n]'s decision at t and how it ends."""
+    T = dones.shape[0]
+    p = players[t, n]
+    u = t
+    while True:
+        if dones[u, n]:
+            return u, "truncated" if truncated[u, n] else "terminal"
+        if u + 1 == T:
+            return u, "cutoff" if last_player[n] == p else "unknown"
+        if players[u + 1, n] == p:
+            return u, "next"
+        u += 1
+
+
+def brute_force_gae(values, rewards, dones, truncated, players, last_value, last_player, gamma, lam):
+    T, N, _ = rewards.shape
+    adv = np.zeros((T, N), np.float32)
+    valid = np.zeros((T, N), bool)
+    g, gl = np.float32(gamma), np.float32(gamma * lam)
+    for n in range(N):
+        for t in reversed(range(T)):
+            p = players[t, n]
+            u, end = _decision_end(dones, truncated, players, last_player, t, n)
+            if end in ("truncated", "unknown"):
+                continue
+            ret = np.float32(0.0)
+            for w in range(u, t - 1, -1):
+                ret = np.float32(ret + rewards[w, n, p])
+            if end == "terminal":
+                v_next, a_next, nt = np.float32(0), np.float32(0), np.float32(0)
+            elif end == "cutoff":
+                v_next, a_next, nt = last_value[n], np.float32(0), np.float32(1)
+            else:
+                v_next, a_next, nt = values[u + 1, n], adv[u + 1, n], np.float32(1)
+            delta = np.float32(np.float32(ret + np.float32(g * nt) * v_next) - values[t, n])
+            adv[t, n] = np.float32(delta + np.float32(gl * nt) * a_next)
+            valid[t, n] = True
+    return adv, valid
+
+
+def brute_force_q_lambda(q_max, rewards, dones, truncated, players, traces, last_q, last_player, gamma):
+    T, N, _ = rewards.shape
+    target = np.zeros((T, N), np.float32)
+    valid = np.zeros((T, N), bool)
+    g = np.float32(gamma)
+    one = np.float32(1.0)
+    for n in range(N):
+        for t in reversed(range(T)):
+            p = players[t, n]
+            u, end = _decision_end(dones, truncated, players, last_player, t, n)
+            if end in ("truncated", "unknown"):
+                continue
+            ret = np.float32(0.0)
+            for w in range(u, t - 1, -1):
+                ret = np.float32(ret + rewards[w, n, p])
+            if end == "terminal":
+                target[t, n] = ret
+            else:
+                if end == "cutoff":
+                    c, q_next, g_next = np.float32(0), last_q[n], last_q[n]
+                else:
+                    c, q_next = traces[u + 1, n], q_max[u + 1, n]
+                    g_next = target[u + 1, n] if valid[u + 1, n] else q_next
+                boot = np.float32(np.float32((one - c) * q_next) + np.float32(c * g_next))
+                target[t, n] = np.float32(ret + np.float32(g * one) * boot)
+            valid[t, n] = True
+    return target, valid
+
+
+@pytest.fixture(scope="module")
+def rollouts():
+    """Training-style rollouts (auto-reset, cut off mid-game) with many truncations."""
+    out = []
+    for n, horizon, seed in ((2, 60, 0), (3, 45, 1), (2, 5000, 2)):
+        env = make("bluff", num_agents=n, horizon=horizon)
+        out.append(training_rollout(env, 12, 160, seed))
+    return out
+
+
+def test_per_player_gae_matches_brute_force(nfsp, rollouts):
+    per_player_gae = nfsp[1].per_player_gae
+    rng = np.random.default_rng(0)
+    checked = 0
+    for reward, done, truncated, player, last_player in rollouts:
+        T, N = done.shape
+        # Halves with gamma 1 and lambda 0.5 keep float32 arithmetic exact, so
+        # the targets must be identical; with random floats they can differ by
+        # rounding (XLA may fuse multiply-adds).
+        for values, gamma, lam, atol in (
+            (rng.integers(-8, 9, (T, N)).astype(np.float32) / 2, 1.0, 0.5, 0.0),
+            (rng.normal(size=(T, N)).astype(np.float32), 0.99, 0.95, 1e-5),
+        ):
+            last_value = rng.normal(size=N).astype(np.float32)
+            adv, targets, valid = per_player_gae(
+                jnp.asarray(values), jnp.asarray(reward), jnp.asarray(done),
+                jnp.asarray(truncated), jnp.asarray(player), jnp.asarray(last_value),
+                jnp.asarray(last_player), gamma, lam,
+            )
+            ref_adv, ref_valid = brute_force_gae(
+                values, reward, done, truncated, player, last_value, last_player, gamma, lam
+            )
+            np.testing.assert_array_equal(np.asarray(valid), ref_valid)
+            np.testing.assert_allclose(np.asarray(adv), ref_adv, rtol=0, atol=atol)
+            np.testing.assert_allclose(
+                np.asarray(targets)[ref_valid], (ref_adv + values)[ref_valid], rtol=0, atol=atol
+            )
+            checked += ref_valid.sum()
+    # rewards paid to players who aren't acting are a large part of all rewards
+    reward, done, truncated, player, _ = rollouts[-1]
+    acting = np.take_along_axis(reward, player[..., None], -1)[..., 0]
+    assert np.abs(reward).sum() - np.abs(acting).sum() > 0.3 * np.abs(reward).sum()
+    assert checked > 5000
+
+
+def test_per_player_gae_crafted(nfsp):
+    """Two players, one env: a caught lie and a truncation.
+
+    Steps (player: action, reward vector):
+        0 p0 name rank, 1 p0 size, 2 p0 card, 3 p1 challenges -> [-5, +1],
+        4 p1 name rank (truncated here: done), 5 p0 (new game), 6 p0, cut-off.
+    """
+    rewards = np.zeros((7, 1, 2), np.float32)
+    rewards[3, 0] = [-5.0, 1.0]
+    dones = np.array([[0], [0], [0], [0], [1], [0], [0]], bool)
+    truncated = dones.copy()
+    players = np.array([[0], [0], [0], [1], [1], [0], [0]])
+    values = np.arange(1, 8, dtype=np.float32)[:, None]
+    per_player_gae = nfsp[1].per_player_gae
+    adv, targets, valid = per_player_gae(
+        values, rewards, dones, truncated, players, jnp.array([10.0]), jnp.array([0]), 1.0, 1.0
+    )
+    adv, targets, valid = map(np.asarray, (adv, targets, valid))
+    # p0's card at step 2 is its last decision of the truncated game: its
+    # outcome (the -5 on p1's step 3 and whatever follows) is unknown.
+    np.testing.assert_array_equal(valid[:, 0], [1, 1, 0, 1, 0, 1, 1])
+    # step 3 (p1) bootstraps from p1's value at step 4 (its last, invalid, decision)
+    assert targets[3, 0] == 1.0 + values[4, 0]
+    # steps 0, 1 of p0 chain to step 2 (trace cut there)
+    assert targets[1, 0] == 0.0 + values[2, 0]
+    assert targets[0, 0] == values[2, 0]
+    # new game: step 6 bootstraps from the cut-off value, step 5 from step 6
+    assert targets[6, 0] == 10.0 and targets[5, 0] == 10.0
+    # The same game ending (not truncated) with p1's win bonus at step 4:
+    rewards[4, 0] = [0.0, 11.0]
+    adv, targets, valid = per_player_gae(
+        values, rewards, dones, np.zeros_like(dones), players, jnp.array([10.0]),
+        jnp.array([0]), 1.0, 1.0,
+    )
+    np.testing.assert_array_equal(np.asarray(valid)[:, 0], [1, 1, 1, 1, 1, 1, 1])
+    np.testing.assert_array_equal(np.asarray(targets)[:5, 0], [-5.0, -5.0, -5.0, 12.0, 11.0])
+
+
+def test_per_player_q_lambda_matches_brute_force(nfsp, rollouts):
+    per_player_q_lambda_targets = nfsp[2].per_player_q_lambda_targets
+    rng = np.random.default_rng(1)
+    for reward, done, truncated, player, last_player in rollouts:
+        T, N = done.shape
+        for q_max, gamma, lam, atol in (  # exact, then rounding (see the GAE test)
+            (rng.integers(-8, 9, (T, N)).astype(np.float32) / 2, 1.0, 0.5, 0.0),
+            (rng.normal(size=(T, N)).astype(np.float32), 0.99, 0.9, 1e-5),
+        ):
+            traces = np.where(rng.random((T, N)) < 0.5, np.float32(lam), np.float32(0))
+            last_q = rng.normal(size=N).astype(np.float32)
+            targets, valid = per_player_q_lambda_targets(
+                jnp.asarray(q_max), jnp.asarray(reward), jnp.asarray(done),
+                jnp.asarray(truncated), jnp.asarray(player), jnp.asarray(traces),
+                jnp.asarray(last_q), jnp.asarray(last_player), gamma,
+            )
+            ref_t, ref_v = brute_force_q_lambda(
+                q_max, reward, done, truncated, player, traces, last_q, last_player, gamma
+            )
+            np.testing.assert_array_equal(np.asarray(valid), ref_v)
+            np.testing.assert_allclose(np.asarray(targets), ref_t, rtol=0, atol=atol)
+
+
+def test_per_player_q_lambda_crafted(nfsp):
+    """p0 acts three times in a row (rank, size, card) and is caught lying."""
+    per_player_q_lambda_targets = nfsp[2].per_player_q_lambda_targets
+    rewards = np.zeros((4, 1, 2), np.float32)
+    rewards[3, 0] = [-5.0, 1.0]
+    dones = np.array([[0], [0], [0], [0]], bool)
+    players = np.array([[0], [0], [0], [1]])
+    q_max = np.array([[1.0], [2.0], [3.0], [4.0]], np.float32)
+    traces = np.full((4, 1), 0.5, np.float32)
+    # after step 3 p1 (the challenge winner) leads: cut-off value 7 for p1
+    targets, valid = per_player_q_lambda_targets(
+        q_max, rewards, dones, dones, players, traces, jnp.array([7.0]), jnp.array([1]), 1.0
+    )
+    targets, valid = np.asarray(targets), np.asarray(valid)
+    # p0's last decision (step 2) is unknown at the cut-off: p0 doesn't act
+    # before it; its -5 arrives but its next value doesn't, so it is invalid.
+    np.testing.assert_array_equal(valid[:, 0], [1, 1, 0, 1])
+    # the same player acts next: bootstrap from its own next Q, not -Q
+    assert targets[1, 0] == q_max[2, 0]
+    assert targets[0, 0] == 0.5 * q_max[1, 0] + 0.5 * targets[1, 0]
+    assert targets[3, 0] == 1.0 + 7.0
+
+
+def test_reservoir_matches_algorithm_r(nfsp):
+    common = nfsp[0]
+    capacity, dim = 50, 3
+    buffer = common.init_sl_buffer(capacity, dim, 4)
+    ref = np.zeros((capacity, dim), np.float32)
+    seen = 0
+    rng = np.random.default_rng(0)
+    key = jax.random.PRNGKey(3)
+    append = jax.jit(common.reservoir_append)
+    size = 32
+    for batch in range(12):
+        obs = rng.normal(size=(size, dim)).astype(np.float32)
+        valid = rng.random(size) < rng.uniform(0.1, 0.9)
+        key, k = jax.random.split(key)
+        buffer = append(
+            buffer, jnp.asarray(obs), jnp.ones((size, 4), bool),
+            jnp.arange(size, dtype=jnp.int32), jnp.asarray(valid), k,
+        )
+        # Algorithm R with the same draws j ~ U{0..k} for the k-th valid item
+        v = valid.astype(np.int32)
+        k_items = seen + np.cumsum(v) - v
+        j = np.asarray(jax.random.randint(k, (size,), 0, jnp.asarray(k_items) + 1, dtype=jnp.int32))
+        for i in range(size):
+            if not valid[i]:
+                continue
+            if seen < capacity:
+                ref[seen] = obs[i]
+            elif j[i] < capacity:
+                ref[j[i]] = obs[i]
+            seen += 1
+        assert int(buffer.seen) == seen and int(buffer.size) == min(seen, capacity)
+        np.testing.assert_array_equal(np.asarray(buffer.obs), ref)
+    assert seen > 3 * capacity
+
+
+def test_policy_mixing_is_drawn_once_per_game(nfsp):
+    common = nfsp[0]
+    env = make("bluff", num_agents=3, horizon=40)
+    num_envs, num_steps, eta = 64, 400, 0.3
+
+    @jax.jit
+    def run(key):
+        k_reset, k_mode, k_play = jax.random.split(key, 3)
+        state, _ = jax.vmap(env.reset)(jax.random.split(k_reset, num_envs))
+        mode = jax.random.bernoulli(k_mode, eta, (num_envs, 3))
+
+        def one(carry, k):
+            s, mode = carry
+            k_a, k_s, k_m = jax.random.split(k, 3)
+            mask = jax.vmap(env.get_avail_actions)(s)
+            a = jax.random.categorical(k_a, jnp.where(mask, 0.0, -jnp.inf), axis=-1)
+            ns, _, _, _, done, _ = jax.vmap(env.step)(jax.random.split(k_s, num_envs), s, a)
+            return (ns, common.draw_br_mode(k_m, mode, done, eta)), (mode, done)
+
+        _, (modes, dones) = jax.lax.scan(one, (state, mode), jax.random.split(k_play, num_steps))
+        return modes, dones
+
+    modes, dones = map(np.asarray, run(KEY))
+    changed = (modes[1:] != modes[:-1]).any(-1)
+    assert not (changed & ~dones[:-1]).any()  # only after a game ends
+    new_games = modes[1:][dones[:-1]]
+    assert len(new_games) > 500
+    assert abs(new_games.mean() - eta) < 5 * np.sqrt(eta * (1 - eta) / new_games.size)
+
+
+def test_load_params_is_strict(nfsp, tmp_path):
+    common = nfsp[0]
+    from flax import serialization
+    from bluffjax.networks.mlp import ActorDiscreteMLP, QNetworkDiscreteMLP
+
+    obs = jnp.zeros((378,))
+    actor = ActorDiscreteMLP(action_dim=13, hidden_dim=16).init(KEY, obs)
+    qnet = QNetworkDiscreteMLP(action_dim=13, hidden_dim=16).init(KEY, obs)
+    path = tmp_path / "actor.msgpack"
+    path.write_bytes(serialization.to_bytes(actor))
+    loaded = common.load_params(str(path), ActorDiscreteMLP(13, 16).init(jax.random.PRNGKey(1), obs))
+    jax.tree_util.tree_map(np.testing.assert_array_equal, loaded, actor)
+    qpath = tmp_path / "q.msgpack"
+    qpath.write_bytes(serialization.to_bytes(qnet))
+    with pytest.raises(ValueError):  # extra LayerNorm parameters
+        common.load_params(str(qpath), actor)
+    with pytest.raises(ValueError):  # hidden size
+        common.load_params(str(path), ActorDiscreteMLP(13, 32).init(KEY, obs))
+    with pytest.raises(FileNotFoundError):
+        common.load_params(str(tmp_path / "missing.msgpack"), actor)
+
+
+@pytest.mark.parametrize("horizon", [30, 4000])
+def test_evaluation_counts_wins_losses_and_draws(nfsp, horizon):
+    common = nfsp[0]
+    env = make("bluff", num_agents=2, horizon=horizon)
+
+    def random_policy(params, obs, mask, rng):
+        return common.sample_random_legal(mask, rng)
+
+    result = jax.jit(
+        lambda key: common.play_games(env, random_policy, None, random_policy, None, 64, key)
+    )(KEY)
+    win, loss, draw = map(np.asarray, (result.win, result.loss, result.draw))
+    np.testing.assert_array_equal(win + loss + draw, np.ones(64))
+    assert (np.asarray(result.length) <= horizon).all()
+    if horizon == 30:  # no random game ends this fast: all draws, not losses
+        assert draw.all()
+    else:
+        assert draw.sum() <= 2 and 10 < win.sum() < 54
+    metrics = common.eval_metrics("x", result)
+    assert float(metrics["win_rate_x"]) + float(metrics["loss_rate_x"]) + float(
+        metrics["draw_rate_x"]
+    ) == pytest.approx(1.0)
