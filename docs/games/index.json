@@ -125,7 +125,25 @@
     ]
    },
    {
+    "name": "start_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
     "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "history",
+    "dtype": "int32",
+    "shape": [
+     2,
+     4
+    ]
+   },
+   {
+    "name": "history_len",
     "dtype": "int32",
     "shape": []
    },
@@ -148,9 +166,9 @@
    }
   ],
   "bytes": {
-   "reset": 30468,
-   "step": 38395,
-   "avail": 5045
+   "reset": 43811,
+   "step": 37860,
+   "avail": 5572
   }
  },
  "goofspiel": {
@@ -212,9 +230,9 @@
    }
   ],
   "bytes": {
-   "reset": 22536,
-   "step": 12471,
-   "avail": 2282
+   "reset": 33240,
+   "step": 26558,
+   "avail": 1792
   }
  },
  "kemps": {
@@ -292,9 +310,9 @@
    }
   ],
   "bytes": {
-   "reset": 39821,
-   "step": 85579,
-   "avail": 5651
+   "reset": 38659,
+   "step": 66154,
+   "avail": 3520
   }
  },
  "bluff": {
@@ -353,11 +371,6 @@
     "shape": []
    },
    {
-    "name": "round_start_player_idx",
-    "dtype": "int32",
-    "shape": []
-   },
-   {
     "name": "challenge_target_idx",
     "dtype": "int32",
     "shape": []
@@ -395,7 +408,7 @@
     "shape": []
    },
    {
-    "name": "rank_choice_pending",
+    "name": "free_lead",
     "dtype": "bool",
     "shape": []
    },
@@ -410,6 +423,16 @@
     "shape": [
      13
     ]
+   },
+   {
+    "name": "challenge_loser_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "challenge_lie",
+    "dtype": "bool",
+    "shape": []
    },
    {
     "name": "absorbing",
@@ -437,9 +460,9 @@
    }
   ],
   "bytes": {
-   "reset": 58876,
-   "step": 48802,
-   "avail": 13266
+   "reset": 71967,
+   "step": 57034,
+   "avail": 16714
   }
  },
  "five_card_draw": {
@@ -524,6 +547,13 @@
     "shape": []
    },
    {
+    "name": "discards",
+    "dtype": "bool",
+    "shape": [
+     52
+    ]
+   },
+   {
     "name": "draw_start_idx",
     "dtype": "int32",
     "shape": []
@@ -547,9 +577,9 @@
    }
   ],
   "bytes": {
-   "reset": 40340,
-   "step": 122022,
-   "avail": 10205
+   "reset": 43183,
+   "step": 112452,
+   "avail": 10367
   }
  },
  "seven_card_stud": {
@@ -559,11 +589,30 @@
   "num_actions": 4,
   "leaves": [
    {
+    "name": "deck",
+    "dtype": "int32",
+    "shape": [
+     52
+    ]
+   },
+   {
+    "name": "num_dealt",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
     "name": "agent_cards",
     "dtype": "int32",
     "shape": [
      2,
      7
+    ]
+   },
+   {
+    "name": "community",
+    "dtype": "bool",
+    "shape": [
+     5
     ]
    },
    {
@@ -626,9 +675,9 @@
    }
   ],
   "bytes": {
-   "reset": 51607,
-   "step": 152643,
-   "avail": 5727
+   "reset": 46990,
+   "step": 192852,
+   "avail": 6010
   }
  },
  "texas_limit_holdem": {
@@ -832,9 +881,9 @@
    }
   ],
   "bytes": {
-   "reset": 44411,
-   "step": 98872,
-   "avail": 9727
+   "reset": 46372,
+   "step": 98704,
+   "avail": 9605
   }
  },
  "werewolf": {
@@ -869,6 +918,11 @@
    },
    {
     "name": "current_player_idx",
+    "dtype": "int32",
+    "shape": []
+   },
+   {
+    "name": "start_player_idx",
     "dtype": "int32",
     "shape": []
    },
@@ -946,9 +1000,9 @@
    }
   ],
   "bytes": {
-   "reset": 45633,
-   "step": 101891,
-   "avail": 15142
+   "reset": 47011,
+   "step": 81579,
+   "avail": 9492
   }
  }
 }

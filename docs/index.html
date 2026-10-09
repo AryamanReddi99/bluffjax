@@ -377,7 +377,7 @@
   GAMES.goofspiel = {
     title: "Goofspiel", who: "You vs 1 bot · simultaneous", blurb: "Bid a card from your hand for each prize. Highest bid takes it; ties burn it.",
     art: () => card("7", "d") + card("K", "s", { cls: "sel" }) + card("Q", "h"),
-    rules: `<p>You and the bot each hold A to K. Each round a prize card (♦) is turned up. Both bid one card at the same time.</p><p>The higher bid wins points equal to the prize value (A = 1, K = 13). Equal bids win nothing. Bids are spent.</p>`,
+    rules: `<p>You and the bot each hold A to K. Each round a prize card (♦) is turned up. Both bid one card at the same time.</p><p>The higher bid wins points equal to the prize value (A = 1, K = 13). Equal bids win nothing. Bids are spent.</p><p>After 13 prizes your score is your points minus the bot's.</p>`,
     render(S, ctx) {
       const done = S.current_round[0] >= 13;
       const prize = done ? null : S.deck[S.current_round[0]];
@@ -415,11 +415,14 @@
   // ---- Kemps
   const KEMPS_RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"];
   const kcard = (c, opts) => card(KEMPS_RANKS[c >> 2], SUITS[c & 3], opts);
+  // Game actions (each sent as game * 2 + signal): lose * 13 + gain swaps a card, then pass, Kemps,
+  // and Stop Kemps on the team of the next player (with four players, the other team).
+  const KEMPS_PASS = 169, KEMPS_CALL = 170, KEMPS_STOP = 171;
   GAMES.kemps = {
     title: "Kemps", who: "You + partner vs 2 bots · simultaneous", blurb: "Collect four of a kind, then signal your partner to shout Kemps.",
     art: () => ["c", "d", "h", "s"].map((s) => card("K", s)).join(""),
-    rules: `<p>Teams: you and Bot 2 against Bot 1 and Bot 3. Everyone acts at once each turn: swap one card with the centre, pass, or call.</p>
-      <p>When everyone passes, the centre is replaced from the deck. Get four of a kind and light your signal; if your partner calls <b>Kemps</b> while you hold it, your team wins. Call <b>Stop Kemps</b> when an opponent holds four of a kind. A wrong call loses.</p>`,
+    rules: `<p>Teams: you and Bot 2, sitting opposite, against Bot 1 and Bot 3. Everyone acts at once each turn: swap one card with the centre, pass, or call. Swaps go in a random order; a swap does nothing if the centre has no card of the rank you wanted left by then.</p>
+      <p>When everyone passes, the centre is replaced from the deck; if the deck can't refill it, the hand is a draw, as it is after 200 turns. Get four of a kind and light your signal (everyone sees it); if your partner calls <b>Kemps</b> while you hold it, your team wins. Call <b>Stop Kemps</b> when an opponent holds four of a kind. A wrong call loses. If several players call at once, only one call, picked at random, counts.</p>`,
     render(S, ctx) {
       const sig = (i) => S.communication[i * 2 + 1] === 1;
       const seat = (i, label) => `<div class="seat ${i === 0 ? "you" : ""}">
@@ -427,7 +430,7 @@
         <div class="hand tight">${[0, 1, 2, 3].map((k) => (ctx.reveal ? kcard(S.agent_hands[i * 4 + k], { cls: "small" }) : back("small"))).join("")}</div></div>`;
       const sel = ctx.ui;
       return `<div class="seats">${seat(1, "them")}${seat(2, "partner")}${seat(3, "them")}</div>
-        <div class="center"><div class="label">Centre · deck ${32 - S.deck_idx[0]} left</div>
+        <div class="center"><div class="label">Centre · deck ${S.deck.length - S.deck_idx[0]} left</div>
           <div class="row">${[0, 1, 2, 3].map((k) => kcard(S.center_cards[k], { button: true, cls: `pick ${sel.center === k ? "sel" : ""}`, attrs: `data-center="${k}"` })).join("")}</div></div>
         <div class="seat you turn"><div class="name">${ctx.names[0]} ${pill("you", "blue")} <span class="lamp ${sig(0) ? "on" : ""}"></span></div>
           <div class="hand">${[0, 1, 2, 3].map((k) => kcard(S.agent_hands[k], { button: true, cls: `pick ${sel.hand === k ? "sel" : ""}`, attrs: `data-hand="${k}"` })).join("")}</div></div>`;
@@ -451,9 +454,9 @@
             const lose = S.agent_hands[u.hand] >> 2, gain = S.center_cards[u.center] >> 2;
             u.hand = u.center = null; act(enc(lose * 13 + gain));
           };
-          el.querySelector('[data-k="pass"]').onclick = () => act(enc(169));
-          el.querySelector('[data-k="kemps"]').onclick = () => act(enc(170));
-          el.querySelector('[data-k="stop"]').onclick = () => act(enc(171));
+          el.querySelector('[data-k="pass"]').onclick = () => act(enc(KEMPS_PASS));
+          el.querySelector('[data-k="kemps"]').onclick = () => act(enc(KEMPS_CALL));
+          el.querySelector('[data-k="stop"]').onclick = () => act(enc(KEMPS_STOP));
           el.querySelector('[data-k="sig"]').onclick = () => { u.signal = !u.signal; rerender(); };
         },
       };
@@ -465,8 +468,8 @@
       const sig = (i) => S.communication[i * 2 + 1] === 1;
       const partner = (seat + 2) % 4, opps = [(seat + 1) % 4, (seat + 3) % 4];
       const comm = four ? 1 : 0;
-      if (sig(partner) && rand() < 0.85) return 170 * 2 + comm;
-      if (opps.some(sig) && rand() < 0.5) return 171 * 2 + comm;
+      if (sig(partner) && rand() < 0.85) return KEMPS_CALL * 2 + comm;
+      if (opps.some(sig) && rand() < 0.5) return KEMPS_STOP * 2 + comm;
       if (!four) {
         const target = counts.indexOf(Math.max(...counts));
         if (center[target] > 0) {
@@ -479,15 +482,22 @@
           if (lose >= 0) return (lose * 13 + r) * 2 + comm;
         }
       }
-      return 169 * 2 + comm;
+      return KEMPS_PASS * 2 + comm;
     },
     logJoint(prev, acts, next, ctx) {
       const g = acts.map((a) => a >> 1);
-      const callers = g.map((x, i) => (x >= 170 ? `${ctx.names[i]} calls ${x === 170 ? "Kemps" : "Stop Kemps"}!` : null)).filter(Boolean);
-      if (callers.length) return callers.join(" ");
-      if (g.every((x) => x === 169)) return next.deck_idx[0] > prev.deck_idx[0] ? "Everyone passes. A fresh centre is dealt." : "Everyone passes and the deck is empty.";
-      const swaps = g.map((x, i) => (x < 169 ? ctx.names[i] : null)).filter(Boolean);
-      return `${swaps.join(", ")} swap${swaps.length > 1 ? "" : "s"} with the centre.`;
+      const callers = g.map((x, i) => (x >= KEMPS_CALL ? `${ctx.names[i]} calls ${x === KEMPS_CALL ? "Kemps" : "Stop Kemps"}!` : null)).filter(Boolean);
+      if (callers.length) return callers.join(" ") + (callers.length > 1 ? " Only one call counts, picked at random." : "");
+      if (g.every((x) => x === KEMPS_PASS)) return next.deck_idx[0] > prev.deck_idx[0] ? "Everyone passes. A fresh centre is dealt." : "Everyone passes and the deck is empty.";
+      // A swap whose rank was taken from the centre earlier in the step does nothing.
+      const swapped = (i) => [0, 1, 2, 3].some((k) => next.agent_hands[i * 4 + k] !== prev.agent_hands[i * 4 + k]);
+      const tried = [0, 1, 2, 3].filter((i) => g[i] < KEMPS_PASS);
+      const names = (seats) => seats.map((i) => ctx.names[i]).join(", ");
+      const done = tried.filter(swapped), missed = tried.filter((i) => !swapped(i));
+      return [
+        done.length ? `${names(done)} swap${done.length > 1 ? "" : "s"} with the centre.` : "",
+        missed.length ? `${names(missed)} tr${missed.length > 1 ? "y" : "ies"} to swap, but the centre has run out of that rank.` : "",
+      ].filter(Boolean).join(" ");
     },
     result(S, rewards) { if (rewards.every((r) => r === 0)) return "Nobody called before the hand ended. Draw."; return rewards[0] > 0 ? "Your team wins the hand." : "The other team wins the hand."; },
   };
@@ -497,61 +507,72 @@
   GAMES.bluff = {
     title: "Bluff", who: "You vs 2 bots", blurb: "Play cards face down and name their rank. Lie if you like, but don't get caught.",
     art: () => back() + back() + card("?", null),
-    rules: `<p>Choose how many cards to play (1 to 4), then pick them. They go face down and you claim they are all the required rank (the next rank up from the last claim; after a challenge the winner names any rank).</p>
-      <p>Others may call your bluff. A caught liar, or a wrong challenger, picks up the whole pile. Empty your hand to win. The hand also ends after 100 moves.</p>`,
-    reqRank(S) { return S.has_current_rank[0] && !S.rank_choice_pending[0] ? S.current_rank[0] : null; },
+    rules: `<p>On a free lead (the first claim of the hand, and the first after every challenge) the leader names any rank. Every other claim is the next rank up from the last one (K is followed by A).</p>
+      <p>Choose how many cards to play (1 to 4), then pick them. They go face down and you claim they are all that rank.</p>
+      <p>The others, in turn, may call your bluff. A caught liar, or a wrong challenger, picks up the whole pile, and the winner of the challenge leads next. You win once your last cards are played and not caught in a lie. The hand also ends, with no winner, after 100 moves.</p>`,
+    /** Rank of a rank-offset action: offsets count from current_rank once a rank has been named. */
+    rankOf(S, a) { return ((S.has_current_rank[0] ? S.current_rank[0] : 0) + a) % 13; },
+    /** The rank being claimed (phases 0-2), or null while the leader names it (phase 3). */
+    claimRank(S) { return S.phase[0] === 3 ? null : S.current_rank[0]; },
     render(S, ctx) {
-      const phase = S.phase[0], req = GAMES.bluff.reqRank(S);
+      const phase = S.phase[0], cp = S.current_player_idx[0], rank = GAMES.bluff.claimRank(S);
       const seat = (i) => `<div class="seat ${ctx.turn === i ? "turn" : ""}">
         <div class="name">${ctx.names[i]} ${pill(`${S.agent_hand_sizes[i]} cards`, "grey")}</div>
         <div class="hand fan">${Array.from({ length: Math.min(S.agent_hand_sizes[i], 10) }, () => back("small")).join("")}</div></div>`;
       const claims = [...S.pile_claims].map((n, r) => (n ? `${n}×${BR[r]}` : null)).filter(Boolean).join(", ");
-      let claimLine = "";
-      if (phase === 2) claimLine = `${ctx.names[S.challenge_target_idx[0]]} claims ${S.claim_size[0]} × ${BR[S.claim_rank[0]]}`;
-      else if (phase === 1) claimLine = `${S.current_player_idx[0] === 0 ? "You are" : ctx.names[S.current_player_idx[0]] + " is"} playing ${S.claim_size[0]} card${S.claim_size[0] > 1 ? "s" : ""}${req != null ? ` as ${BR[req]}` : ""}`;
-      const pending = phase === 1 && S.current_player_idx[0] === 0 ? [...S.pending_play_hand].flatMap((n, r) => Array(n).fill(r)) : [];
+      const n = S.claim_size[0];
+      const status = ctx.done ? ""
+        : phase === 3 ? `Free lead: ${cp === 0 ? "you name" : ctx.names[cp] + " names"} the rank`
+        : phase === 0 ? `${S.free_lead[0] ? "Free lead: the claim is" : "Next claim must be"} ${BR[rank]}`
+        : phase === 1 ? `${cp === 0 ? "You are" : ctx.names[cp] + " is"} playing ${n} card${n > 1 ? "s" : ""} as ${BR[rank]}`
+        : `${ctx.names[S.challenge_target_idx[0]]} claims ${n} × ${BR[rank]}`;
+      // In phase 1 agent_hands still includes the cards picked so far.
+      const pending = phase === 1 && cp === 0 ? [...S.pending_play_hand].flatMap((k, r) => Array(k).fill(r)) : [];
       const mine = [...Array(13).keys()].flatMap((r) => Array(S.agent_hands[r] - (pending.filter((x) => x === r).length)).fill(r));
       return `<div class="seats">${seat(1)}${seat(2)}</div>
         <div class="center"><div class="label">Pile · ${S.pile_size[0]} card${S.pile_size[0] === 1 ? "" : "s"}</div>
           <div class="hand fan" style="justify-content:center">${Array.from({ length: Math.min(S.pile_size[0], 12) }, () => back("small")).join("") || ghost("small")}</div>
           <div class="sub">${claims ? `Claimed into the pile: ${claims}` : "No claims on the pile yet"}</div>
-          <div class="status">${esc(claimLine || (req != null ? `Next claim must be ${BR[req]}` : "Next claim: any rank"))}</div>
+          <div class="status">${esc(status)}</div>
           ${pending.length ? `<div class="row">${pending.map((r) => card(BR[r], null, { cls: "small" })).join("")}</div>` : ""}</div>
         <div class="seat you ${ctx.turn === 0 ? "turn" : ""}"><div class="name">${ctx.names[0]} ${pill(`${S.agent_hand_sizes[0]} cards`, "blue")}</div>
           <div class="hand tight">${mine.map((r) => card(BR[r], null, { cls: "small" })).join("")}</div></div>`;
     },
     controls(S, av) {
-      const phase = S.phase[0];
+      const g = GAMES.bluff, phase = S.phase[0];
       if (phase === 0) return { html: [0, 1, 2, 3].map((a) => `<button class="btn ${a ? "" : "primary"}" data-a="${a}" ${av[a] ? "" : "disabled"}>Play ${a + 1}</button>`).join(""), wire: wireButtons };
       if (phase === 2) return { html: `<button class="btn danger" data-a="0">Call bluff</button><button class="btn primary" data-a="1">Believe it</button>`, wire: wireButtons };
-      // play: offsets are relative to current_rank when one is set
-      const toRank = (a) => (S.has_current_rank[0] ? (S.current_rank[0] + a) % 13 : a % 13);
-      const opts = [...Array(13).keys()].filter((a) => av[a]).map((a) => ({ a, r: toRank(a) })).sort((x, y) => x.r - y.r);
-      const req = GAMES.bluff.reqRank(S);
+      // phases 3 and 1: actions are rank offsets
+      const opts = [...Array(13).keys()].filter((a) => av[a]).map((a) => ({ a, r: g.rankOf(S, a) })).sort((x, y) => x.r - y.r);
+      if (phase === 3) return { html: `<span class="sub">Name the rank to claim:</span>${opts.map(({ a, r }) => `<button class="btn" data-a="${a}">${BR[r]}</button>`).join("")}`, wire: wireButtons };
+      const rank = g.claimRank(S);
       return {
-        html: `<span class="sub">Pick card ${S.pending_play_count[0] + 1} of ${S.claim_size[0]}:</span>${opts.map(({ a, r }) => card(BR[r], null, { button: true, cls: `pick ${req === r ? "sel" : ""}`, attrs: `data-a="${a}"` })).join("")}`,
+        html: `<span class="sub">Pick card ${S.pending_play_count[0] + 1} of ${S.claim_size[0]}:</span>${opts.map(({ a, r }) => card(BR[r], null, { button: true, cls: `pick ${rank === r ? "sel" : ""}`, attrs: `data-a="${a}"` })).join("")}`,
         wire: wireButtons,
       };
     },
-    bot(S, seat, av, ctx) {
-      const phase = S.phase[0], hand = S.agent_hands.slice(seat * 13, seat * 13 + 13), req = GAMES.bluff.reqRank(S);
-      const toRank = (a) => (S.has_current_rank[0] ? (S.current_rank[0] + a) % 13 : a % 13);
+    bot(S, seat, av) {
+      const g = GAMES.bluff, phase = S.phase[0], hand = S.agent_hands.slice(seat * 13, seat * 13 + 13);
+      const legal = [...Array(13).keys()].filter((a) => av[a]);
+      if (phase === 3) {
+        // lead with a rank we hold most of, so the claim can be true
+        const most = Math.max(...hand);
+        const want = pick([...hand.keys()].filter((r) => hand[r] === most));
+        return legal.find((a) => g.rankOf(S, a) === want);
+      }
       if (phase === 0) {
-        const have = req != null ? hand[req] : Math.max(...hand);
+        const have = hand[g.claimRank(S)];
         let n = have > 0 ? have : 1 + (rand() < 0.3 ? 1 : 0);
         if (have > 0 && rand() < 0.2) n++;
         n = Math.max(1, Math.min(n, 4));
         while (n > 1 && !av[n - 1]) n--;
-        ctx.plan[seat] = req;
         return n - 1;
       }
       if (phase === 1) {
-        const legal = [...Array(13).keys()].filter((a) => av[a]);
-        const want = req ?? ctx.plan[seat] ?? [...hand.keys()].sort((x, y) => hand[y] - hand[x])[0];
-        const good = legal.find((a) => toRank(a) === want);
+        const good = legal.find((a) => g.rankOf(S, a) === S.claim_rank[0]);
         if (good !== undefined) return good;
         // lie with the least useful card
-        return legal.sort((x, y) => hand[toRank(x)] - hand[toRank(y)])[0];
+        return legal.sort((x, y) => hand[g.rankOf(S, x)] - hand[g.rankOf(S, y)])[0];
       }
       const mine = hand[S.claim_rank[0]];
       const impossible = mine + S.claim_size[0] > 4;
@@ -560,13 +581,12 @@
     },
     log(prev, seat, a, next, ctx) {
       const phase = prev.phase[0];
-      if (phase === 0) return null;
+      if (phase === 0 || phase === 3) return null;
       if (phase === 1) return next.phase[0] === 2 ? `${ctx.names[seat]} plays ${prev.claim_size[0]} card${prev.claim_size[0] > 1 ? "s" : ""}, claiming ${prev.claim_size[0]} × ${BR[next.claim_rank[0]]}.` : null;
       const target = prev.challenge_target_idx[0];
       if (a === 0) {
         const shown = [...next.challenge_hand].flatMap((n, r) => Array(n).fill(BR[r])).join(" ");
-        const truth = next.challenge_status[0] === 0;
-        return `${ctx.names[seat]} calls bluff on ${ctx.names[target]}! The cards were ${shown}. ${truth ? `${ctx.names[seat]}` : ctx.names[target]} picks up ${prev.pile_size[0]} cards.`;
+        return `${ctx.names[seat]} calls bluff on ${ctx.names[target]}! The cards were ${shown}. ${ctx.names[next.challenge_loser_idx[0]]} picks up ${prev.pile_size[0]} cards.`;
       }
       return next.phase[0] === 0 ? `Nobody challenges ${ctx.names[target]}.` : null;
     },
@@ -598,7 +618,7 @@
   GAMES.five_card_draw = {
     title: "5-Card Draw", who: "You vs 1 bot · no limit", blurb: "Bet, swap up to five cards, bet again.",
     art: () => [0, 13, 26, 39, 12].map((id) => card52(id)).join("").replace(/class="card/g, 'style="--cw:30px" class="card'),
-    rules: `<p>Blinds 1/2, stacks of 100. Bet, then pick cards to throw away and draw replacements, then bet again.</p><p>Raises are half pot, pot, or all in.</p>`,
+    rules: `<p>Blinds 1/2, stacks of 100. Bet, then pick cards to throw away and draw replacements, then bet again. A player who is all in still draws.</p><p>Raises are half pot, pot, or all in. The small blind acts first before the draw, the big blind first in the draw and after it.</p>`,
     labels(S) {
       if (S.stage[0] === 1) return null;
       return NL_LABELS(S, S.current_player_idx[0]);
@@ -610,10 +630,11 @@
         if (!show(i)) return ids.map(() => back()).join("");
         return ids.map((id) => card52(id, i === 0 && ctx.drawing ? { button: true, cls: `pick ${ctx.ui.discard?.has(id) ? "dim" : ""}`, attrs: `data-card="${id}"`, tag: ctx.ui.discard?.has(id) ? "out" : "" } : {})).join("");
       };
-      const st = ["Pre-draw betting", "Draw", "Post-draw betting"][S.stage[0]] ?? "Showdown";
-      return `<div class="seats">${pokerSeat(S, ctx, 1, hand(1))}</div>
+      const st = ctx.done ? "Hand over" : ["Pre-draw betting", "Draw", "Post-draw betting"][S.stage[0]];
+      const blind = (i) => (S.small_blind_idx[0] === i ? " · small blind" : " · big blind");
+      return `<div class="seats">${pokerSeat(S, ctx, 1, hand(1), blind(1))}</div>
         <div class="center"><div class="label">${st}</div>${potLine(S)}</div>
-        <div class="seats">${pokerSeat(S, ctx, 0, hand(0))}</div>`;
+        <div class="seats">${pokerSeat(S, ctx, 0, hand(0), blind(0))}</div>`;
     },
     wireFelt(el, S, ctx, rerender) {
       el.querySelectorAll("[data-card]").forEach((b) => (b.onclick = () => { const id = +b.dataset.card; ctx.ui.discard.has(id) ? ctx.ui.discard.delete(id) : ctx.ui.discard.add(id); rerender(); }));
@@ -652,29 +673,31 @@
   };
 
   // ---- 7-card stud
+  // Card slots of a player: 0-1 hole cards, 2 the door card (3rd street), then one slot per street up to 7th
+  // (slot 6); -1 = not dealt. Slots 2-5 are face up. With 8+ players a street can be dealt as one face-up
+  // community card shared by everyone still in (community[street]); it is drawn in the centre.
+  const STUD_UP = [false, false, true, true, true, true, false];
   GAMES.seven_card_stud = {
     title: "7-Card Stud", who: "You vs 1 bot · limit", blurb: "Seven cards each, four of them face up. No community cards.",
     art: () => back() + back() + card52(25) + card52(38),
-    rules: `<p>Ante ½, the lowest door card brings it in. Cards 3 to 6 are dealt face up, the 7th face down. Best five of seven wins.</p><p>Bets are 1 on 3rd and 4th street and 2 after that, up to four raises a street.</p>`,
+    rules: `<p>Ante ½. The lowest door card (suits break ties) posts a ½ bring-in. Cards 3 to 6 are dealt face up, the 7th face down; from 4th street on, the best hand showing acts first. Best five of seven wins.</p><p>Bets are 1 on 3rd and 4th street and 2 after that, up to four raises a street. Winnings are counted in big bets (2 chips).</p>`,
     labels(S) { return LIMIT_LABELS(S.stage[0] >= 2 ? 2 : 1); },
     render(S, ctx) {
-      const st = S.stage[0], dealt = Math.min(7, st + 3), upTo = [1, 2, 3, 4, 4][Math.min(st, 4)] + 2;
-      const hand = (i) => {
-        const ids = [...S.agent_cards.slice(i * 7, i * 7 + 7)];
-        const reveal = ctx.reveal && showdown(S, ctx);
-        return ids.slice(0, dealt).map((id, k) => {
-          const up = k >= 2 && k < upTo; // 3rd-6th cards are dealt face up
-          return i === 0 || up || reveal ? card52(id, { tag: up ? "" : "down" }) : back();
-        }).join("");
-      };
+      const reveal = ctx.reveal && showdown(S, ctx);
+      const hand = (i) => STUD_UP.map((up, k) => {
+        const id = S.agent_cards[i * 7 + k];
+        if (id < 0 || (k >= 2 && S.community[k - 2])) return "";
+        return i === 0 || up || reveal ? card52(id, { tag: up ? "" : "down" }) : back();
+      }).join("");
+      const community = [1, 2, 3, 4].filter((t) => S.community[t]).map((t) => card52(Math.max(...ctx.names.map((_, i) => S.agent_cards[i * 7 + t + 2]))));
       return `<div class="seats">${pokerSeat(S, ctx, 1, hand(1), S.bring_in_idx[0] === 1 ? " · brought in" : "")}</div>
-        <div class="center"><div class="label">${["3rd", "4th", "5th", "6th", "7th"][st] ?? "Showdown"} street</div>${potLine(S)}</div>
+        <div class="center"><div class="label">${ctx.done ? "Hand over" : `${["3rd", "4th", "5th", "6th", "7th"][S.stage[0]]} street`}</div>
+          ${community.length ? `<div class="row">${community.join("")}</div>` : ""}${potLine(S)}</div>
         <div class="seats">${pokerSeat(S, ctx, 0, hand(0), S.bring_in_idx[0] === 0 ? " · brought in" : "")}</div>`;
     },
     controls(S, av) { return labelButtons(GAMES.seven_card_stud.labels(S), av); },
     bot(S, seat, av) {
-      const dealt = Math.min(7, S.stage[0] + 3);
-      const ids = [...S.agent_cards.slice(seat * 7, seat * 7 + dealt)];
+      const ids = S.agent_cards.slice(seat * 7, seat * 7 + 7).filter((id) => id >= 0);
       return pokerBot(av, handStrength(ids), S.chips_in[seat] < Math.max(...S.chips_in), LIMIT_MAP);
     },
     log(prev, seat, a, next, ctx) { return `${ctx.names[seat]} ${pokerVerb(GAMES.seven_card_stud.labels(prev), a)}.`; },
@@ -723,9 +746,10 @@
   GAMES.werewolf = {
     title: "Werewolf", who: "You + 5 bots · hidden roles", blurb: "Two werewolves hide among six. Find them before they outnumber you.",
     art: () => `<span class="ico" style="width:64px">${glyph("moon", "var(--navy)", "")}</span><span class="ico" style="width:64px">${glyph("claw", "var(--heart)", "")}</span>`,
-    rules: `<p>Roles: 2 werewolves, 1 doctor, 1 seer, 2 villagers. At night the doctor protects someone, the seer checks someone, and the wolves pick a victim.</p>
-      <p>By day everyone may accuse, then everyone votes someone out. Villagers win when both wolves are gone; wolves win once they equal the rest.</p>`,
-    actorRole(S) { return S.phase[0] === 0 ? ["Doctor", "Seer", "Werewolf", "Werewolf"][S.night_subphase[0]] : null; },
+    rules: `<p>Roles, dealt at random: 2 werewolves, 1 doctor, 1 seer, 2 villagers. At night the doctor protects anyone (even themself), the seer learns whether another player is a wolf, and each wolf picks a human to attack. The wolves' most picked target (ties at random) dies unless the doctor protected them.</p>
+      <p>By day each living player in turn may accuse someone, then everyone votes. The most voted player (ties at random) is out. The first speaker moves on a seat each day. Villagers win when both wolves are gone; wolves win once they equal the rest. After 200 moves nobody wins.</p>`,
+    // Night turns: doctor, seer, then each werewolf (dead players are skipped).
+    actorRole(S) { return S.phase[0] === 0 ? ["Doctor", "Seer"][S.night_subphase[0]] ?? "Werewolf" : null; },
     render(S, ctx) {
       const me = S.roles[0], phase = S.phase[0];
       const known = (i) => ctx.reveal || i === 0 || (me === 1 && S.roles[i] === 1);
@@ -748,17 +772,18 @@
     controls(S, av, ctx) {
       const phase = S.phase[0];
       const verb = phase === 0 ? { Doctor: "Protect", Seer: "Check", Werewolf: "Attack" }[GAMES.werewolf.actorRole(S)] : phase === 1 ? "Accuse" : "Vote out";
+      // Actions are relative to the actor, so for you (seat 0) action i targets seat i. Action 6, the
+      // no-op, is legal only when accusing.
       const targets = [0, 1, 2, 3, 4, 5].filter((i) => av[i]);
       return {
-        html: targets.map((i) => `<button class="btn ${phase === 0 && GAMES.werewolf.actorRole(S) === "Werewolf" ? "danger" : ""}" data-a="${i}">${verb} ${esc(ctx.names[i])}</button>`).join("") +
-          (av[6] ? `<button class="btn" data-a="6">${phase === 1 ? "Accuse nobody" : "Pass"}</button>` : ""),
+        html: targets.map((i) => `<button class="btn ${phase === 0 && GAMES.werewolf.actorRole(S) === "Werewolf" ? "danger" : ""}" data-a="${i}">${verb} ${esc(i === 0 ? "yourself" : ctx.names[i])}</button>`).join("") +
+          (av[6] ? `<button class="btn" data-a="6">Accuse nobody</button>` : ""),
         wire: wireButtons,
       };
     },
     bot(S, seat, av) {
       const rel = (abs) => (abs - seat + 6) % 6; // actions are relative to the actor
       const legal = [0, 1, 2, 3, 4, 5].filter((r) => av[r]).map((r) => (seat + r) % 6);
-      if (!legal.length) return 6;
       const role = S.roles[seat], phase = S.phase[0];
       const knownWolf = role === 3 ? legal.find((i) => S.seer_results[i] > 0) : undefined;
       const accCount = (i) => [...S.accusations].filter((t, j) => t === i && S.alive[j]).length;
@@ -779,10 +804,12 @@
       const target = a < 6 ? ctx.names[(seat + a) % 6] : null;
       if (prev.phase[0] === 1 && target) out.push(`${ctx.names[seat]} accuses ${target}.`);
       if (prev.phase[0] === 2 && target) out.push(`${ctx.names[seat]} votes for ${target}.`);
-      if (prev.phase[0] === 0 && seat === 0 && target) out.push(`You ${{ Doctor: "protect", Seer: "check", Werewolf: "stalk" }[GAMES.werewolf.actorRole(prev)]} ${target}.`);
+      if (prev.phase[0] === 0 && seat === 0 && target) out.push(`You ${{ Doctor: "protect", Seer: "check", Werewolf: "stalk" }[GAMES.werewolf.actorRole(prev)]} ${a === 0 ? "yourself" : target}.`);
       const died = [0, 1, 2, 3, 4, 5].filter((i) => prev.alive[i] && !next.alive[i]).map((i) => ctx.names[i]);
-      if (prev.phase[0] === 0 && next.phase[0] !== 0) out.push(died.length ? `Morning. ${died.join(", ")} was killed in the night.` : "Morning. Nobody died in the night.");
-      if (prev.phase[0] === 2 && next.phase[0] !== 2) out.push(died.length ? `The village votes out ${died.join(", ")}.` : "The vote is empty. Nobody leaves.");
+      // A night or vote was resolved if play moved on, or if it ended the game (the phase then stays).
+      const resolved = (ph) => prev.phase[0] === ph && (next.phase[0] !== ph || next.game_winner[0] >= 0);
+      if (resolved(0)) out.push(died.length ? `Morning. ${died.join(", ")} was killed in the night.` : "Morning. Nobody died in the night.");
+      if (resolved(2)) out.push(`The village votes out ${died.join(", ")}.`);
       if (prev.phase[0] === 1 && next.phase[0] === 2) out.push("Accusations are in. Time to vote.");
       return out.join(" ") || null;
     },
@@ -833,7 +860,7 @@
   }
   // Bots get third-person verbs; "You" needs the plain form.
   const YOU_VERBS = { calls: "call", folds: "fold", checks: "check", bets: "bet", raises: "raise", goes: "go", accuses: "accuse", votes: "vote",
-    plays: "play", draws: "draw", picks: "pick", swaps: "swap", empties: "empty", holds: "hold", wins: "win", is: "are", loses: "lose" };
+    plays: "play", draws: "draw", picks: "pick", swaps: "swap", tries: "try", empties: "empty", holds: "hold", wins: "win", is: "are", was: "were", loses: "lose" };
   function addLog(msg) {
     if (!msg) return;
     msg = msg.replace(/\bYou (\w+)/g, (m, v) => `You ${YOU_VERBS[v] ?? v}`);
@@ -935,7 +962,7 @@
     T.token++;
     T.leaves = run(exes.reset, [randKey()]);
     T.S = view(meta, T.leaves);
-    T.ctx = { names: NAMES.slice(0, meta.num_agents), done: false, reveal: false, turn: -1, ui: { signal: false }, plan: {}, drawing: false, lastBids: null };
+    T.ctx = { names: NAMES.slice(0, meta.num_agents), done: false, reveal: false, turn: -1, ui: { signal: false }, drawing: false, lastBids: null };
     Object.defineProperty(T.ctx, "drawing", { get: () => T.meta.name === "five_card_draw" && T.S.stage[0] === 1 && T.S.current_player_idx[0] === 0 && T.waiting });
     T.handRewards = Array(meta.num_agents).fill(0);
     T.waiting = false;
