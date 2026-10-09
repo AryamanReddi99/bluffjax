@@ -6,6 +6,8 @@ num_minibatches: 2
 
 # PQN BR params
 lr: 2.5e-4
+anneal_lr: false  # true: linear decay to 0 over all gradient steps. false keeps
+                  # the constant rate of the old code, whose decay never worked
 start_e: 1.0
 end_e: 0.05
 exploration_fraction: 0.2
@@ -22,6 +24,10 @@ sl_reservoir_capacity: 100000
 sl_batch_size: 256
 sl_num_steps_per_update: 4
 sl_lr: 3e-4
+
+# exact exploitability of the average policy and the greedy BR every
+# eval_interval updates and after the last one
+eval_interval: 1
 
 # Env / logging
 env_name: kuhn_poker

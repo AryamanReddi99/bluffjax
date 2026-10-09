@@ -11,7 +11,11 @@ q_lambda: 1.0
 max_grad_norm: 0.1
 gamma: 1.0
 fc_dim_size: 64
-anneal_lr: True
+anneal_lr: True  # linear decay to 0 over all gradient steps
+
+# exact exploitability (of the greedy policy) every eval_interval updates and
+# after the last one
+eval_interval: 1
 
 # Env / logging
 env_name: kuhn_poker
