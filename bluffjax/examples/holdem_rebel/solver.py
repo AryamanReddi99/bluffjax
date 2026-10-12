@@ -31,7 +31,6 @@ from bluffjax.examples.holdem_rebel.cards import (
     hand_strengths,
     hands_not_blocked,
     normalize,
-    rank5_table,
     showdown_tables,
     showdown_value,
 )
@@ -135,7 +134,7 @@ def make_subgame(
     hand_ok = hands_not_blocked(cards_onehot(board, num_board_cards(street)))
     beliefs = normalize(beliefs * hand_ok)
     if with_showdown:
-        tables = showdown_tables(hand_strengths(rank5_table(), board))
+        tables = showdown_tables(hand_strengths(board))
     else:
         zeros = jnp.zeros(NUM_HANDS, jnp.int32)
         tables = ShowdownTables(
@@ -579,7 +578,7 @@ def chance_values(
         mass = compatible_mass(x[::-1]) * keep  # (2, 1326)
         new_board = add_cards(board, street, cards)
         if exact_showdown:
-            tables = showdown_tables(hand_strengths(rank5_table(), new_board))
+            tables = showdown_tables(hand_strengths(new_board))
             cfv = showdown_value(x[::-1], tables) * keep * (chips * scale)
         else:
             pub = public_features(game, next_street, new_board, allin, allin, chips)
