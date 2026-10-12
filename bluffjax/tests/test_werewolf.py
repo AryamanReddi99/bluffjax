@@ -246,6 +246,16 @@ def test_dead_players_never_act(n, k):
     assert rec["avail"][live].any(-1).all()
 
 
+@pytest.mark.parametrize("n,k", VALID)
+def test_no_op_only_when_accusing(n, k):
+    """The no-op (pass) is legal only in the accuse phase; at night and in the
+    vote every living player who acts must pick a target, and always can."""
+    rec = random_games(n, k)
+    live, phase, avail = rec["live"], rec["state"].phase, rec["avail"]
+    np.testing.assert_array_equal(avail[..., n][live], (phase == PHASE_ACCUSE)[live])
+    assert avail[..., :n][live].any(-1).all()
+
+
 @pytest.mark.parametrize("n,k", [(6, 2), (8, 1)])
 def test_turn_order(n, k):
     """Each night, the living night actors act once in night order. Each day,

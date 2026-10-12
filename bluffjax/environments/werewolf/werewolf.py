@@ -26,7 +26,9 @@ from the day's first speaker. At night the doctor acts first, then the seer,
 then the werewolves in an order drawn at reset. Dead players never get a turn.
 
 Observations and actions are relative to the player to act: relative index j
-is the player j seats after it (0 is itself), and action n is the no-op.
+is the player j seats after it (0 is itself), and action n is the no-op,
+which is legal only in the accuse phase (a pass): every night actor and every
+voter must pick a target.
 """
 
 import jax
@@ -238,9 +240,10 @@ class Werewolf(AECEnv):
 
         Night: the doctor may protect any living player (itself included), the
         seer may investigate any other living player and a werewolf may attack
-        any living human. Accuse: any other living player, or pass (no-op).
-        Vote: any other living player. The no-op is also available when no
-        target is (never the case in a reachable state)."""
+        any living human; there is no night no-op. Accuse: any other living
+        player, or pass (no-op). Vote: any other living player. The player to
+        act always has a target: while the game goes on the doctor itself, a
+        werewolf (for the seer) and a human (for a werewolf) are alive."""
         cp = state.current_player_idx
         seats = self._seats_from(cp)  # absolute index of each relative target
         alive = state.alive[seats]
@@ -257,7 +260,7 @@ class Werewolf(AECEnv):
         )
         day_targets = alive & not_self
         targets = jnp.where(state.phase == PHASE_NIGHT, night_targets, day_targets)
-        noop = (state.phase == PHASE_ACCUSE) | ~targets.any()
+        noop = state.phase == PHASE_ACCUSE
         return jnp.concatenate([targets, noop[None]])
 
     @partial(jax.jit, static_argnums=(0,))
