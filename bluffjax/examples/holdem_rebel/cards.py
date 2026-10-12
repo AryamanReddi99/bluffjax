@@ -10,21 +10,13 @@ counterfactual values here handle that card removal exactly, in O(52 + 1326)
 per vector, with inclusion-exclusion over the 51 hands that contain each card.
 """
 
-import functools
-import itertools
-import math
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from bluffjax.utils.game_utils.poker_utils import (
-    _COMB_7_5,
-    _card_rank,
-    _card_suit,
-    _score_five_card_hand,
-)
+from bluffjax.utils.game_utils.poker_utils import _score_seven_card_hand
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray
 
 NUM_CARDS = 52
@@ -102,50 +94,18 @@ def compatible_mass(x: FloatArray) -> FloatArray:
 # Hand strength
 # =============================================================================
 
-_BINOM = np.array(
-    [[math.comb(n, k) for k in range(6)] for n in range(NUM_CARDS + 1)],
-    dtype=np.int64,
-)
-_BINOM_J = jnp.asarray(_BINOM.astype(np.int32))
 
-
-@functools.lru_cache(maxsize=1)
-def rank5_table() -> IntArray:
-    """Score of every 5-card hand, indexed by the colex rank of its sorted cards.
+def hand_strengths(board: IntArray) -> IntArray:
+    """(1326,) showdown score of every hand on a 5-card board, -1 if blocked.
 
     Scores come from the environments' own evaluator, so ties and orderings
-    match the env's showdowns exactly. Takes about half a second to build.
+    match the env's showdowns exactly.
     """
-    combos = np.array(list(itertools.combinations(range(NUM_CARDS), 5)), np.int32)
-    colex = (_BINOM[combos, np.arange(1, 6)]).sum(axis=1)
-    score = jax.jit(
-        jax.vmap(lambda c: _score_five_card_hand(_card_rank(c), _card_suit(c)))
-    )
-    with jax.ensure_compile_time_eval():  # may be first called while tracing
-        chunks = [
-            np.asarray(score(jnp.asarray(combos[i : i + (1 << 18)])))
-            for i in range(0, len(combos), 1 << 18)
-        ]
-        table = np.zeros(len(combos), dtype=np.int32)
-        table[colex] = np.concatenate(chunks)
-        return jnp.asarray(table)
-
-
-def _seven_card_score(table: IntArray, cards: IntArray) -> IntArray:
-    """Best 5-of-7 score, same 21 subsets as poker_utils._score_seven_card_hand."""
-    cards = jnp.sort(cards)
-    combos = cards[_COMB_7_5]  # (21, 5), each row sorted
-    colex = jnp.sum(_BINOM_J[combos, jnp.arange(1, 6)], axis=-1)
-    return jnp.max(table[colex])
-
-
-def hand_strengths(table: IntArray, board: IntArray) -> IntArray:
-    """(1326,) showdown score of every hand on a 5-card board, -1 if blocked."""
     blocked = ~hands_not_blocked(cards_onehot(board, 5))
     cards = jnp.concatenate(
         [jnp.broadcast_to(board, (NUM_HANDS, 5)), HAND_CARDS], axis=1
     )
-    scores = jax.vmap(lambda c: _seven_card_score(table, c))(cards)
+    scores = jax.vmap(_score_seven_card_hand)(cards)
     return jnp.where(blocked, -1, scores)
 
 

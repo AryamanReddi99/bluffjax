@@ -33,7 +33,6 @@ def test_rules_match_env(name: str) -> None:
     """Legal actions, transitions, round ends and payoffs equal env.step_env."""
     game = G.make_game(name)
     env = make(game.env_id, num_agents=2)
-    table = C.rank5_table()
     legal_f = jax.jit(lambda s: G.legal_actions(game, s))
     step_f = jax.jit(lambda s, a: G.step(game, s, a))
     view_f = jax.jit(lambda s: G.bet_state_from_env(game, s))
@@ -71,7 +70,7 @@ def test_rules_match_env(name: str) -> None:
                 board = jnp.concatenate(
                     [st.flop_cards, jnp.stack([st.turn_card, st.river_card])]
                 ).astype(jnp.int32)
-                s = np.asarray(C.hand_strengths(table, board))
+                s = np.asarray(C.hand_strengths(board))
                 hands = [int(C.hand_index(st.agent_cards[k].astype(jnp.int32))) for k in seats]
                 sign = np.sign(s[hands[0]] - s[hands[1]])
                 pay = np.array([sign, -sign]) * chips[0] * game.reward_per_chip
@@ -149,7 +148,7 @@ def test_card_removal_and_showdown_values() -> None:
     hc = np.asarray(C.HAND_CARDS)
     share = (hc[:, None, :, None] == hc[None, :, None, :]).any(-1).any(-1)
     board = rng.choice(52, 5, replace=False)
-    s = np.asarray(C.hand_strengths(C.rank5_table(), jnp.asarray(board, jnp.int32)))
+    s = np.asarray(C.hand_strengths(jnp.asarray(board, jnp.int32)))
     for h in rng.choice(1326, 30, replace=False):
         if not np.isin(hc[h], board).any():
             ref = _score_seven_card_hand(jnp.asarray(np.concatenate([hc[h], board]), jnp.int32))

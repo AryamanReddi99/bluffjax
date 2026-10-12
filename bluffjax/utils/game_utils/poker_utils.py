@@ -2,33 +2,6 @@ import jax
 import jax.numpy as jnp
 from bluffjax.utils.typing import IntArray, BoolArray
 
-_COMB_7_5 = jnp.array(
-    [
-        [0, 1, 2, 3, 4],
-        [0, 1, 2, 3, 5],
-        [0, 1, 2, 3, 6],
-        [0, 1, 2, 4, 5],
-        [0, 1, 2, 4, 6],
-        [0, 1, 2, 5, 6],
-        [0, 1, 3, 4, 5],
-        [0, 1, 3, 4, 6],
-        [0, 1, 3, 5, 6],
-        [0, 1, 4, 5, 6],
-        [0, 2, 3, 4, 5],
-        [0, 2, 3, 4, 6],
-        [0, 2, 3, 5, 6],
-        [0, 2, 4, 5, 6],
-        [0, 3, 4, 5, 6],
-        [1, 2, 3, 4, 5],
-        [1, 2, 3, 4, 6],
-        [1, 2, 3, 5, 6],
-        [1, 2, 4, 5, 6],
-        [1, 3, 4, 5, 6],
-        [2, 3, 4, 5, 6],
-    ],
-    dtype=jnp.int32,
-)
-
 
 @jax.jit
 def _card_rank(card: IntArray) -> IntArray:
@@ -110,18 +83,114 @@ def _score_five_card_hand(ranks: IntArray, suits: IntArray) -> IntArray:
     return score
 
 
+def _top_ranks(present: BoolArray, k: int) -> IntArray:
+    """The k highest ranks flagged in present (13 flags, 2 to ace), descending.
+
+    Padded with -1 when fewer than k ranks are flagged.
+    """
+    rank_vals = jnp.arange(2, 15, dtype=jnp.int32)
+    # A flagged rank's place in descending order is the number flagged above it.
+    place = jnp.cumsum(present[::-1])[::-1] - present
+    in_place = present & (place == jnp.arange(k)[:, None])
+    return jnp.max(jnp.where(in_place, rank_vals, -1), axis=1)
+
+
+def _straight_high(present: BoolArray) -> IntArray:
+    """High card of the best straight among the ranks flagged in present.
+
+    present has 13 flags, 2 to ace. The wheel (A-2-3-4-5) is 5 high. Returns 0
+    if there is no straight.
+    """
+    # Bit r - 1 holds rank r, and bit 0 holds the ace again, playing low.
+    bits = jnp.sum(jnp.where(present, 2 << jnp.arange(13), 0)) | present[12]
+    highs = jnp.arange(5, 15, dtype=jnp.int32)
+    has_run = ((bits >> (highs - 5)) & 0b11111) == 0b11111
+    return jnp.max(jnp.where(has_run, highs, 0))
+
+
 @jax.jit
 def _score_seven_card_hand(hand: IntArray) -> IntArray:
+    """Score of the best five cards of a 5- to 7-card hand.
+
+    Same encoding as _score_five_card_hand, and equal to its maximum over all
+    five-card subsets, but read off the rank and suit counts directly.
+    """
     ranks = _card_rank(hand)
     suits = _card_suit(hand)
+    rank_vals = jnp.arange(2, 15, dtype=jnp.int32)
+    is_rank = ranks[:, None] == rank_vals
+    counts = jnp.sum(is_rank, axis=0)
 
-    def score_combo(combo: IntArray) -> IntArray:
-        combo_ranks = ranks[combo]
-        combo_suits = suits[combo]
-        return _score_five_card_hand(combo_ranks, combo_suits)
+    # Only one suit can hold five of at most seven cards.
+    suit_counts = jnp.sum(suits[:, None] == jnp.arange(4), axis=0)
+    flush_suit = jnp.argmax(suit_counts)
+    is_flush = suit_counts[flush_suit] >= 5
+    flush_ranks = jnp.any(is_rank & (suits == flush_suit)[:, None], axis=0)
 
-    scores = jax.vmap(score_combo)(_COMB_7_5)
-    return jnp.max(scores)
+    straight_high = _straight_high(counts > 0)
+    straight_flush_high = jnp.where(is_flush, _straight_high(flush_ranks), 0)
+
+    quad_rank = jnp.max(jnp.where(counts == 4, rank_vals, -1))
+    trip_rank = jnp.max(jnp.where(counts == 3, rank_vals, -1))
+    pair_ranks_desc = _top_ranks(counts == 2, 2)
+    high_pair = pair_ranks_desc[0]
+    low_pair = pair_ranks_desc[1]
+    kickers_desc = _top_ranks(counts == 1, 5)
+    flush_desc = _top_ranks(flush_ranks, 5)
+
+    # The pair of a full house is the best other rank held at least twice, so
+    # a second trips can play as the pair.
+    full_house_pair = jnp.max(
+        jnp.where((counts >= 2) & (rank_vals != trip_rank), rank_vals, -1)
+    )
+    # Quads and two pair play the best remaining card as the kicker, which
+    # can come from another pair.
+    quad_kicker = jnp.max(
+        jnp.where((counts > 0) & (rank_vals != quad_rank), rank_vals, -1)
+    )
+    two_pair_kicker = jnp.max(
+        jnp.where(
+            (counts > 0) & (rank_vals != high_pair) & (rank_vals != low_pair),
+            rank_vals,
+            -1,
+        )
+    )
+
+    has_four = quad_rank > 0
+    has_three = trip_rank > 0
+    num_pairs = jnp.sum(counts == 2)
+    has_full_house = has_three & (full_house_pair > 0)
+
+    score_high = _encode_score(1, kickers_desc)
+    score_pair = _encode_score(
+        2, jnp.array([high_pair, kickers_desc[0], kickers_desc[1], kickers_desc[2], 0])
+    )
+    score_two_pair = _encode_score(
+        3, jnp.array([high_pair, low_pair, two_pair_kicker, 0, 0])
+    )
+    score_trips = _encode_score(
+        4, jnp.array([trip_rank, kickers_desc[0], kickers_desc[1], 0, 0])
+    )
+    score_straight = _encode_score(5, jnp.array([straight_high, 0, 0, 0, 0]))
+    score_flush = _encode_score(6, flush_desc)
+    score_full_house = _encode_score(
+        7, jnp.array([trip_rank, full_house_pair, 0, 0, 0])
+    )
+    score_four = _encode_score(8, jnp.array([quad_rank, quad_kicker, 0, 0, 0]))
+    score_straight_flush = _encode_score(
+        9, jnp.array([straight_flush_high, 0, 0, 0, 0])
+    )
+
+    score = score_high
+    score = jnp.where(num_pairs >= 1, score_pair, score)
+    score = jnp.where(num_pairs >= 2, score_two_pair, score)
+    score = jnp.where(has_three, score_trips, score)
+    score = jnp.where(straight_high > 0, score_straight, score)
+    score = jnp.where(is_flush, score_flush, score)
+    score = jnp.where(has_full_house, score_full_house, score)
+    score = jnp.where(has_four, score_four, score)
+    score = jnp.where(straight_flush_high > 0, score_straight_flush, score)
+    return score
 
 
 @jax.jit
