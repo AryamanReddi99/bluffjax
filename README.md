@@ -151,6 +151,47 @@ env = bluffjax.make("texas_nolimit_holdem", num_agents=6, init_chips=200)
 env = bluffjax.make("kemps", num_agents=6, comm_dim=4)                  # three teams, wider signal channel
 ```
 
+## 🔌 Wrappers
+
+Coming from another library? [`bluffjax/wrappers`](bluffjax/wrappers) puts every game behind the [JaxMARL](https://github.com/FLAIROx/JaxMARL) and [PettingZoo](https://pettingzoo.farama.org) APIs. Install them with:
+
+```bash
+uv sync --extra wrappers
+```
+
+**JaxMARL.** `JaxMARLEnv` is a JaxMARL `MultiAgentEnv`: observations, actions, rewards and dones are dicts keyed by agent, it is still pure JAX, and JaxMARL's own wrappers such as `LogWrapper` work on it.
+
+```python
+import jax
+import bluffjax
+from bluffjax.wrappers import JaxMARLEnv
+
+env = JaxMARLEnv(bluffjax.make("leduc_holdem"))
+obs, state = env.reset(jax.random.key(0))
+avail = env.get_avail_actions(state)  # {"agent_0": mask, "agent_1": mask}
+actions = {agent: avail[agent].argmax() for agent in env.agents}
+obs, state, rewards, dones, infos = env.step(jax.random.key(1), state, actions)
+```
+
+Turn-based games follow JaxMARL's Hanabi convention: every agent sends an action at every step, but only the action of the player to move is played. The others observe zeros and may only play the extra no-op (`env.noop_action`), so nobody sees another player's observation.
+
+**PettingZoo.** `PettingZooAECEnv` wraps the turn-based games and `PettingZooParallelEnv` the simultaneous-move ones (also usable turn by turn through PettingZoo's `parallel_to_aec`). Observations are `{"observation", "action_mask"}` dicts of NumPy arrays, as in PettingZoo's classic games, and `reset(seed=...)` replays the same games for the same seed.
+
+```python
+import numpy as np
+import bluffjax
+from bluffjax.wrappers import PettingZooAECEnv
+
+env = PettingZooAECEnv(bluffjax.make("kuhn_poker"))
+env.reset(seed=42)
+for agent in env.agent_iter():
+    obs, reward, termination, truncation, info = env.last()
+    action = None if termination or truncation else np.flatnonzero(obs["action_mask"])[0]
+    env.step(action)
+```
+
+Bluff's horizon cut-off shows up as a truncation: `truncations` in PettingZoo, `infos["truncated"]` in JaxMARL. [`bluffjax/wrappers/demo.py`](bluffjax/wrappers/demo.py) runs each wrapper with random legal actions: `uv run --extra wrappers python bluffjax/wrappers/demo.py`.
+
 ## ⚡ Speed
 
 Throughput grows log-linearly with the number of parallel environments. At 10,000 environments every game produces at least 10⁷ samples/s on a single GPU, and the lightest exceed 10⁸.
