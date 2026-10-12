@@ -24,6 +24,12 @@ baselines = [
     "optax==0.2.6",
     "wandb==0.22.3",
 ]
+# JaxMARL and PettingZoo interfaces in bluffjax/wrappers
+wrappers = [
+    "gymnasium==1.4.0",
+    "jaxmarl==0.2.0",
+    "pettingzoo==1.27.0",
+]
 
 [dependency-groups]
 dev = [
