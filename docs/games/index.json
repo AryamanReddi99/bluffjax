@@ -559,6 +559,13 @@
     "shape": []
    },
    {
+    "name": "num_drawn",
+    "dtype": "int32",
+    "shape": [
+     2
+    ]
+   },
+   {
     "name": "absorbing",
     "dtype": "bool",
     "shape": [
@@ -577,9 +584,9 @@
    }
   ],
   "bytes": {
-   "reset": 43183,
-   "step": 112452,
-   "avail": 10367
+   "reset": 47126,
+   "step": 117903,
+   "avail": 10494
   }
  },
  "seven_card_stud": {
@@ -676,7 +683,7 @@
   ],
   "bytes": {
    "reset": 46990,
-   "step": 192852,
+   "step": 199113,
    "avail": 6010
   }
  },
@@ -771,9 +778,9 @@
    }
   ],
   "bytes": {
-   "reset": 47227,
-   "step": 83107,
-   "avail": 6828
+   "reset": 49139,
+   "step": 90118,
+   "avail": 6724
   }
  },
  "texas_nolimit_holdem": {
@@ -882,7 +889,7 @@
   ],
   "bytes": {
    "reset": 46372,
-   "step": 98704,
+   "step": 105862,
    "avail": 9605
   }
  },
@@ -1002,7 +1009,7 @@
   "bytes": {
    "reset": 47011,
    "step": 81579,
-   "avail": 9492
+   "avail": 9102
   }
  }
 }
