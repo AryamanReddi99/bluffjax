@@ -24,6 +24,14 @@ hand, so player indices are only an internal seat order.
   once every player who can still bet has acted since the last raise.
 - Rewards are paid when the hand ends: chips won minus chips put in. Ties
   split the pot.
+
+Observation (for the player to act; seat j is the player j places after it,
+seat 0 is itself), 57 + 6 * num_agents floats:
+- [0, 52): own cards (multi-hot).
+- 52: own chips in the pot; 53: the highest chips in the pot of any player.
+- [54, 57): stage one-hot (pre-draw betting, draw, post-draw betting).
+- 57 + 6 * j + c: seat j drew c cards (c = 0 to 5). All 0 for a seat that
+  hasn't drawn (yet, or because it folded).
 """
 
 import jax
@@ -48,6 +56,7 @@ MAX_PLAYERS = DECK_SIZE // HAND_SIZE  # 10
 FOLD = 4
 NUM_BETTING_ACTIONS = 5
 NUM_DRAW_ACTIONS = 2**HAND_SIZE
+NUM_STAGES = 3
 
 
 @struct.dataclass
@@ -66,6 +75,7 @@ class FiveCardDrawState:
     deck_idx: IntArray
     discards: BoolArray  # (52,) card is in the discard pile
     draw_start_idx: IntArray  # first player to draw (detects the end of the draw)
+    num_drawn: IntArray  # (num_agents,) cards each player drew; -1 until it draws
     absorbing: BoolArray
     done: bool
     timestep: int
@@ -89,7 +99,8 @@ class FiveCardDraw(AECEnv):
                 f"got {init_chips}"
             )
         self.init_chips = init_chips
-        self.obs_dim = self.deck_size + 2
+        # own cards, own and highest chips in, stage, cards drawn by every seat
+        self.obs_dim = self.deck_size + 2 + NUM_STAGES + num_agents * (HAND_SIZE + 1)
         # 0-4 betting, 5-36 draw (2^5 keep/discard patterns)
         self.num_actions = NUM_BETTING_ACTIONS + NUM_DRAW_ACTIONS
 
@@ -101,20 +112,22 @@ class FiveCardDraw(AECEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def obs_from_state(self, state: FiveCardDrawState) -> FloatArray:
-        """
-        Observation format (54 dimensions) - same as no-limit:
-        - 0-51: One-hot encoding of current player's 5 cards
-        - 52: Current player's chips in pot
-        - 53: Max chips in pot
-        """
-        hand_cards = state.agent_cards[state.current_player_idx]
-        obs = jnp.zeros(self.obs_dim, dtype=jnp.float32)
-        obs = obs.at[hand_cards].set(1.0)
-        obs = obs.at[52].set(
-            state.chips_in[state.current_player_idx].astype(jnp.float32)
-        )
-        obs = obs.at[53].set(jnp.max(state.chips_in).astype(jnp.float32))
-        return obs
+        """Observation of the player to act (layout in the module docstring)."""
+        current = state.current_player_idx
+        hand = jnp.zeros(self.deck_size, dtype=jnp.float32).at[
+            state.agent_cards[current]
+        ].set(1.0)
+        chips = jnp.stack([state.chips_in[current], jnp.max(state.chips_in)])
+        # one_hot of -1 (not drawn) is all zeros
+        drawn = jax.nn.one_hot(jnp.roll(state.num_drawn, -current), HAND_SIZE + 1)
+        return jnp.concatenate(
+            [
+                hand,
+                chips.astype(jnp.float32),
+                jax.nn.one_hot(state.stage, NUM_STAGES),
+                drawn.reshape(-1),
+            ]
+        ).astype(jnp.float32)
 
     @partial(jax.jit, static_argnums=(0,))
     def get_avail_actions(self, state: FiveCardDrawState) -> BoolArray:
@@ -195,6 +208,7 @@ class FiveCardDraw(AECEnv):
             deck_idx=deck_idx,
             discards=jnp.zeros(self.deck_size, dtype=bool),
             draw_start_idx=jnp.int32(0),
+            num_drawn=jnp.full(self.num_agents, -1, dtype=jnp.int32),
             absorbing=jnp.zeros(self.num_agents, dtype=bool),
             done=jnp.array(False),
             timestep=0,
@@ -335,6 +349,13 @@ class FiveCardDraw(AECEnv):
         new_shuffled_deck = jnp.where(did_draw, drawn_deck, state.shuffled_deck)
         new_deck_idx = jnp.where(did_draw, drawn_deck_idx, state.deck_idx)
         new_discards = jnp.where(did_draw, drawn_discards, state.discards)
+        new_num_drawn = jnp.where(
+            did_draw,
+            state.num_drawn.at[current_player].set(
+                HAND_SIZE - jnp.sum(keep).astype(jnp.int32)
+            ),
+            state.num_drawn,
+        )
         next_drawer = self._next_eligible(current_player, ~state.folded)
         draw_over = did_draw & (next_drawer == state.draw_start_idx)
 
@@ -405,6 +426,7 @@ class FiveCardDraw(AECEnv):
             deck_idx=new_deck_idx,
             discards=new_discards,
             draw_start_idx=new_draw_start_idx,
+            num_drawn=new_num_drawn,
             absorbing=absorbing,
             done=game_done,
             timestep=state.timestep + 1,

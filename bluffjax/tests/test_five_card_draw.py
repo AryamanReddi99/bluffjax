@@ -1,5 +1,6 @@
 """5-Card Draw: all-in betting, the draw (no duplicate cards with 2-10 players),
-seat order, payoffs, legal actions and seat-rotation equivariance."""
+seat order, payoffs, legal actions, the observation and seat-rotation
+equivariance."""
 
 import functools
 
@@ -19,6 +20,7 @@ PER_PLAYER = (
     "remaining_chips",
     "folded",
     "all_in",
+    "num_drawn",
     "absorbing",
 )
 SEAT_INDEX = ("small_blind_idx", "current_player_idx", "draw_start_idx")
@@ -240,6 +242,59 @@ def test_ten_players_redraw_own_discards_only_when_needed():
     assert len(q_new & (old - new)) == 2 and len(q_new & q_old) == 3
 
 
+def _keep(cards: int) -> int:
+    """Draw action that keeps the `cards` lowest cards and discards the rest."""
+    return 5 + (1 << cards) - 1
+
+
+def _expected_obs(env, state) -> np.ndarray:
+    """The observation built by hand from the layout in the env docstring."""
+    n, p = env.num_agents, int(state.current_player_idx)
+    obs = np.zeros(57 + 6 * n, dtype=np.float32)
+    obs[np.asarray(state.agent_cards[p])] = 1.0
+    obs[52] = float(state.chips_in[p])
+    obs[53] = float(np.max(np.asarray(state.chips_in)))
+    obs[54 + int(state.stage)] = 1.0
+    for j in range(n):
+        drawn = int(state.num_drawn[(p + j) % n])
+        if drawn >= 0:
+            obs[57 + 6 * j + drawn] = 1.0
+    return obs
+
+
+def test_observation_shows_stage_and_cards_drawn_by_seat():
+    hand = Hand(4, seed=6)
+    sb, bb, utg, co = (hand.seat(i) for i in range(4))
+    assert hand.env.obs_dim == 57 + 6 * 4
+    hand.act(FOLD, by=utg)
+    hand.act(CALL, by=co)
+    hand.act(CALL, by=sb)
+    obs = np.asarray(hand.env.obs_from_state(hand.state))
+    np.testing.assert_array_equal(obs[54:57], [1, 0, 0])
+    assert not obs[57:].any()  # nobody has drawn
+    hand.act(CALL, by=bb)
+    # Draw from the small blind (the cut-off is the dealer); the UTG folded.
+    drawn = {sb: 5, bb: 0, co: 3}
+    for p in (sb, bb, co):
+        obs = np.asarray(hand.env.obs_from_state(hand.state))
+        np.testing.assert_array_equal(obs, _expected_obs(hand.env, hand.state))
+        np.testing.assert_array_equal(obs[54:57], [0, 1, 0])
+        hand.act(_keep(5 - drawn[p]), by=p)
+    assert hand.stage == 2
+    np.testing.assert_array_equal(
+        np.asarray(hand.state.num_drawn), [drawn.get(i, -1) for i in range(4)]
+    )
+    obs = np.asarray(hand.env.obs_from_state(hand.state))
+    np.testing.assert_array_equal(obs, _expected_obs(hand.env, hand.state))
+    np.testing.assert_array_equal(obs[54:57], [0, 0, 1])
+    # Seen from the small blind: itself drew 5, then the BB 0, the UTG (folded)
+    # nothing, the CO 3.
+    assert hand.player == sb
+    blocks = obs[57:].reshape(4, 6)
+    np.testing.assert_array_equal(blocks.argmax(1)[[0, 1, 3]], [5, 0, 3])
+    assert blocks.sum(1).tolist() == [1, 1, 0, 1]
+
+
 @functools.lru_cache(maxsize=None)
 def _rollout(num_agents: int, num_envs: int = 128, num_steps: int = 160):
     """Records every step of auto-resetting rollouts. Half the envs play
@@ -267,6 +322,7 @@ def _rollout(num_agents: int, num_envs: int = 128, num_steps: int = 160):
             fresh, _ = jax.vmap(env.reset)(jax.random.split(k_reset, num_envs))
             rec = dict(
                 state=state,
+                obs=jax.vmap(env.obs_from_state)(state),
                 mask=mask,
                 next=nxt,
                 next_mask=jax.vmap(env.get_avail_actions)(nxt),
@@ -318,6 +374,17 @@ def test_random_hands(num_agents):
     assert (mask[..., :5].any(-1) == betting).all()
     assert (mask[..., 5:].all(-1) == ~betting).all()
     assert not rec["next_mask"][done].any()  # nothing is legal once it's over
+    # Cards drawn: nobody before the draw; afterwards every player still in.
+    drawn = s.num_drawn
+    assert ((drawn >= -1) & (drawn <= 5)).all()
+    assert (drawn[s.stage == 0] == -1).all()
+    assert (drawn[s.stage == 2] >= 0)[~s.folded[s.stage == 2]].all()
+    # The observation matches the documented layout.
+    flat = jax.tree_util.tree_map(lambda x: x.reshape((T * B,) + x.shape[2:]), s)
+    obs = rec["obs"].reshape(T * B, -1)
+    for i in np.random.default_rng(n).choice(T * B, 200, replace=False):
+        one = jax.tree_util.tree_map(lambda x: x[i], flat)
+        np.testing.assert_array_equal(obs[i], _expected_obs(_env(n)[0], one))
     np.testing.assert_allclose(reward.sum(-1), 0.0, atol=1e-3)  # zero-sum
     assert (reward[~done] == 0).all()
 
