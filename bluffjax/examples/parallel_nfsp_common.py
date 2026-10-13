@@ -495,16 +495,18 @@ def evaluate_goofspiel(
     """Goofspiel: the learner plays one seat, rotating over the games (with two
     players it alternates seats), the baseline every other seat. Win: the
     learner is the unique top scorer (info["game_winner"]); loss: another
-    player is; draw: a tie for the top score. The return is the learner's
-    total reward, i.e. its points minus the opponents' mean points."""
+    player scored more than the learner (with three or more players, possibly
+    several tied above it); draw: the learner tied for the top score. The
+    return is the learner's total reward, i.e. its points minus the opponents'
+    mean points."""
     rng_seats, rng_play = jax.random.split(rng)
     seats = rotating_seats(rng_seats, num_games, env.num_agents)
     record = play_games(
         env, learner, learner_params, baseline, baseline_params, seats, rng_play
     )
-    winner = record.info["game_winner"]
-    win = (winner & seats).any(axis=-1)
-    loss = winner.any(axis=-1) & ~win
+    points = record.info["points"]
+    win = (record.info["game_winner"] & seats).any(axis=-1)
+    loss = (points * seats).sum(axis=-1) < points.max(axis=-1)
     return EvalResult(
         win=win.astype(jnp.float32),
         loss=loss.astype(jnp.float32),

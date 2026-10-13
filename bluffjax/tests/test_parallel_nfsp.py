@@ -496,16 +496,23 @@ def tiny_config(name, **extra):
 
 
 def _is_constant_per_game(is_br, done):
-    """is_br (T, N, P) is constant within each agent's game; returns the flag
-    of every (env, agent, game) that started in the rollout."""
+    """is_br (T, N, P) is constant within each agent's game. Returns the flag
+    of every (env, agent, game) that started in the rollout, and whether each
+    agent's flag changed from one of its games to the next."""
     T, N, P = is_br.shape
     game = np.concatenate([np.zeros((1, N), int), np.cumsum(done, 0)[:-1]])
     flags = {}
     for (t, n, p), f in np.ndenumerate(is_br):
         key = (n, p, game[t, n])
         assert flags.setdefault(key, f) == f, (t, n, p)
+    changed = [
+        flags[(n, p, g)] != flags[(n, p, g - 1)]
+        for (n, p, g) in flags
+        if g > 0
+    ]
     # drop the game in progress at the start (drawn at init)
-    return np.array([f for (n, p, g), f in flags.items() if g > 0])
+    new = np.array([f for (n, p, g), f in flags.items() if g > 0])
+    return new, np.array(changed)
 
 
 SCRIPT_NAMES = ["goofspiel_ppo_nfsp", "goofspiel_pqn_nfsp", "kemps_ppo_nfsp", "kemps_pqn_nfsp"]
@@ -563,10 +570,13 @@ def test_real_run_mixing_targets_and_reservoir(common, monkeypatch, name):
     assert (dones == done[..., None]).all()
     # mixing: constant within each agent's game, also across updates, and
     # redrawn independently for every agent at every reset
-    flags = _is_constant_per_game(is_br, done)
+    flags, changed = _is_constant_per_game(is_br, done)
     assert len(flags) > 100
     eta = config["anticipatory_eta"]
     assert abs(flags.mean() - eta) < 4 * np.sqrt(eta * (1 - eta) / len(flags))
+    # independent draws: a flag changes between consecutive games w.p. 2 eta (1 - eta)
+    p_change = 2 * eta * (1 - eta)
+    assert abs(changed.mean() - p_change) < 4 * np.sqrt(p_change * (1 - p_change) / len(changed))
     # game ends and cut-offs
     length = np.zeros_like(done, dtype=int)
     run = np.zeros(N, int)
@@ -606,8 +616,86 @@ def test_real_run_mixing_targets_and_reservoir(common, monkeypatch, name):
             for who in ("avg", "br"):
                 total = sum(row[f"{k}_rate_{who}_vs_random"] for k in ("win", "loss", "draw"))
                 assert total == pytest.approx(1.0)
-    # the per-agent returns logged for ended games are the env's
-    assert logger.rows[-1]["games_completed"] == done[-T:].sum()
+    # the per-game returns logged for the games that ended in each update, by
+    # the policy the agent followed, are the env's (rewards were scaled)
+    env_rewards = rewards / np.float32(config["reward_scale"])
+    game_return = np.zeros_like(env_rewards)
+    acc = np.zeros(env_rewards.shape[1:], np.float64)
+    for t in range(len(done)):
+        acc += env_rewards[t]
+        game_return[t] = acc
+        acc[done[t]] = 0.0
+    for u, row in enumerate(logger.rows):
+        sl = slice(u * T, (u + 1) * T)
+        ended = np.broadcast_to(done[sl, :, None], is_br[sl].shape)
+        assert row["games_completed"] == done[sl].sum()
+        for key, mode in (("br_return_per_game", is_br[sl]), ("avg_return_per_game", ~is_br[sl])):
+            games = ended & mode
+            want = game_return[sl][games].sum() / max(games.sum(), 1)
+            assert row[key] == pytest.approx(want, rel=1e-5, abs=1e-5)
+
+
+def _ramp_network(marks, returns_value):
+    """A stand-in for the scripts' network classes whose output for action a is
+    mark * a whatever the observation, with the scalar parameter mark taken
+    from `marks` in the order the networks are initialised. With mark = +1000
+    the policy (or the greedy action) is the highest legal action, with -1000
+    the lowest one."""
+    import flax.linen as nn
+
+    marks = iter(marks)
+
+    class Ramp(nn.Module):
+        action_dim: int
+        hidden_dim: int
+
+        @nn.compact
+        def __call__(self, x):
+            # flax also calls the initialiser in apply (to check the shape)
+            mark = self.param("mark", lambda rng: jnp.float32(next(marks, 0.0)))
+            out = mark * jnp.arange(self.action_dim, dtype=jnp.float32) + 0.0 * x[..., :1]
+            if returns_value:
+                return out, 0.0 * x.sum(-1)
+            return out
+
+    return Ramp
+
+
+@pytest.mark.parametrize("name", SCRIPT_NAMES)
+def test_real_run_acts_with_the_drawn_policy(common, monkeypatch, name):
+    """Every agent acts with the BR in the games where its flag is set and
+    with the average policy otherwise (and the reservoir gets those flags)."""
+    mod = _scripts()[name]
+    if "ppo" in name:  # one class for both networks; the BR is initialised first
+        monkeypatch.setattr(mod, "ActorCriticDiscreteMLP", _ramp_network([1e3, -1e3], True))
+    else:
+        monkeypatch.setattr(mod, "QNetworkDiscreteMLP", _ramp_network([1e3], False))
+        monkeypatch.setattr(mod, "ActorDiscreteMLP", _ramp_network([-1e3], False))
+    seen = []
+    reservoir = mod.reservoir_append
+
+    def reservoir_spy(buffer, obs, action_mask, action, valid, rng):
+        jax.debug.callback(
+            lambda *a: seen.append([np.asarray(x) for x in a]), valid, action_mask, action
+        )
+        return reservoir(buffer, obs, action_mask, action, valid, rng)
+
+    monkeypatch.setattr(mod, "reservoir_append", reservoir_spy)
+    monkeypatch.setattr(mod, "WANDB_RUNS", [_Recorder()])
+    config = tiny_config(name, num_update_steps=2, compare=False, start_e=0.0, end_e=0.0)
+    jax.block_until_ready(jax.jit(mod.make_train(config))(KEY, jnp.int32(0)))
+    jax.effects_barrier()
+    assert len(seen) == 2
+    is_br = np.concatenate([r[0] for r in seen])
+    mask = np.concatenate([r[1] for r in seen])
+    action = np.concatenate([r[2] for r in seen])
+    idx = np.arange(mask.shape[-1])
+    highest = np.where(mask, idx, -1).max(-1)
+    lowest = np.where(mask, idx, mask.shape[-1]).min(-1)
+    distinct = highest != lowest
+    assert (distinct & is_br).sum() > 50 and (distinct & ~is_br).sum() > 300
+    np.testing.assert_array_equal(action[is_br], highest[is_br])
+    np.testing.assert_array_equal(action[~is_br], lowest[~is_br])
 
 
 def _params_close(a, b, atol=1e-6):
@@ -623,7 +711,8 @@ def _max_diff(a, b):
 @pytest.mark.parametrize("name", SCRIPT_NAMES)
 def test_half_checkpoint_and_round_trip(common, monkeypatch, tmp_path, name):
     mod = _scripts()[name]
-    monkeypatch.setattr(mod, "WANDB_RUNS", [_Recorder(), _Recorder()])
+    loggers = {"full": [_Recorder(), _Recorder()]}
+    monkeypatch.setattr(mod, "WANDB_RUNS", loggers["full"])
     U = 5  # half after 2 updates (floor)
     config = tiny_config(name, num_update_steps=U, compare=False)
     config["save_dir"] = str(tmp_path)
@@ -633,11 +722,13 @@ def test_half_checkpoint_and_round_trip(common, monkeypatch, tmp_path, name):
     keys = jax.random.split(KEY, 2)
     seeds = jnp.arange(2)
     full = jax.jit(jax.vmap(train))(keys, seeds)
-    partial = {
-        n: jax.jit(jax.vmap(functools.partial(train, num_updates=n)))(keys, seeds)
-        for n in (1, 2, 3)
-    }
     jax.effects_barrier()
+    partial = {}
+    for n in (1, 2, 3):
+        loggers[n] = [_Recorder(), _Recorder()]
+        monkeypatch.setattr(mod, "WANDB_RUNS", loggers[n])
+        partial[n] = jax.jit(jax.vmap(functools.partial(train, num_updates=n)))(keys, seeds)
+        jax.effects_barrier()
     E, M = config["num_epochs"], config["num_minibatches"]
     assert (np.asarray(full.update_step) == U).all()
     assert (np.asarray(full.br_train_state.step) == U * E * M).all()
@@ -649,9 +740,22 @@ def test_half_checkpoint_and_round_trip(common, monkeypatch, tmp_path, name):
         assert _params_close(half, at[2]), _max_diff(half, at[2])
         assert _max_diff(half, at[1]) > 1e-4 and _max_diff(half, at[3]) > 1e-4
         assert _max_diff(half, getattr(full, attr).params) > 1e-4
-    # the learning rate kept decaying over the whole run (not restarted)
-    lr = lambda step: config["lr"] * (1 - step / config["num_gradient_steps"])
-    assert lr(2 * E * M) == pytest.approx(0.6 * config["lr"])
+    # The schedules span the whole run, also in a run stopped after 2 updates:
+    # the logged learning rate (after update u) is lr * (1 - (u + 1) / U) and
+    # epsilon (during update u) start_e + min(1, u / (fraction * U)) * (end_e - start_e).
+    for run, rows in loggers.items():
+        for seed_rows in rows:
+            assert len(seed_rows.rows) == (U if run == "full" else run)
+            for u, row in enumerate(seed_rows.rows):
+                assert row["update_step"] == u
+                assert row["br_lr"] == pytest.approx(config["lr"] * (1 - (u + 1) / U), abs=1e-9)
+                if "pqn" in name:
+                    frac = min(1.0, u / (config["exploration_fraction"] * U))
+                    eps = config["start_e"] + frac * (config["end_e"] - config["start_e"])
+                    assert row["epsilon"] == pytest.approx(eps, rel=1e-6)
+    np.testing.assert_allclose(
+        loggers[2][0].rows[-1]["br_lr"], 0.6 * config["lr"], rtol=1e-5
+    )
 
     full_ckpt = common.Checkpoint(full.avg_train_state.params, full.br_train_state.params)
     run_dir = common.save_checkpoints(config, full.half, full_ckpt)
@@ -791,6 +895,41 @@ def test_goofspiel_evaluation(common):
         lambda k: common.evaluate_goofspiel(env, match_prize, None, rand, None, n, k)
     )(KEY)
     assert float(result.win.mean()) > 0.6 and float(result.ret.mean()) > 10.0
+
+
+def test_goofspiel_evaluation_three_players(common):
+    """With three players two opponents can tie for the top score above the
+    learner: a loss, although no player is the unique top scorer."""
+    env = make("goofspiel", num_agents=3)
+    rand = _random_policy(common)
+    n = 4000
+    result = jax.jit(
+        lambda k: common.evaluate_goofspiel(env, rand, None, rand, None, n, k)
+    )(KEY)
+    # the same games, as evaluate_goofspiel plays them
+    rng_seats, rng_play = jax.random.split(KEY)
+    seats = common.rotating_seats(rng_seats, n, 3)
+    record = jax.jit(
+        lambda k: common.play_games(env, rand, None, rand, None, seats, k)
+    )(rng_play)
+    seats = np.asarray(seats)
+    counts = np.sort(np.bincount(seats.argmax(1), minlength=3))
+    np.testing.assert_array_equal(counts, [n // 3, n // 3, n // 3 + 1])
+    points = np.asarray(record.info["points"])
+    mine = (points * seats).sum(1)
+    others = np.where(seats, -np.inf, points).max(1)
+    win, loss, draw = map(np.asarray, (result.win, result.loss, result.draw))
+    np.testing.assert_array_equal(win, mine > others)
+    np.testing.assert_array_equal(loss, mine < others)
+    np.testing.assert_array_equal(draw, mine == others)
+    np.testing.assert_allclose(np.asarray(result.ret), (np.asarray(record.returns) * seats).sum(1))
+    # returns are points minus the opponents' mean points
+    np.testing.assert_allclose(
+        np.asarray(result.ret), mine - (points.sum(1) - mine) / 2, rtol=0, atol=1e-4
+    )
+    tied_above = (mine < others) & ~np.asarray(record.info["game_winner"]).any(1)
+    assert tied_above.sum() > 0 and (loss[tied_above] == 1).all()
+    assert abs(win.mean() - 1 / 3) < 0.05
 
 
 @pytest.mark.parametrize("horizon", [3, 200])

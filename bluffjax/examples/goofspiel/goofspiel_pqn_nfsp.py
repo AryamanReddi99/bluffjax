@@ -32,8 +32,8 @@ game.
 - Evaluation: the average policy (sampled) and the greedy BR each play
   compare_episodes games against a baseline (uniformly random legal bids or
   a checkpoint) in every other seat, the learner's seat rotating over the
-  games; wins (unique top score), losses and draws (tied top score) are
-  reported separately.
+  games; wins (unique top score), losses (another player scored more) and
+  draws (the learner tied for the top score) are reported separately.
 
 Units: the env pays each round's prize value (1-13) to its winner and
 -value / (num_agents - 1) to every other player, so a game's return is the
