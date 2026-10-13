@@ -103,10 +103,10 @@ def rate(numerator: FloatArray, denominator: FloatArray) -> FloatArray:
 
 
 def credit(num_agents: int, player: Array, value: Array = 1.0) -> FloatArray:
-    """(num_agents,) array with `value` at index `player` and 0 elsewhere."""
-    return jnp.zeros(num_agents, jnp.float32).at[player].set(
-        jnp.asarray(value, jnp.float32)
-    )
+    """(num_agents,) array with `value` at index `player` and 0 elsewhere (all
+    zeros if `player` isn't a valid index). A one-hot product rather than a
+    scatter, so that XLA fuses it with the rest of the rollout step."""
+    return (jnp.arange(num_agents) == player) * jnp.asarray(value, jnp.float32)
 
 
 def prefixed(prefix: str, rates: dict[str, FloatArray]) -> dict[str, FloatArray]:

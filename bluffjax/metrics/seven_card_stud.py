@@ -61,14 +61,13 @@ import jax.numpy as jnp
 from bluffjax.environments.seven_card_stud.seven_card_stud import SevenCardStudState
 from bluffjax.metrics._poker_draw_stud import (
     NO_PLAYER,
-    credit,
     five_card_score,
     unanswered_aggressor,
     visible_score,
     won_without_showdown,
     would_lose,
 )
-from bluffjax.metrics.base import Counts, GameMetrics, rate
+from bluffjax.metrics.base import Counts, GameMetrics, credit, rate
 from bluffjax.utils.game_utils.poker_utils import _score_seven_card_hand
 from bluffjax.utils.typing import Any, Array, BoolArray, FloatArray, IntArray
 

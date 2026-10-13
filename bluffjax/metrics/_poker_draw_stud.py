@@ -19,9 +19,9 @@
 These helpers work on one env (no batch axis) and any number of players.
 
 Cost. The metrics run at every env step, vmapped over the envs, where
-jnp.sort and scatters are slow; the scorers below give exactly the values of
-the env's sort-based scorers without sorting (tests compare them on every
-possible input), and credit() is metrics.base.credit without a scatter.
+jnp.sort is slow; the scorers below give exactly the values of the env's
+sort-based scorers without sorting (tests compare them on every possible
+input).
 """
 
 import jax.numpy as jnp
@@ -32,7 +32,7 @@ from bluffjax.utils.game_utils.poker_utils import (
     _score_seven_card_hand,
     _top_ranks,
 )
-from bluffjax.utils.typing import Array, BoolArray, FloatArray, IntArray
+from bluffjax.utils.typing import BoolArray, IntArray
 
 #: no player (e.g. no unanswered bet or raise)
 NO_PLAYER = -1
@@ -42,11 +42,6 @@ NO_PLAYER = -1
 CATEGORY_BASE = 15**5
 HIGH_CARD = 1
 
-
-def credit(num_agents: int, player: IntArray, value: Array = 1.0) -> FloatArray:
-    """(num_agents,) array with `value` at index `player` and 0 elsewhere
-    (metrics.base.credit, as a comparison instead of a scatter)."""
-    return (jnp.arange(num_agents) == player) * jnp.asarray(value, jnp.float32)
 
 
 def five_card_score(cards: IntArray) -> IntArray:

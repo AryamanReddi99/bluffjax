@@ -66,13 +66,12 @@ from bluffjax.metrics._poker_draw_stud import (
     CATEGORY_BASE,
     HIGH_CARD,
     NO_PLAYER,
-    credit,
     five_card_score,
     unanswered_aggressor,
     won_without_showdown,
     would_lose,
 )
-from bluffjax.metrics.base import Counts, GameMetrics, rate
+from bluffjax.metrics.base import Counts, GameMetrics, credit, rate
 from bluffjax.utils.typing import Array, BoolArray, FloatArray, IntArray
 
 DRAW_STAGE = 1

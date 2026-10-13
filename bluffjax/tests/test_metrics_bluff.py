@@ -340,18 +340,20 @@ def test_horizon_cuts(env2):
     )
 
 
-def test_local_credit_matches_base():
-    """The metric modules' one-hot credit equals bluffjax.metrics.base.credit."""
-    from bluffjax.metrics import base, bluff, werewolf
+def test_credit_is_one_hot():
+    """bluffjax.metrics.base.credit, the one-hot credit every metric module
+    uses, puts the value at the player's index as a scatter would."""
+    from bluffjax.metrics import base
 
-    for module in (bluff, werewolf):
-        for n in (2, 3, 6):
-            for player in range(n):
-                for value in (1.0, 0.0, True, False, 3, 2.5):
-                    got = module.credit(n, jnp.int32(player), value)
-                    want = base.credit(n, jnp.int32(player), value)
-                    assert got.dtype == want.dtype == jnp.float32
-                    np.testing.assert_array_equal(got, want)
+    for n in (2, 3, 6):
+        for player in range(n):
+            for value in (1.0, 0.0, True, False, 3, 2.5):
+                got = base.credit(n, jnp.int32(player), value)
+                want = jnp.zeros(n, jnp.float32).at[player].set(
+                    jnp.asarray(value, jnp.float32)
+                )
+                assert got.dtype == jnp.float32
+                np.testing.assert_array_equal(got, want)
 
 
 def test_registered_and_summary_keys(env3):
