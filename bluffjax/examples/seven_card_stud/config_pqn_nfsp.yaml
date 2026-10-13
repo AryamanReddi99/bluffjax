@@ -35,7 +35,7 @@ env_kwargs:
 compare: true
 compare_mode: random # "random" or "checkpoint"
 # compare_with: a network file from save_checkpoints (same env_kwargs), e.g.
-# ${repo_root:}/checkpoints/seven_card_stud/<job_type>_<timestamp>/avg_policy_0.msgpack
+# ${repo_root:}/checkpoints/seven_card_stud/<job_type>_<timestamp>/full/avg_policy_0.msgpack
 compare_with: ""
 compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
 compare_steps: 200  # deals per evaluation, each played with the learner in every seat
@@ -46,8 +46,8 @@ project: bluffjax
 job_type: seven_card_stud_pqn_nfsp
 wandb: false
 
-# optional checkpoint save
-save_final: false
+# half- and full-budget checkpoints in the run directory
+save_checkpoints: true
 save_dir: ${repo_root:}/checkpoints/seven_card_stud
 
 # Hydra configs and logs go to outputs/ at the repo root
