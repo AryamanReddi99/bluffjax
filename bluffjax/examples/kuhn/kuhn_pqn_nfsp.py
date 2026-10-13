@@ -436,7 +436,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         br_lr = linear_decay if config["anneal_lr"] else config["lr"]
         br_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.radam(learning_rate=br_lr),
+            optax.adam(learning_rate=br_lr),
         )
         avg_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),

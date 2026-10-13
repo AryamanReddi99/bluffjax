@@ -14,7 +14,6 @@ exploration_fraction: 0.1  # epsilon decays linearly over this share of the run
 q_lambda: 0.9
 max_grad_norm: 0.5
 gamma: 0.99
-reward_scale: 1.0
 fc_dim_size: 128
 
 # Exact evaluation of the greedy policy, every eval_interval updates and after

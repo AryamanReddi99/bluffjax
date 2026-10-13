@@ -559,7 +559,7 @@ NFSP_KEYS = dict(
         (kuhn_ppo, PPO_KEYS, 1),
         (kuhn_pqn, PQN_KEYS, 1),
         (kuhn_pqn_nfsp, {**PQN_KEYS, **NFSP_KEYS}, 2),
-        (leduc_ppo_nfsp, {**PPO_KEYS, **NFSP_KEYS, "reward_scale": 1.0}, 2),
+        (leduc_ppo_nfsp, {**PPO_KEYS, **NFSP_KEYS}, 2),
     ],
     ids=["kuhn_ppo", "kuhn_pqn", "kuhn_pqn_nfsp", "leduc_ppo_nfsp"],
 )

@@ -33,8 +33,8 @@ acting player's perfect-recall information state).
   (bluffjax.examples.kuhn_leduc_eval). Its own random stream: training doesn't
   depend on it.
 
-Units: the env pays chips per hand. Training uses reward * reward_scale, and
-logged returns and exploitability are in chips.
+Units: the env pays chips per hand; training, the logged returns and the
+exploitability are in chips.
 
 Logged evaluation metrics (returns in chips): every compare_interval updates
 and after the last one, for the average policy (name avg_vs_random) and the BR
@@ -64,8 +64,8 @@ vmapped seed (wandb run "{seed}_{i}"). Each file holds the flax params of one
 ActorCriticDiscreteMLP(action_dim=3, hidden_dim=fc_dim_size), without a seed
 axis; load with run_utils.load_params(path, network.init(rng, obs)). The
 network maps the acting player's observation (env.obs_from_state, 24 floats)
-to (action logits over fold/call/raise, value in units of reward_scale *
-chips); mask illegal actions (env.get_avail_actions) before the softmax. The
+to (action logits over fold/call/raise, value in chips);
+mask illegal actions (env.get_avail_actions) before the softmax. The
 average policy's value head is untrained. policy_array_from_network(
 network.apply, params, _INFOSET_LIST) gives the policy at every infoset.
 """
@@ -548,7 +548,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             # actor and critic train on BR decisions whose outcome is known.
             advantages, targets, valid = per_player_gae(
                 transitions.value,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 transitions.done,
                 transitions.player_idx,
                 last_val,

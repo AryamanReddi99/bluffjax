@@ -38,8 +38,8 @@ num_seeds: 5
 env_kwargs: {}
 
 # wandb
-project: kuhn
-job_type: ppo
+project: bluffjax
+job_type: kuhn_ppo
 wandb: false # True, False
 
 # Hydra configs and logs go to outputs/ at the repo root

@@ -301,7 +301,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         lr = linear_decay if config["anneal_lr"] else config["lr"]
         tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.radam(learning_rate=lr),
+            optax.adam(learning_rate=lr),
         )
         train_state = TrainState.create(
             apply_fn=network.apply, params=network_params, tx=tx

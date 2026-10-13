@@ -28,9 +28,8 @@ state) and learns from Peng's Q(lambda) targets of its own rollouts.
   (bluffjax.examples.kuhn_leduc_eval). Its own random stream: training doesn't
   depend on it.
 
-Units: the env pays chips per hand. Training uses reward * reward_scale (so
-Q-values are in scaled units), and logged returns and exploitability are in
-chips.
+Units: the env pays chips per hand; training (Q-values), the logged returns
+and the exploitability are in chips.
 
 Logged evaluation metrics (returns in chips): every compare_interval updates
 and after the last one win_rate_vs_random, loss_rate_vs_random,
@@ -58,7 +57,7 @@ the flax params of the QNetworkDiscreteMLP(action_dim=3,
 hidden_dim=fc_dim_size), without a seed axis; load with
 run_utils.load_params(path, network.init(rng, obs)). It maps the acting
 player's observation (env.obs_from_state, 24 floats) to Q-values of
-fold/call/raise in units of reward_scale * chips; the evaluated policy is the
+fold/call/raise in chips; the evaluated policy is the
 argmax over the legal actions (env.get_avail_actions), as given at every
 infoset by policy_array_from_qnetwork(network.apply, params, _INFOSET_LIST).
 """
@@ -396,7 +395,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             # decision is epsilon-greedy, so the trace is never cut.
             targets, valid = per_player_q_lambda_targets(
                 transitions.q_max,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 transitions.done,
                 transitions.player_idx,
                 jnp.full(transitions.q_max.shape, config["q_lambda"]),

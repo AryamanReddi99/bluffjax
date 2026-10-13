@@ -37,9 +37,8 @@ the acting player's perfect-recall information state).
   between first and second to act (bluffjax.examples.kuhn_leduc_eval). Its own
   random stream: training doesn't depend on it.
 
-Units: the env pays chips per hand. Training uses reward * reward_scale (so
-Q-values are in scaled units), and logged returns and exploitability are in
-chips.
+Units: the env pays chips per hand; training (Q-values), the logged returns
+and the exploitability are in chips.
 
 Logged evaluation metrics (returns in chips): every compare_interval updates
 and after the last one, for the average policy (name avg_vs_random) and the
@@ -73,7 +72,7 @@ fold/call/raise; mask illegal actions (env.get_avail_actions) first:
     avg_policy: ActorDiscreteMLP(action_dim=3, hidden_dim=fc_dim_size) ->
         action logits (softmax for the policy).
     br: QNetworkDiscreteMLP(action_dim=3, hidden_dim=fc_dim_size) -> Q-values
-        in units of reward_scale * chips (its evaluated policy is the argmax).
+        in chips (its evaluated policy is the argmax).
 policy_array_from_network / policy_array_from_qnetwork give their policies at
 every infoset.
 """
@@ -578,7 +577,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             # trains the Q-network; the trace is cut at average-policy decisions.
             targets, valid = per_player_q_lambda_targets(
                 transitions.q_max,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 transitions.done,
                 transitions.player_idx,
                 config["q_lambda"] * transitions.is_br.astype(jnp.float32),
