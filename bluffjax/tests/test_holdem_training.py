@@ -322,9 +322,12 @@ def test_nfsp_game_metrics_follow_the_policy(name, monkeypatch, tmp_path):
     from bluffjax.examples.run_utils import read_results
 
     mod = _module(name)
+    # PQN: a fixed epsilon, so that an untrained greedy BR still folds in
+    # every update (the configured schedule is greedy after the first)
+    explore = {"start_e": 0.3, "end_e": 0.3} if "pqn" in name else {}
     for eta, empty, full in ((0.0, "game_br", "game"), (1.0, "game", "game_br")):
         config = tiny_config(name, tmp_path / str(eta), anticipatory_eta=eta, compare=False,
-                             num_update_steps=2)
+                             num_update_steps=2, **explore)
         run_dir, _ = run(mod, config, monkeypatch)
         for r in read_results(run_dir):
             ns = [k for k in r if k.startswith(f"{empty}/n_")]
