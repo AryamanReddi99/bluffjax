@@ -1,22 +1,25 @@
-num_timesteps: 1e7 # 1e7
-num_envs: 20 # 10
-num_steps_per_env_per_update: 1000 #1000
+num_timesteps: 1e8  # the half/ checkpoint is taken after half the updates
+num_envs: 1024
+num_steps_per_env_per_update: 64
 num_epochs: 4
 num_minibatches: 4
-lr: 3e-5
-anneal_lr: True  # linear decay to 0 over all gradient steps
-gamma: 1.0
-gae_lambda: 1.0
+lr: 2.5e-4
+anneal_lr: true  # linear decay to 0 over all gradient steps
+gamma: 0.99
+gae_lambda: 0.95
 clip_eps: 0.2
 vf_clip: 0.2
-ent_coef: 0.00 # 0.01
+ent_coef: 0.0  # 0.01
 vf_coef: 1.0
-max_grad_norm: 0.1
-fc_dim_size: 64
+max_grad_norm: 0.5
+fc_dim_size: 128
 
 # exact exploitability and Kuhn policy metrics (game/) every eval_interval
 # updates and after the last one
-eval_interval: 1
+eval_interval: 10  # updates between exact evaluations (and after the last)
+compare: true
+compare_episodes: 10  # complete games against random, for each policy
+compare_interval: 1  # updates between evaluations (and after the last)
 
 # run directory {save_dir}/{job_type}_{timestamp}/ with config.yaml,
 # results.jsonl and the half/ and full/ checkpoints (see the script docstring)
