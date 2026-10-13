@@ -20,18 +20,28 @@ hand, so player indices are only an internal seat order.
   hand goes to showdown right after the draw.
 - Betting actions: check/call, raise half the pot, raise the pot, all-in,
   fold. A raise puts in floor(pot / 2), pot or all remaining chips; the legal
-  ones are exactly those that raise the highest bet. A betting round ends
-  once every player who can still bet has acted since the last raise.
+  ones are exactly those that raise the highest bet. There is no cap on the
+  number of raises. A betting round ends once every player who can still bet
+  has acted since the last raise.
 - Rewards are paid when the hand ends: chips won minus chips put in. Ties
   split the pot.
 
 Observation (for the player to act; seat j is the player j places after it,
-seat 0 is itself), 57 + 6 * num_agents floats:
+seat 0 is itself), 67 + 7 * num_agents floats:
 - [0, 52): own cards (multi-hot).
-- 52: own chips in the pot; 53: the highest chips in the pot of any player.
+- 52: own chips in the pot; 53: the highest chips in the pot of any player
+  (raw chips).
 - [54, 57): stage one-hot (pre-draw betting, draw, post-draw betting).
 - 57 + 6 * j + c: seat j drew c cards (c = 0 to 5). All 0 for a seat that
   hasn't drawn (yet, or because it folded).
+- 57 + 6 * num_agents + 5 * r + k: betting round r (0 pre-draw, 1 post-draw)
+  has had k bets and raises (actions 1-3, any size, all-in included; the
+  blinds don't count), k = 0 to 3, and k = 4 for 4 or more: there is no raise
+  cap (heads-up with the default 100-chip stacks a round can see up to 10
+  raises), so 4 groups the larger counts. A round not reached yet shows 0.
+- 67 + 6 * num_agents + p: the player to act sits p places after the small
+  blind, p = (current - small blind) % num_agents (0 = small blind, 1 = big
+  blind), as in Limit Hold'em.
 """
 
 import jax
@@ -57,6 +67,9 @@ FOLD = 4
 NUM_BETTING_ACTIONS = 5
 NUM_DRAW_ACTIONS = 2**HAND_SIZE
 NUM_STAGES = 3
+NUM_BETTING_ROUNDS = 2  # before and after the draw
+# Raise counts in the observation: 0, 1, 2, 3, and 4 for 4 or more.
+RAISE_COUNT_VALUES = 5
 
 
 @struct.dataclass
@@ -68,6 +81,7 @@ class FiveCardDrawState:
     small_blind_idx: IntArray
     current_player_idx: IntArray
     stage: IntArray  # 0=pre-draw betting, 1=draw, 2=post-draw betting
+    raise_nums: IntArray  # (2,) bets and raises (actions 1-3) before and after the draw
     folded: BoolArray
     all_in: BoolArray
     not_raise_num: IntArray  # players able to bet who acted since the last raise
@@ -99,8 +113,17 @@ class FiveCardDraw(AECEnv):
                 f"got {init_chips}"
             )
         self.init_chips = init_chips
-        # own cards, own and highest chips in, stage, cards drawn by every seat
-        self.obs_dim = self.deck_size + 2 + NUM_STAGES + num_agents * (HAND_SIZE + 1)
+        self.num_betting_rounds = NUM_BETTING_ROUNDS
+        # own cards, own and highest chips in, stage, cards drawn by every
+        # seat, raise counts of both betting rounds, position relative to the
+        # small blind
+        self.raise_obs_start = (
+            self.deck_size + 2 + NUM_STAGES + num_agents * (HAND_SIZE + 1)
+        )  # 57 + 6 * num_agents
+        self.position_obs_start = (
+            self.raise_obs_start + NUM_BETTING_ROUNDS * RAISE_COUNT_VALUES
+        )  # 67 + 6 * num_agents
+        self.obs_dim = self.position_obs_start + num_agents
         # 0-4 betting, 5-36 draw (2^5 keep/discard patterns)
         self.num_actions = NUM_BETTING_ACTIONS + NUM_DRAW_ACTIONS
 
@@ -120,12 +143,18 @@ class FiveCardDraw(AECEnv):
         chips = jnp.stack([state.chips_in[current], jnp.max(state.chips_in)])
         # one_hot of -1 (not drawn) is all zeros
         drawn = jax.nn.one_hot(jnp.roll(state.num_drawn, -current), HAND_SIZE + 1)
+        raises = jax.nn.one_hot(
+            jnp.minimum(state.raise_nums, RAISE_COUNT_VALUES - 1), RAISE_COUNT_VALUES
+        )
+        position = (current - state.small_blind_idx) % self.num_agents
         return jnp.concatenate(
             [
                 hand,
                 chips.astype(jnp.float32),
                 jax.nn.one_hot(state.stage, NUM_STAGES),
                 drawn.reshape(-1),
+                raises.reshape(-1),
+                jax.nn.one_hot(position, self.num_agents),
             ]
         ).astype(jnp.float32)
 
@@ -201,6 +230,7 @@ class FiveCardDraw(AECEnv):
             small_blind_idx=small_blind_agent,
             current_player_idx=current_player_idx,
             stage=jnp.int32(0),
+            raise_nums=jnp.zeros(NUM_BETTING_ROUNDS, dtype=jnp.int32),
             folded=jnp.zeros(self.num_agents, dtype=bool),
             all_in=jnp.zeros(self.num_agents, dtype=bool),
             not_raise_num=jnp.int32(0),
@@ -320,6 +350,10 @@ class FiveCardDraw(AECEnv):
         # the caller all-in; a fold leaves the count unchanged.
         is_raise = is_betting & (bet_action >= 1) & (bet_action <= 3)
         is_call = is_betting & (bet_action == 0)
+        # Raises of this betting round (stage 0: round 0, stage 2: round 1).
+        new_raise_nums = state.raise_nums.at[stage // 2].add(
+            is_raise.astype(jnp.int32)
+        )
         new_not_raise_num = jnp.where(
             is_raise,
             jnp.where(went_all_in, 0, 1),
@@ -419,6 +453,7 @@ class FiveCardDraw(AECEnv):
             small_blind_idx=state.small_blind_idx,
             current_player_idx=new_current_player_idx,
             stage=new_stage,
+            raise_nums=new_raise_nums,
             folded=new_folded,
             all_in=new_all_in,
             not_raise_num=new_not_raise_num,

@@ -71,8 +71,8 @@ Click a game to play it.
 | Kuhn Poker | `kuhn_poker` | 2 | 9 | 2 | AEC | exploitability |
 | Leduc Hold'em | `leduc_holdem` | 2 | 24 | 3 | AEC | exploitability |
 | Texas Limit Hold'em | `texas_limit_holdem` | 2–10 | 72+n | 4 | AEC | chips/hand |
-| Texas No-Limit Hold'em | `texas_nolimit_holdem` | 2–10 | 54 | 5 | AEC | chips/hand |
-| 5-Card Draw 🆕 | `five_card_draw` | 2–10 | 57+6n | 37 | AEC | chips/hand |
+| Texas No-Limit Hold'em | `texas_nolimit_holdem` | 2–10 | 74+n | 5 | AEC | chips/hand |
+| 5-Card Draw 🆕 | `five_card_draw` | 2–10 | 67+7n | 37 | AEC | chips/hand |
 | 7-Card Stud 🆕 | `seven_card_stud` | 2–10 | 76+262n | 4 | AEC | chips/hand |
 | Goofspiel | `goofspiel` | ≥2 | 13(n+2)+n | 13 | Parallel | win rate |
 | Bluff 🆕 | `bluff` | ≥2 | 270+54n | 13 | AEC | win rate |

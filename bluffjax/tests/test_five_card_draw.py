@@ -1,5 +1,6 @@
 """5-Card Draw: all-in betting, the draw (no duplicate cards with 2-10 players),
-seat order, payoffs, legal actions, the observation and seat-rotation
+seat order, payoffs, legal actions, the observation (with the raise counts of
+both betting rounds and the position, and no hidden cards) and seat-rotation
 equivariance."""
 
 import functools
@@ -250,7 +251,7 @@ def _keep(cards: int) -> int:
 def _expected_obs(env, state) -> np.ndarray:
     """The observation built by hand from the layout in the env docstring."""
     n, p = env.num_agents, int(state.current_player_idx)
-    obs = np.zeros(57 + 6 * n, dtype=np.float32)
+    obs = np.zeros(67 + 7 * n, dtype=np.float32)
     obs[np.asarray(state.agent_cards[p])] = 1.0
     obs[52] = float(state.chips_in[p])
     obs[53] = float(np.max(np.asarray(state.chips_in)))
@@ -259,19 +260,33 @@ def _expected_obs(env, state) -> np.ndarray:
         drawn = int(state.num_drawn[(p + j) % n])
         if drawn >= 0:
             obs[57 + 6 * j + drawn] = 1.0
+    for r in range(2):
+        obs[57 + 6 * n + 5 * r + min(int(state.raise_nums[r]), 4)] = 1.0
+    obs[67 + 6 * n + (p - int(state.small_blind_idx)) % n] = 1.0
     return obs
+
+
+def _raise_block(env, obs) -> np.ndarray:
+    """(2, 5) raise-count one-hots of the observation (pre-draw, post-draw)."""
+    start = 57 + 6 * env.num_agents
+    return np.asarray(obs)[start : start + 10].reshape(2, 5)
+
+
+def _position_block(env, obs) -> np.ndarray:
+    start = 67 + 6 * env.num_agents
+    return np.asarray(obs)[start : start + env.num_agents]
 
 
 def test_observation_shows_stage_and_cards_drawn_by_seat():
     hand = Hand(4, seed=6)
     sb, bb, utg, co = (hand.seat(i) for i in range(4))
-    assert hand.env.obs_dim == 57 + 6 * 4
+    assert hand.env.obs_dim == 67 + 7 * 4
     hand.act(FOLD, by=utg)
     hand.act(CALL, by=co)
     hand.act(CALL, by=sb)
     obs = np.asarray(hand.env.obs_from_state(hand.state))
     np.testing.assert_array_equal(obs[54:57], [1, 0, 0])
-    assert not obs[57:].any()  # nobody has drawn
+    assert not obs[57 : 57 + 6 * 4].any()  # nobody has drawn
     hand.act(CALL, by=bb)
     # Draw from the small blind (the cut-off is the dealer); the UTG folded.
     drawn = {sb: 5, bb: 0, co: 3}
@@ -290,9 +305,132 @@ def test_observation_shows_stage_and_cards_drawn_by_seat():
     # Seen from the small blind: itself drew 5, then the BB 0, the UTG (folded)
     # nothing, the CO 3.
     assert hand.player == sb
-    blocks = obs[57:].reshape(4, 6)
+    blocks = obs[57 : 57 + 6 * 4].reshape(4, 6)
     np.testing.assert_array_equal(blocks.argmax(1)[[0, 1, 3]], [5, 0, 3])
     assert blocks.sum(1).tolist() == [1, 1, 0, 1]
+
+
+def _one_hot(k: int, size: int) -> np.ndarray:
+    return np.eye(size, dtype=np.float32)[k]
+
+
+def test_raise_counts_of_both_betting_rounds():
+    """Bets and raises of any size, all-in included, are counted in their
+    betting round (calls, checks, folds and the draw don't count), and every
+    observation shows the counts of both rounds."""
+    hand = Hand(3, seed=2)
+    sb, bb, utg = hand.seat(0), hand.seat(1), hand.seat(2)
+    keep_all = [(p, KEEP_ALL, (2, 0)) for p in (sb, bb, utg)]
+    script = (
+        [
+            (utg, POT, (1, 0)),  # puts the pot (3) in
+            (sb, HALF_POT, (2, 0)),  # floor(6 / 2) = 3, to 4
+            (bb, CALL, (2, 0)),
+            (utg, CALL, (2, 0)),  # the draw
+        ]
+        + keep_all
+        + [
+            (sb, CALL, (2, 0)),  # checks
+            (bb, HALF_POT, (2, 1)),  # bets floor(12 / 2) = 6
+            (utg, POT, (2, 2)),
+            (sb, FOLD, (2, 2)),
+            (bb, ALL_IN, (2, 3)),
+            (utg, CALL, (2, 3)),  # calls all in: showdown
+        ]
+    )
+    obs = hand.env.obs_from_state(hand.state)
+    np.testing.assert_array_equal(_raise_block(hand.env, obs), [_one_hot(0, 5)] * 2)
+    for t, (who, action, counts) in enumerate(script):
+        _, done = hand.act(action, by=who)
+        np.testing.assert_array_equal(np.asarray(hand.state.raise_nums), counts, str(t))
+        obs = hand.env.obs_from_state(hand.state)
+        np.testing.assert_array_equal(
+            _raise_block(hand.env, obs), [_one_hot(c, 5) for c in counts], str(t)
+        )
+        np.testing.assert_array_equal(obs, _expected_obs(hand.env, hand.state))
+        assert done == (t == len(script) - 1), t
+    assert hand.stage == 2
+
+
+def test_raise_counts_of_four_or_more_share_the_last_value():
+    """There is no raise cap: heads-up with 100-chip stacks ten raises fit in
+    the pre-draw round (the pot, eight half-pot raises and an all-in). The
+    observation shows 4 for 4 raises or more; the state keeps the count."""
+    hand = Hand(2, seed=0)
+    sb, bb = hand.seat(0), hand.seat(1)
+    raises = [(sb, POT)] + [(bb, HALF_POT), (sb, HALF_POT)] * 4 + [(bb, ALL_IN)]
+    for k, (who, action) in enumerate(raises, start=1):
+        hand.act(action, by=who)
+        assert hand.stage == 0
+        np.testing.assert_array_equal(np.asarray(hand.state.raise_nums), [k, 0])
+        obs = hand.env.obs_from_state(hand.state)
+        np.testing.assert_array_equal(
+            _raise_block(hand.env, obs), [_one_hot(min(k, 4), 5), _one_hot(0, 5)]
+        )
+    # The small blind can't raise any more (the big blind is all in); it calls
+    # all in, both draw and show down.
+    assert not hand.mask()[[HALF_POT, POT, ALL_IN]].any()
+    hand.act(CALL, by=sb)
+    hand.act(KEEP_ALL, by=bb)
+    _, done = hand.act(KEEP_ALL, by=sb)
+    assert done
+    np.testing.assert_array_equal(np.asarray(hand.state.raise_nums), [10, 0])
+
+
+@pytest.mark.parametrize("num_agents", [2, 3, 6])
+def test_observation_shows_position_from_the_small_blind(num_agents):
+    """Every decision (betting and drawing) shows the acting player's seat
+    counted from the small blind: 0 the small blind, 1 the big blind, ..."""
+    n = num_agents
+    small_blinds = set()
+    for seed in range(3 * n):
+        hand = Hand(n, seed=seed)
+        small_blinds.add(hand.sb)
+        seen = set()
+        done = False
+        while not done:
+            p, obs = hand.player, hand.env.obs_from_state(hand.state)
+            position = (p - hand.sb) % n
+            np.testing.assert_array_equal(
+                _position_block(hand.env, obs), _one_hot(position, n)
+            )
+            seen.add(position)
+            _, done = hand.act(KEEP_ALL if hand.stage == 1 else CALL)
+        assert seen == set(range(n))
+    assert len(small_blinds) > 1
+
+
+def _check_through_post_draw(hand: Hand) -> None:
+    """Both limp and stand pat; the post-draw betting is next."""
+    sb, bb = hand.seat(0), hand.seat(1)
+    for who, action in ((sb, CALL), (bb, CALL), (bb, KEEP_ALL), (sb, KEEP_ALL)):
+        hand.act(action, by=who)
+    assert hand.stage == 2 and hand.player == bb
+
+
+def test_first_to_act_and_facing_a_check_differ():
+    """Heads-up after the draw the big blind acts first. With the same cards
+    and chips, the big blind first to act and the small blind facing its
+    check used to see the same observation; the position tells them apart."""
+    first = Hand(2, seed=0)
+    sb, bb = first.seat(0), first.seat(1)
+    # The same deal with the hands swapped: the small blind holds the cards
+    # the big blind holds in `first`.
+    facing = Hand(2, seed=0)
+    facing.state = facing.state.replace(agent_cards=first.state.agent_cards[::-1])
+    _check_through_post_draw(first)
+    _check_through_post_draw(facing)
+    facing.act(CALL, by=bb)  # checks
+    assert facing.player == sb
+    a = np.asarray(first.env.obs_from_state(first.state))
+    b = np.asarray(facing.env.obs_from_state(facing.state))
+    np.testing.assert_array_equal(
+        np.asarray(first.state.agent_cards[bb]), np.asarray(facing.state.agent_cards[sb])
+    )
+    # cards, chips, stage, cards drawn and raise counts all agree
+    np.testing.assert_array_equal(a[: 67 + 6 * 2], b[: 67 + 6 * 2])
+    np.testing.assert_array_equal(_position_block(first.env, a), [0, 1])
+    np.testing.assert_array_equal(_position_block(facing.env, b), [1, 0])
 
 
 @functools.lru_cache(maxsize=None)
@@ -324,6 +462,7 @@ def _rollout(num_agents: int, num_envs: int = 128, num_steps: int = 160):
                 state=state,
                 obs=jax.vmap(env.obs_from_state)(state),
                 mask=mask,
+                action=action,
                 next=nxt,
                 next_mask=jax.vmap(env.get_avail_actions)(nxt),
                 reward=reward,
@@ -379,6 +518,13 @@ def test_random_hands(num_agents):
     assert ((drawn >= -1) & (drawn <= 5)).all()
     assert (drawn[s.stage == 0] == -1).all()
     assert (drawn[s.stage == 2] >= 0)[~s.folded[s.stage == 2]].all()
+    # Raise counts: a bet or raise adds one to its betting round's count
+    # (stage 0: round 0, stage 2: round 1), anything else leaves them.
+    action = rec["action"]
+    raised = betting & (action >= HALF_POT) & (action <= ALL_IN)
+    want = s.raise_nums + raised[..., None] * np.eye(2, dtype=int)[s.stage // 2]
+    np.testing.assert_array_equal(rec["next"].raise_nums, want)
+    assert (s.raise_nums[s.stage == 0][:, 1] == 0).all()
     # The observation matches the documented layout.
     flat = jax.tree_util.tree_map(lambda x: x.reshape((T * B,) + x.shape[2:]), s)
     obs = rec["obs"].reshape(T * B, -1)
@@ -407,6 +553,38 @@ def test_random_hands(num_agents):
     assert (last.stage[showdown] != 0).all()
     all_in_showdown = showdown & (last.all_in | ~live).all(-1)
     assert (last.stage[all_in_showdown] == 1).any()
+
+
+@pytest.mark.parametrize("num_agents", [2, 3, 6])
+def test_observation_hides_other_hands_and_the_stock(num_agents):
+    """Changing the other players' cards, the stock and the discard pile
+    doesn't change the observation."""
+    n = num_agents
+    env, _, _ = _env(n)
+    rec = _rollout(n)
+    flat = jax.tree_util.tree_map(
+        lambda x: x.reshape((-1,) + x.shape[2:]), rec["state"]
+    )
+    idx = np.random.default_rng(1).choice(len(flat.stage), 2000, replace=False)
+    states = jax.tree_util.tree_map(lambda x: jnp.asarray(x[idx]), flat)
+
+    def hide(s, key):
+        k_cards, k_deck, k_pile = jax.random.split(key, 3)
+        p = s.current_player_idx
+        own = jnp.zeros(52, bool).at[s.agent_cards[p]].set(True)
+        # the cards not in the player's hand, in random order
+        others = jax.random.permutation(k_cards, jnp.argsort(own)[: 52 - 5])
+        fake = jnp.sort(others[: 5 * n].reshape(n, 5), axis=1)
+        fake = jnp.where((jnp.arange(n) == p)[:, None], s.agent_cards, fake)
+        changed = s.replace(
+            agent_cards=fake,
+            shuffled_deck=jax.random.permutation(k_deck, 52),
+            discards=jax.random.bernoulli(k_pile, 0.3, (52,)),
+        )
+        return (env.obs_from_state(changed) == env.obs_from_state(s)).all()
+
+    keys = jax.random.split(jax.random.PRNGKey(5), len(idx))
+    assert np.asarray(jax.jit(jax.vmap(hide))(states, keys)).all()
 
 
 def test_random_start_player():

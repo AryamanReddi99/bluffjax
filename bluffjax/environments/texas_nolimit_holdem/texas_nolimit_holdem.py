@@ -17,8 +17,14 @@ Players then act in seat order, skipping those who folded or are all-in.
 Betting: actions are check/call, raise half the pot, raise the pot, all-in
 and fold; a half-pot or pot raise puts floor(pot / 2) or pot chips in. A round
 ends once every player who can still bet has checked or called since the last
-raise. The hand ends when one player is left, when nobody can bet any more, or
-after the river; rewards are chips won minus chips put in, ties split the pot.
+raise. There is no cap on the number of raises. The hand ends when one player
+is left, when nobody can bet any more, or after the river; rewards are chips
+won minus chips put in, ties split the pot.
+
+Observation (of the player to act, 74 + num_agents floats, layout in
+obs_from_state): its cards and the board dealt so far, its own and the
+largest chips in the pot, the number of raises in every betting round and its
+position relative to the small blind.
 """
 
 import jax
@@ -37,6 +43,10 @@ from bluffjax.environments.env import AECEnv
 from bluffjax.environments.spaces import Discrete
 from bluffjax.utils.game_utils.poker_utils import _compare_hands
 
+NUM_BETTING_ROUNDS = 4  # preflop, flop, turn, river
+# Raise counts in the observation: 0, 1, 2, 3, and 4 for 4 or more.
+RAISE_COUNT_VALUES = 5
+
 
 @struct.dataclass
 class TexasNoLimitHoldEmState:
@@ -50,6 +60,7 @@ class TexasNoLimitHoldEmState:
     small_blind_idx: IntArray
     current_player_idx: IntArray
     stage: IntArray  # 0=preflop, 1=flop, 2=turn, 3=river
+    raise_nums: IntArray  # (4,) bets and raises (actions 1-3) in each betting round
     folded: BoolArray  # Whether each player has folded
     all_in: BoolArray  # Whether each player is all-in
     not_raise_num: IntArray  # Number of players who have checked/called without raising
@@ -67,7 +78,14 @@ class TexasNoLimitHoldem(AECEnv):
         self.small_blind = 1
         self.big_blind = 2 * self.small_blind
         self.init_chips = init_chips
-        self.obs_dim = self.deck_size + 2
+        self.num_betting_rounds = NUM_BETTING_ROUNDS
+        # cards, own and largest chips in, raise counts of every betting
+        # round, position relative to the small blind
+        self.raise_obs_start = self.deck_size + 2  # 54
+        self.position_obs_start = (
+            self.raise_obs_start + NUM_BETTING_ROUNDS * RAISE_COUNT_VALUES
+        )  # 74
+        self.obs_dim = self.position_obs_start + num_agents
         self.num_actions = 5  # check/call, raise half, raise pot, all in, fold
 
     def observation_space(self) -> Discrete:
@@ -85,33 +103,44 @@ class TexasNoLimitHoldem(AECEnv):
     @partial(jax.jit, static_argnums=(0,))
     def obs_from_state(self, state: TexasNoLimitHoldEmState) -> FloatArray:
         """
-        Extract observation for a specific agent in rlcard no-limit holdem style.
+        Observation of the player to act, in rlcard no-limit holdem style plus
+        Limit Hold'em's betting history and position.
 
-        Observation format (54 dimensions):
-        - Dimensions 0-51: One-hot encoding of cards (hand cards + public cards)
-        - Dimension 52: Current player's chips in the pot
-        - Dimension 53: Max chips in the pot among all players
+        Observation format (74 + num_agents dimensions):
+        - Dimensions 0-51: One-hot encoding of cards (hand cards + public
+          cards dealt so far)
+        - Dimension 52: Current player's chips in the pot (raw chips)
+        - Dimension 53: Max chips in the pot among all players (raw chips)
+        - Dimensions 54-73: One-hot encoding of the number of bets and raises
+          (actions 1-3, any size, all-in included; the blinds don't count) in
+          each betting round: 54 + 5 * r + k for round r (0 preflop, 1 flop,
+          2 turn, 3 river) with k raises, k = 0-3, and k = 4 for 4 or more.
+          No-Limit has no raise cap (heads-up with the default 100-chip
+          stacks a round can see up to 10 raises), so 4 groups the larger
+          counts. Rounds not reached yet show 0 raises.
+        - Dimensions 74-(74+num_agents-1): One-hot encoding of the current
+          player's position relative to the small blind,
+          (current - small blind) % num_agents (small blind = 0, big blind
+          = 1), as in Limit Hold'em
 
         Args:
             state: Current game state
 
         Returns:
-            observation: 54-dimensional observation vector
+            observation: (74 + num_agents)-dimensional observation vector
         """
-        # Get public cards based on current stage using lax.switch
         # Pre-flop (stage 0): no public cards
         # Flop (stage 1): 3 cards
         # Turn (stage 2): 4 cards
         # River (stage 3): 5 cards
         stage = state.stage
 
-        # Extract cards from state for use in switch branches
         hand_cards = state.agent_cards[state.current_player_idx]
         flop = state.flop_cards
         turn = state.turn_card
         river = state.river_card
 
-        # Initialize observation vector (54 dimensions)
+        # Initialize observation vector (74 + num_agents dimensions)
         obs = jnp.zeros(self.obs_dim, dtype=jnp.float32)
         obs = obs.at[hand_cards].set(1.0)
 
@@ -122,6 +151,19 @@ class TexasNoLimitHoldem(AECEnv):
         current_player = state.current_player_idx
         obs = obs.at[52].set(state.chips_in[current_player].astype(jnp.float32))
         obs = obs.at[53].set(jnp.max(state.chips_in).astype(jnp.float32))
+
+        raise_counts = jnp.minimum(state.raise_nums, RAISE_COUNT_VALUES - 1)
+        raise_idx = (
+            self.raise_obs_start
+            + jnp.arange(NUM_BETTING_ROUNDS) * RAISE_COUNT_VALUES
+            + raise_counts
+        )
+        obs = obs.at[raise_idx].set(1.0)
+
+        relative_position = (
+            state.current_player_idx - state.small_blind_idx
+        ) % self.num_agents
+        obs = obs.at[self.position_obs_start + relative_position].set(1.0)
 
         return obs
 
@@ -213,6 +255,7 @@ class TexasNoLimitHoldem(AECEnv):
             small_blind_idx=small_blind_agent,
             current_player_idx=current_player_idx,
             stage=jnp.int32(0),
+            raise_nums=jnp.zeros(NUM_BETTING_ROUNDS, dtype=jnp.int32),
             folded=jnp.zeros(self.num_agents, dtype=bool),
             all_in=jnp.zeros(self.num_agents, dtype=bool),
             not_raise_num=jnp.int32(0),
@@ -428,6 +471,13 @@ class TexasNoLimitHoldem(AECEnv):
             ],
         )
 
+        # Every legal half-pot, pot or all-in raise raises the highest bet:
+        # count it in this betting round.
+        is_raise = (action >= 1) & (action <= 3)
+        new_raise_nums = state.raise_nums.at[state.stage].add(
+            is_raise.astype(jnp.int32)
+        )
+
         # Count active (non-folded) players
         num_active_players = jnp.sum(~new_folded)
         num_playable_players = jnp.sum(~new_folded & ~new_all_in)
@@ -502,6 +552,7 @@ class TexasNoLimitHoldem(AECEnv):
             small_blind_idx=state.small_blind_idx,
             current_player_idx=new_current_player_idx,
             stage=new_stage,
+            raise_nums=new_raise_nums,
             folded=new_folded,
             all_in=new_all_in,
             not_raise_num=new_not_raise_num,

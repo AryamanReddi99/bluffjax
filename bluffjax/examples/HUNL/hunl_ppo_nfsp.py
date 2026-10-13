@@ -172,9 +172,10 @@ def chip_scaled(net: nn.Module, env: Any) -> nn.Module:
     """`net` applied to the HUNL observation with its two chip counts (the
     acting player's chips in the pot and the largest chips in the pot,
     features 52 and 53, raw chips up to init_chips) divided by init_chips;
-    the 52 card indicators pass through unchanged. Every use of the networks,
-    training, evaluation and checkpoints alike, goes through this, so they
-    all see the same inputs. The parameters of `net` sit under "net"."""
+    the other features (the card, raise-count and position indicators) pass
+    through unchanged. Every use of the networks, training, evaluation and
+    checkpoints alike, goes through this, so they all see the same inputs.
+    The parameters of `net` sit under "net"."""
     return ScaledInput(
         net=net, start=env.deck_size, stop=env.deck_size + 2, factor=1.0 / env.init_chips
     )

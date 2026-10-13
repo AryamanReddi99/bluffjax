@@ -259,8 +259,7 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
     carry = full.metric_carry
     state = full.state
     aggressive = np.asarray(carry.bluff.aggressive).sum(-2)  # (seeds, envs, streets)
-    if name.startswith("hul"):
-        np.testing.assert_array_equal(aggressive, np.asarray(state.raise_nums))
+    np.testing.assert_array_equal(aggressive, np.asarray(state.raise_nums))
     raised = np.asarray(state.chips_in).max(-1) > 2  # a bet or raise this hand
     np.testing.assert_array_equal(aggressive.sum(-1) > 0, raised)
     assert raised.any() and (np.asarray(state.stage) > 0).any()
@@ -329,8 +328,8 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
 @pytest.mark.parametrize("name", ["hunl_ppo_nfsp", "hunl_pqn_nfsp"])
 def test_hunl_networks_see_chips_divided_by_the_stack(name):
     """chip_scaled divides exactly the two chip counts of the observation
-    (features 52 and 53) by the env's starting stack; the card indicators
-    pass through."""
+    (features 52 and 53) by the env's starting stack; the card, raise-count
+    and position indicators pass through."""
     import flax.linen as nn
 
     class Identity(nn.Module):
@@ -343,9 +342,11 @@ def test_hunl_networks_see_chips_divided_by_the_stack(name):
     obs = obs.at[52:54].set(jnp.array([7.0, 30.0]))
     net = _module(name).chip_scaled(Identity(), env)
     out = np.asarray(net.apply(net.init(KEY, obs), obs))
-    assert out.shape == (env.obs_dim,) == (54,)
+    assert out.shape == (env.obs_dim,) == (76,)
     np.testing.assert_allclose(out[52:54], [7.0 / 80, 30.0 / 80])
     np.testing.assert_array_equal(out[:52], np.asarray(obs[:52]))
+    np.testing.assert_array_equal(out[54:], np.asarray(obs[54:]))
+    assert out[54:].sum() == 4 + 1  # a raise count per round and the position
 
 
 @pytest.mark.parametrize("name", ["hul_ppo_nfsp", "hunl_pqn_nfsp"])

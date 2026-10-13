@@ -407,6 +407,7 @@ def test_five_card_draw_networks_see_chips_divided_by_the_stack(name):
     other = (current + 1) % 3
     state = state.replace(chips_in=state.chips_in.at[current].set(7).at[other].set(30))
     obs = env.obs_from_state(state)
+    assert obs.shape == (env.obs_dim,) == (67 + 7 * 3,)
     net = mod.chip_scaled(Identity(), env)
     out = net.apply(net.init(KEY, obs), obs)
     np.testing.assert_allclose(np.asarray(obs[52:54]), [7.0, 30.0])
