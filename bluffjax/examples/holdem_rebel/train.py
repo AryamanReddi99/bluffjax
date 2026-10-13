@@ -23,10 +23,32 @@ Self-play (ReBeL Algorithm 2, with the sampling of the released code):
 The value network is trained on a FIFO replay buffer with the Huber loss,
 `train_ratio` trained examples per generated example (the released code's
 train_gen_ratio).
+
+Evaluation (every `eval_every` samples and at the end): mirrored matches
+against simple opponents (and a checkpoint), and the game metrics
+(bluffjax.metrics.texas_limit_holdem / texas_nolimit_holdem) of ReBeL
+playing itself in the env with test-time search, over `metric_deals` deals
+played from both seats, logged as game/<name>. ReBeL's training data comes
+from its own PBS game with exploration, which isn't play in the env, so
+the metrics are measured on these games instead.
+
+Run directory (bluffjax.examples.run_utils): {save_dir}/{job_type}_{timestamp}/
+holds config.yaml, results.jsonl (everything logged to wandb, with the
+sample count `samples` in every record) and, with save_checkpoints, the
+value network after half and after all of the samples:
+    half/value_net.msgpack  when the sample count first reaches num_samples // 2
+    half/value_net.json     its metadata (game, network size, cfr_iters, samples)
+    full/value_net.msgpack  after num_samples samples
+    full/value_net.json
+Each .msgpack holds the flax params of ValueNetwork(value_hidden_dim,
+value_num_layers), mapping (public features (PUBLIC_DIM,), beliefs (2, 1326))
+to both players' per-hand values (2, 1326); load_rebel(path) restores the
+test-time agent (RebelPlayer) from the pair, and run_utils.load_params(path,
+template) the params alone. The learning-rate schedule spans the whole run,
+so the half checkpoint is the state of the full run at that point.
 """
 
 import datetime
-import os
 import time
 from functools import partial
 from typing import NamedTuple
@@ -38,6 +60,7 @@ import wandb
 from jax import lax
 
 from bluffjax import make
+from bluffjax.examples.run_utils import ResultsLog, checkpoint_path, make_run_dir
 from bluffjax.examples.holdem_rebel.agent import (
     RebelPlayer,
     heuristic_switch,
@@ -74,6 +97,7 @@ from bluffjax.examples.holdem_rebel.solver import (
     masked_map,
     solve,
 )
+from bluffjax.metrics import make_metrics, prefixed
 from bluffjax.utils.paths import REPO_ROOT
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 
@@ -420,7 +444,10 @@ def checkpoint_meta(game: HoldemGame, cfg: dict, samples: int) -> dict:
 
 
 def run_training(game: HoldemGame, cfg: dict) -> str:
-    """Train ReBeL for cfg['num_samples'] samples; returns the checkpoint path."""
+    """Train ReBeL (one seed) for cfg['num_samples'] samples; returns the run
+    directory."""
+    run_dir = make_run_dir(cfg)
+    print(f"Run directory: {run_dir}")
     run = wandb.init(
         project=cfg["project"],
         group=f"{cfg['env_name']}_rebel"
@@ -432,12 +459,13 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
         dir=str(REPO_ROOT),
     )
     try:
-        return _train(game, cfg, run)
+        _train(game, cfg, run_dir, ResultsLog(run_dir, [run]))
+        return run_dir
     finally:
         run.finish()
 
 
-def _train(game: HoldemGame, cfg: dict, run: wandb.Run) -> str:
+def _train(game: HoldemGame, cfg: dict, run_dir: str, log: ResultsLog) -> None:
     rng = jax.random.PRNGKey(cfg["seed"])
     tpl_player = RebelPlayer(
         game,
@@ -490,10 +518,17 @@ def _train(game: HoldemGame, cfg: dict, run: wandb.Run) -> str:
             lambda p, k: play_match(env, game, tpl_player, p, ref_player, ref_params, eval_batch, k)
         )
 
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    save_path = os.path.join(
-        cfg["save_dir"], f"{game.name}_rebel_seed{cfg['seed']}_{timestamp}.msgpack"
+    # ReBeL against itself in the env, for the game metrics
+    game_metrics = make_metrics(game.env_id, env)
+    play_self = jax.jit(
+        lambda p, k: play_match(
+            env, game, tpl_player, p, tpl_player, p, eval_batch, k, metrics=game_metrics
+        )
     )
+
+    def save(stage: str, params, samples: int) -> str:
+        path = checkpoint_path(run_dir, stage, "value_net")
+        return save_checkpoint(path, params, checkpoint_meta(game, cfg, samples))
 
     def evaluate(params, rng, num_deals):
         """Mirrored hands vs each opponent, in batches of eval_batch_deals deals."""
@@ -518,9 +553,29 @@ def _train(game: HoldemGame, cfg: dict, run: wandb.Run) -> str:
             )
         return out
 
+    def self_play_metrics(params, rng, num_deals):
+        """Game metrics of ReBeL against itself over num_deals mirrored deals
+        (in batches of eval_batch_deals), both seats' decisions together."""
+        t0 = time.time()
+        totals, unfinished = None, 0
+        for _ in range(max(1, num_deals // eval_batch)):
+            rng, k = jax.random.split(rng)
+            res = jax.device_get(play_self(params, k))
+            unfinished += int(res.unfinished)
+            both = jax.tree.map(jnp.add, res.counts_a, res.counts_b)
+            totals = both if totals is None else jax.tree.map(jnp.add, totals, both)
+        out = prefixed("game", jax.device_get(game_metrics.summarize(totals)))
+        out["game_eval_seconds"] = time.time() - t0
+        out["game_eval_unfinished"] = unfinished
+        shown = ", ".join(f"{k[5:]} {float(out[k]):.3f}" for k in sorted(out)
+                          if k.startswith("game/") and not k.startswith("game/n_"))
+        print(f"  self-play metrics ({out['game_eval_seconds']:.0f} s): {shown}")
+        return out
+
     games = new_games(cfg["num_games"])
     buf = new_replay(cfg["replay_capacity"])
     samples, trained, chunk_i = 0, 0, 0
+    half_saved = False
     next_eval = float(cfg["eval_every"])
     t_start = time.time()
     gen_time = 0.0
@@ -558,24 +613,27 @@ def _train(game: HoldemGame, cfg: dict, run: wandb.Run) -> str:
                 f"all-in {metrics['allin_chains'] / per_step:.2f} "
                 f"hands done {metrics['hands_finished'] / per_step:.2f}"
             )
+        if cfg["save_checkpoints"] and not half_saved and samples >= num_samples // 2:
+            path = save("half", params, samples)
+            half_saved = True
+            print(f"Saved the value network at {samples} samples to {path}")
         if samples >= next_eval or samples >= num_samples:
             print(f"evaluation at {samples} samples ({elapsed / 60:.1f} min):")
-            rng, k_eval = jax.random.split(rng)
+            rng, k_eval, k_metrics = jax.random.split(rng, 3)
             metrics.update(evaluate(params, k_eval, cfg["eval_deals"]))
+            if cfg["metric_deals"]:
+                metrics.update(self_play_metrics(params, k_metrics, cfg["metric_deals"]))
             next_eval += float(cfg["eval_every"])
-            if cfg["save_final"]:
-                save_checkpoint(save_path, params, checkpoint_meta(game, cfg, samples))
-        run.log(metrics)
-    if cfg["save_final"]:
-        save_checkpoint(save_path, params, checkpoint_meta(game, cfg, samples))
-        print(f"Saved model to {save_path}")
+        log.log(metrics)
+    if cfg["save_checkpoints"]:
+        path = save("full", params, samples)
+        print(f"Saved the value network at {samples} samples to {path}")
     if cfg["final_eval_deals"]:
         print(f"final evaluation ({cfg['final_eval_deals']} deals, mirrored):")
         rng, k_eval = jax.random.split(rng)
         final = evaluate(params, k_eval, cfg["final_eval_deals"])
-        run.log({f"final/{k[5:]}": v for k, v in final.items()})
+        log.log({"samples": samples, **{f"final/{k[5:]}": v for k, v in final.items()}})
     print(
         f"total {time.time() - t_start:.0f}s for {samples} samples "
         f"({(time.time() - t_start) / max(samples, 1) * 1e5:.1f}s per 1e5)"
     )
-    return save_path
