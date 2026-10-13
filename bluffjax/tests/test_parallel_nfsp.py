@@ -469,6 +469,17 @@ class _Recorder:
         self.rows.append(metrics)
 
 
+def _results_log(monkeypatch, mod, directory, num_seeds=1):
+    """Points the script's results log at {directory}/results.jsonl, with one
+    recorder per seed standing in for its wandb run; returns the recorders."""
+    from bluffjax.examples.run_utils import ResultsLog
+
+    os.makedirs(directory, exist_ok=True)
+    recorders = [_Recorder() for _ in range(num_seeds)]
+    monkeypatch.setattr(mod, "RESULTS_LOG", ResultsLog(str(directory), recorders))
+    return recorders
+
+
 def tiny_config(name, **extra):
     game, algo = name.split("_")[0], name.split("_")[1]
     config = dict(
@@ -519,7 +530,7 @@ SCRIPT_NAMES = ["goofspiel_ppo_nfsp", "goofspiel_pqn_nfsp", "kemps_ppo_nfsp", "k
 
 
 @pytest.mark.parametrize("name", SCRIPT_NAMES)
-def test_real_run_mixing_targets_and_reservoir(common, monkeypatch, name):
+def test_real_run_mixing_targets_and_reservoir(common, monkeypatch, tmp_path, name):
     mod = _scripts()[name]
     is_ppo = "ppo" in name
     seen = {"targets": [], "reservoir": []}
@@ -552,8 +563,7 @@ def test_real_run_mixing_targets_and_reservoir(common, monkeypatch, name):
             return out
 
         monkeypatch.setattr(mod, "per_agent_q_lambda_targets", targets_spy)
-    logger = _Recorder()
-    monkeypatch.setattr(mod, "WANDB_RUNS", [logger])
+    (logger,) = _results_log(monkeypatch, mod, tmp_path)
     config = tiny_config(name)
     jax.block_until_ready(jax.jit(mod.make_train(config))(KEY, jnp.int32(0)))
     jax.effects_barrier()
@@ -662,7 +672,7 @@ def _ramp_network(marks, returns_value):
 
 
 @pytest.mark.parametrize("name", SCRIPT_NAMES)
-def test_real_run_acts_with_the_drawn_policy(common, monkeypatch, name):
+def test_real_run_acts_with_the_drawn_policy(common, monkeypatch, tmp_path, name):
     """Every agent acts with the BR in the games where its flag is set and
     with the average policy otherwise (and the reservoir gets those flags)."""
     mod = _scripts()[name]
@@ -681,7 +691,7 @@ def test_real_run_acts_with_the_drawn_policy(common, monkeypatch, name):
         return reservoir(buffer, obs, action_mask, action, valid, rng)
 
     monkeypatch.setattr(mod, "reservoir_append", reservoir_spy)
-    monkeypatch.setattr(mod, "WANDB_RUNS", [_Recorder()])
+    _results_log(monkeypatch, mod, tmp_path)
     config = tiny_config(name, num_update_steps=2, compare=False, start_e=0.0, end_e=0.0)
     jax.block_until_ready(jax.jit(mod.make_train(config))(KEY, jnp.int32(0)))
     jax.effects_barrier()
@@ -711,11 +721,10 @@ def _max_diff(a, b):
 @pytest.mark.parametrize("name", SCRIPT_NAMES)
 def test_half_checkpoint_and_round_trip(common, monkeypatch, tmp_path, name):
     mod = _scripts()[name]
-    loggers = {"full": [_Recorder(), _Recorder()]}
-    monkeypatch.setattr(mod, "WANDB_RUNS", loggers["full"])
+    loggers = {"full": _results_log(monkeypatch, mod, tmp_path / "log_full", 2)}
     U = 5  # half after 2 updates (floor)
     config = tiny_config(name, num_update_steps=U, compare=False)
-    config["save_dir"] = str(tmp_path)
+    config["save_dir"] = str(tmp_path / "runs")
     config["half_update_steps"] = common.half_update_steps(U)
     assert config["half_update_steps"] == 2
     train = mod.make_train(config)
@@ -725,8 +734,7 @@ def test_half_checkpoint_and_round_trip(common, monkeypatch, tmp_path, name):
     jax.effects_barrier()
     partial = {}
     for n in (1, 2, 3):
-        loggers[n] = [_Recorder(), _Recorder()]
-        monkeypatch.setattr(mod, "WANDB_RUNS", loggers[n])
+        loggers[n] = _results_log(monkeypatch, mod, tmp_path / f"log_{n}", 2)
         partial[n] = jax.jit(jax.vmap(functools.partial(train, num_updates=n)))(keys, seeds)
         jax.effects_barrier()
     E, M = config["num_epochs"], config["num_minibatches"]
@@ -758,7 +766,10 @@ def test_half_checkpoint_and_round_trip(common, monkeypatch, tmp_path, name):
     )
 
     full_ckpt = common.Checkpoint(full.avg_train_state.params, full.br_train_state.params)
-    run_dir = common.save_checkpoints(config, full.half, full_ckpt)
+    from bluffjax.examples.run_utils import make_run_dir
+
+    run_dir = make_run_dir(config)
+    assert common.save_checkpoints(run_dir, 2, full.half, full_ckpt) == run_dir
     assert os.path.basename(run_dir).startswith(f"{name}_")
     expected = {"config.yaml"} | {
         f"{stage}/{net}_{i}.msgpack"
@@ -809,16 +820,13 @@ def test_half_checkpoint_and_round_trip(common, monkeypatch, tmp_path, name):
         common.load_checkpoint(run_dir, "full", 2, avg_t, br_t)
     with pytest.raises(ValueError):
         common.checkpoint_path(run_dir, "quarter", "br", 0)
-    # a second save in the same second gets its own directory
-    assert common.save_checkpoints(config, full.half, full_ckpt) != run_dir
 
     # the saved networks as evaluation opponents (compare_mode=checkpoint)
     types = {"br": "actor_critic", "avg_policy": "actor_critic"}
     if "pqn" in name:
         types = {"br": "q_network", "avg_policy": "actor"}
     for net, network_type in types.items():
-        logger = _Recorder()
-        monkeypatch.setattr(mod, "WANDB_RUNS", [logger])
+        (logger,) = _results_log(monkeypatch, mod, tmp_path / f"log_eval_{net}")
         eval_config = tiny_config(
             name, num_update_steps=1, compare_mode="checkpoint",
             compare_with=common.checkpoint_path(run_dir, "full", net, 1),

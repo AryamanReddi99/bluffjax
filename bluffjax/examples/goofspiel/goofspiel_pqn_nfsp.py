@@ -40,8 +40,29 @@ Units: the env pays each round's prize value (1-13) to its winner and
 player's points minus the opponents' mean points (with two players the point
 difference). Logged returns are in these units.
 
-Checkpoints (save_checkpoints): half- and full-budget networks of every seed,
-see parallel_nfsp_common.save_checkpoints.
+Run directory, {save_dir}/{job_type}_{timestamp}/, made when the run starts
+(bluffjax.examples.run_utils.make_run_dir):
+    config.yaml                  the resolved config, with num_update_steps,
+                                 half_update_steps and run_dir
+    results.jsonl                one record per update and seed: seed_index,
+                                 wall_time and every metric sent to wandb,
+                                 env_steps included (run_utils.read_results)
+    half/avg_policy_{i}.msgpack  if save_checkpoints: the networks of seed i
+    half/br_{i}.msgpack          after half_update_steps(num_update_steps)
+    full/avg_policy_{i}.msgpack  updates and after all num_update_steps, from
+    full/br_{i}.msgpack          the same run (the learning rate and epsilon
+                                 schedules span the whole run)
+Every checkpoint file holds flax params without a seed axis; the input is one
+player's observation (env.obs_from_state(state)[p], env.obs_dim floats):
+    avg_policy: ActorDiscreteMLP(action_dim=13, hidden_dim=fc_dim_size) ->
+        logits over the 13 cards to bid;
+    br: QNetworkDiscreteMLP(action_dim=13, hidden_dim=fc_dim_size) ->
+        Q-values of the 13 bids in units of reward_scale * env reward (the
+        BR's policy is the argmax over the cards in hand).
+Mask the cards no longer in hand (env.get_avail_actions(state)[p]) before the
+softmax or argmax. Load a file with run_utils.load_params(path,
+network.init(rng, obs)), or both networks of a seed with
+parallel_nfsp_common.load_checkpoint.
 """
 
 import datetime
@@ -73,9 +94,7 @@ from bluffjax.examples.parallel_nfsp_common import (
     eval_metrics,
     evaluate_goofspiel,
     greedy_random_ties,
-    half_update_steps,
     init_sl_buffer,
-    load_params,
     log_update,
     per_agent_q_lambda_targets,
     print_final_evals,
@@ -85,6 +104,12 @@ from bluffjax.examples.parallel_nfsp_common import (
     sample_sl_batch,
     save_checkpoints,
 )
+from bluffjax.examples.run_utils import (
+    ResultsLog,
+    half_update_steps,
+    load_params,
+    make_run_dir,
+)
 from bluffjax.networks.mlp import (
     ActorCriticDiscreteMLP,
     ActorDiscreteMLP,
@@ -93,7 +118,8 @@ from bluffjax.networks.mlp import (
 from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
-WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
+# results.jsonl of the run and its wandb runs (one per vmapped seed), made in main()
+RESULTS_LOG: ResultsLog | None = None
 # EVALS[seed] = [(env_steps, {metric: value}), ...]
 EVALS: dict[int, list[tuple[int, dict[str, float]]]] = {}
 
@@ -642,12 +668,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
 
 def logging_callback(seed_val, metric_dict) -> None:
-    log_update(WANDB_RUNS, EVALS, seed_val, metric_dict)
+    log_update(RESULTS_LOG, EVALS, seed_val, metric_dict)
 
 
 @hydra.main(version_base=None, config_path="./", config_name="config_pqn_nfsp")
 def main(config: dict) -> None:
-    global WANDB_RUNS
+    global RESULTS_LOG
+    wandb_runs = []
     try:
         config = OmegaConf.to_container(config, resolve=True)
         config["num_update_steps"] = int(
@@ -666,23 +693,16 @@ def main(config: dict) -> None:
             * config["num_envs"]
             * config["num_steps_per_env_per_update"]
         )
+        train = make_train(config)  # completes config (batch_shuffle_dim)
 
-        rng = jax.random.PRNGKey(config["seed"])
-        rng_seeds = jax.random.split(rng, config["num_seeds"])
-        exp_ids = jnp.arange(config["num_seeds"])
-
-        print("Starting compile...")
-        start = time.time()
-        train_vjit = (
-            jax.jit(jax.vmap(make_train(config))).lower(rng_seeds, exp_ids).compile()
-        )
-        print(f"Compile finished in {time.time() - start:.1f} s")
-
+        # The run directory and the results log come first, so that
+        # results.jsonl fills while the run trains.
+        run_dir = make_run_dir(config)
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
         )
-        WANDB_RUNS = [
+        wandb_runs = [
             wandb.init(
                 project=config["project"],
                 group=group,
@@ -695,10 +715,22 @@ def main(config: dict) -> None:
             )
             for i in range(config["num_seeds"])
         ]
+        RESULTS_LOG = ResultsLog(run_dir, wandb_runs)
+        print(f"Run directory: {run_dir}")
+
+        rng = jax.random.PRNGKey(config["seed"])
+        rng_seeds = jax.random.split(rng, config["num_seeds"])
+        exp_ids = jnp.arange(config["num_seeds"])
+
+        print("Starting compile...")
+        start = time.time()
+        train_vjit = jax.jit(jax.vmap(train)).lower(rng_seeds, exp_ids).compile()
+        print(f"Compile finished in {time.time() - start:.1f} s")
 
         print("Running...")
         start = time.time()
         final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        jax.effects_barrier()  # every update's record is in results.jsonl
         run_time = time.time() - start
         print(
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "
@@ -707,8 +739,9 @@ def main(config: dict) -> None:
         )
         print_final_evals(EVALS)
         if config["save_checkpoints"]:
-            run_dir = save_checkpoints(
-                config,
+            save_checkpoints(
+                run_dir,
+                config["num_seeds"],
                 final_runner_state.half,
                 Checkpoint(
                     final_runner_state.avg_train_state.params,
@@ -717,7 +750,7 @@ def main(config: dict) -> None:
             )
             print(f"Saved checkpoints to {run_dir}")
     finally:
-        for run in WANDB_RUNS:
+        for run in wandb_runs:
             run.finish()
         print("Finished.")
 
