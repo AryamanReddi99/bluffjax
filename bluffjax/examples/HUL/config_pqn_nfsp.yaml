@@ -31,14 +31,18 @@ seed: 0
 num_seeds: 10
 env_kwargs:
   num_agents: 2
-save_final: true  # see save_checkpoints in the script
+# networks after half and all of the updates, in the run directory (see
+# save_checkpoints in the script)
+save_checkpoints: true
 save_dir: ${repo_root:}/checkpoints/HUL
 
 # comparison: chips per hand of the average and best-response policies
 compare: true
 compare_mode: random  # "random" or "checkpoint"
 # ReBeL opponent, from hul_rebel.py --config-name config_rebel_opponent, e.g.
-# ${repo_root:}/checkpoints/HUL/hul_rebel_seed<seed>_<timestamp>.msgpack (+ .json alongside)
+# ${repo_root:}/checkpoints/HUL/<run>/full/value_net.msgpack (+ value_net.json alongside)
+# (with compare_network_type actor_critic: a PPO-NFSP network file, e.g.
+# ${repo_root:}/checkpoints/HUL/<run>/full/avg_policy_0.msgpack)
 compare_with: ""
 compare_network_type: rebel  # "rebel" (searches at test time) or "actor_critic"
 compare_cfr_iters: null  # ReBeL CFR iterations per subgame when acting; null = as trained
