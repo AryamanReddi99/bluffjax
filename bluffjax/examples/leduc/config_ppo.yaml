@@ -17,7 +17,8 @@ max_grad_norm: 0.5
 reward_scale: 0.25  # env pays chips; train in units of the round-2 bet (4 chips)
 fc_dim_size: 128
 
-# exact exploitability every eval_interval updates and after the last one
+# exact exploitability and game metrics (bluffjax/metrics/leduc_holdem.py)
+# every eval_interval updates and after the last one
 eval_interval: 10
 
 env_name: leduc_poker
@@ -29,6 +30,12 @@ env_kwargs: {}
 project: bluffjax
 job_type: leduc_ppo
 wandb: false
+
+# run directory {save_dir}/{job_type}_{timestamp}/ with config.yaml, results.jsonl
+# and the actor-critic after half and all of the updates (half/, full/; see
+# the script docstring)
+save_checkpoints: true
+save_dir: ${repo_root:}/checkpoints/leduc
 
 # Hydra configs and logs go to outputs/ at the repo root
 hydra:

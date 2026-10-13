@@ -30,9 +30,43 @@ policy-network steps, as in OpenSpiel's Deep CFR examples.
 Network inputs are OpenSpiel's leduc_poker information_state_tensor, which is
 perfect recall: each of the 936 infosets has a distinct tensor. Exploitability
 is exact, over the full game tree.
+
+Evaluation: after iteration 1, every --eval_every iterations, after half of
+the iterations and after the last one, a policy network is trained on the
+strategy memory (its key depends only on the iteration, so evaluations don't
+change the run) and the exact exploitability of its policy and its exact
+behaviour metrics in self-play are logged, the latter as game/<name>
+(bluffjax.metrics.leduc_holdem: bluff rate and success, correct-fold rate,
+round-2 raise rates with and without a pair; definitions there). Every
+iteration logs the iteration count, the traversals so far and the advantage
+losses.
+
+Seeds: --num_seeds runs (default 5) one after the other in one run directory;
+seed index i uses seed --seed + i and has its own wandb run "{seed}_{i}".
+
+Run directory ({save_dir}/{job_type}_{timestamp}/, made when the run starts;
+see bluffjax.examples.run_utils):
+    config.yaml                  the arguments, with half_iterations
+    results.jsonl                every logged record (what wandb gets, plus
+                                 seed_index and wall_time); each has iteration
+                                 and traversals
+    half/avg_policy_{i}.msgpack  policy (average-strategy) network after
+                                 half_iterations = half_update_steps(
+                                 iterations) iterations of seed index i
+    full/avg_policy_{i}.msgpack  after all iterations
+(checkpoints unless --no-save_checkpoints). Each file holds the flax params of
+MLP(hidden_sizes, 3) (hidden_sizes in config.yaml; policy_network() builds
+it), written with run_utils.save_params; load with load_params(path,
+policy_network(hidden_sizes).init(rng, jnp.zeros((1, INFO_STATE_SIZE)))).
+The network maps information_state_tensor(infoset key) (30 floats, which
+needs the physical cards, not the env observation) to action logits over
+fold/call/raise; illegal actions are masked before the softmax. That policy is
+the average strategy: policy_array(params, hidden_sizes) gives it at every
+infoset in leduc_exploitability._INFOSET_LIST order.
 """
 
 import argparse
+import datetime
 import functools
 import json
 import time
@@ -43,8 +77,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import wandb
 
+from bluffjax.examples.run_utils import (
+    ResultsLog,
+    half_update_steps,
+    make_run_dir,
+    save_params,
+)
+from bluffjax.metrics.leduc_holdem import log_metrics
 from bluffjax.utils.game_utils import leduc_exploitability as leduc
+from bluffjax.utils.paths import REPO_ROOT
 from bluffjax.utils.typing import BoolArray, FloatArray, PRNGKeyArray, PyTree
 
 NUM_ACTIONS = 3  # fold, call, raise
@@ -170,6 +213,24 @@ class MLP(nn.Module):
         return nn.Dense(self.output_size, kernel_init=init, bias_init=init)(x)
 
 
+def policy_network(hidden_sizes: Sequence[int]) -> MLP:
+    """The advantage and policy network architecture (also of the checkpoints)."""
+    return MLP(tuple(hidden_sizes), NUM_ACTIONS)
+
+
+def policy_probs(logits: np.ndarray) -> np.ndarray:
+    """Softmax over the legal actions of every infoset, (936, 3) float64."""
+    logits = np.where(INFOSET_LEGAL_MASKS, np.asarray(logits, np.float64), -np.inf)
+    probs = np.exp(logits - logits.max(axis=-1, keepdims=True))
+    return probs / probs.sum(axis=-1, keepdims=True)
+
+
+def policy_array(params: PyTree, hidden_sizes: Sequence[int]) -> np.ndarray:
+    """The average strategy of a policy network (e.g. a loaded checkpoint) at
+    every infoset, (936, 3) in leduc_exploitability._INFOSET_LIST order."""
+    return policy_probs(policy_network(hidden_sizes).apply(params, INFOSET_TENSORS))
+
+
 def advantage_loss(
     apply_fn: Callable, params: PyTree, batch: Memory, iteration: FloatArray
 ) -> FloatArray:
@@ -227,16 +288,40 @@ def make_train(
     return jax.jit(train)
 
 
+@functools.lru_cache(maxsize=None)
+def _jitted_functions(
+    hidden_sizes: tuple[int, ...],
+    learning_rate: float,
+    max_grad_norm: float,
+    advantage_train_steps: int,
+    policy_train_steps: int,
+    batch_size: int,
+) -> tuple[Callable, Callable, Callable]:
+    """apply, train_advantage and train_policy, built once per configuration
+    so that the seeds of a run share the compiled functions."""
+    network = policy_network(hidden_sizes)
+    optimizer = optax.adam(learning_rate)
+    if max_grad_norm > 0:
+        optimizer = optax.chain(optax.clip_by_global_norm(max_grad_norm), optimizer)
+    return (
+        jax.jit(network.apply),
+        make_train(
+            network, advantage_loss, optimizer, advantage_train_steps, batch_size
+        ),
+        make_train(network, policy_loss, optimizer, policy_train_steps, batch_size),
+    )
+
+
 # --- Deep CFR Solver ---
 class DeepCFRSolver:
-    def __init__(self, config: argparse.Namespace) -> None:
+    def __init__(self, config: argparse.Namespace, seed: int | None = None) -> None:
+        """seed defaults to config.seed."""
         self._config = config
         self._iteration = 0
+        seed = config.seed if seed is None else seed
         # Traversal and reservoir sampling on the host, network training on device
-        self._rng = np.random.default_rng(config.seed)
-        self._advantage_key, self._policy_key = jax.random.split(
-            jax.random.key(config.seed)
-        )
+        self._rng = np.random.default_rng(seed)
+        self._advantage_key, self._policy_key = jax.random.split(jax.random.key(seed))
 
         self._advantage_memories = [
             ReservoirBuffer(config.memory_capacity) for _ in range(2)
@@ -248,24 +333,11 @@ class DeepCFRSolver:
         # keyed by information state
         self._strategy_cache: list[dict[bytes, np.ndarray]] = [{}, {}]
 
-        network = MLP(tuple(config.hidden_sizes), NUM_ACTIONS)
-        optimizer = optax.adam(config.learning_rate)
-        if config.max_grad_norm > 0:
-            optimizer = optax.chain(
-                optax.clip_by_global_norm(config.max_grad_norm), optimizer
-            )
-        self._apply = jax.jit(network.apply)
-        self._train_advantage = make_train(
-            network,
-            advantage_loss,
-            optimizer,
+        self._apply, self._train_advantage, self._train_policy = _jitted_functions(
+            tuple(config.hidden_sizes),
+            config.learning_rate,
+            config.max_grad_norm,
             config.advantage_train_steps,
-            config.batch_size,
-        )
-        self._train_policy = make_train(
-            network,
-            policy_loss,
-            optimizer,
             config.policy_train_steps,
             config.batch_size,
         )
@@ -354,24 +426,30 @@ class DeepCFRSolver:
 
     def average_policy(self, policy_params: PyTree) -> np.ndarray:
         """Policy network's action probabilities for every infoset, shape (936, 3)."""
-        logits = np.asarray(
-            self._apply(policy_params, INFOSET_TENSORS), dtype=np.float64
-        )
-        logits = np.where(INFOSET_LEGAL_MASKS, logits, -np.inf)
-        probs = np.exp(logits - logits.max(axis=-1, keepdims=True))
-        return probs / probs.sum(axis=-1, keepdims=True)
+        return policy_probs(self._apply(policy_params, INFOSET_TENSORS))
 
 
 def exploitability(policy_array: np.ndarray) -> float:
     return leduc.exploitability_from_policy_array(policy_array, leduc._KEY_TO_IDX)
 
 
-def run_deep_cfr(config: argparse.Namespace) -> dict:
-    """Runs Deep CFR, logging the exploitability of the average-strategy
-    network after iteration 1, every `eval_every` iterations and at the end."""
+def run_deep_cfr(
+    config: argparse.Namespace,
+    seed_index: int = 0,
+    results_log: ResultsLog | None = None,
+    run_dir: str | None = None,
+) -> dict:
+    """Runs Deep CFR with seed config.seed + seed_index, logging the
+    exploitability and game metrics of the average-strategy network after
+    iteration 1, every `eval_every` iterations, after half_update_steps(
+    iterations) and at the end; with run_dir, saves that network after half
+    and all of the iterations as {half,full}/avg_policy_{seed_index}."""
     start = time.time()
     eval_seconds = 0.0
-    solver = DeepCFRSolver(config)
+    solver = DeepCFRSolver(config, config.seed + seed_index)
+    num_half = half_update_steps(config.iterations)
+    if run_dir is not None and num_half < 1:
+        raise ValueError("the half checkpoint needs --iterations >= 2")
     results = {
         "iterations": [],
         "exploitability": [],
@@ -380,19 +458,40 @@ def run_deep_cfr(config: argparse.Namespace) -> dict:
     }
 
     for it in range(1, config.iterations + 1):
-        results["advantage_loss"].append(solver.run_iteration())
-        if it == 1 or it % config.eval_every == 0 or it == config.iterations:
+        advantage_losses = solver.run_iteration()
+        results["advantage_loss"].append(advantage_losses)
+        metrics = {
+            "iteration": it,
+            "traversals": it * 2 * config.traversals,
+            "advantage_loss_p0": advantage_losses[0],
+            "advantage_loss_p1": advantage_losses[1],
+        }
+        is_last = it == config.iterations
+        if it == 1 or it % config.eval_every == 0 or it == num_half or is_last:
             eval_start = time.time()
             policy_params, loss = solver.learn_policy_network()
-            if it == config.iterations:
+            if is_last:
                 # Training the final policy network is part of the algorithm
                 eval_start = time.time()
-            expl = exploitability(solver.average_policy(policy_params))
+            policy = solver.average_policy(policy_params)
+            expl = exploitability(policy)
+            metrics.update(exploitability=expl, policy_loss=loss)
+            metrics.update(log_metrics("game", policy))
             eval_seconds += time.time() - eval_start
             results["iterations"].append(it)
             results["exploitability"].append(expl)
             results["policy_loss"].append(loss)
-            print(f"Iteration {it:4d}: exploitability = {expl:.6f}")
+            print(
+                f"seed index {seed_index} iteration {it:4d}: exploitability = "
+                f"{expl:.6f}, bluff rate {metrics['game/bluff_rate']:.4f}, "
+                f"correct folds {metrics['game/correct_fold_rate']:.4f}",
+                flush=True,
+            )
+            if run_dir is not None and it in (num_half, config.iterations):
+                stage = "full" if is_last else "half"
+                save_params(run_dir, stage, "avg_policy", policy_params, seed_index)
+        if results_log is not None:
+            results_log.log(metrics, seed_index)
 
     results["final_exploitability"] = results["exploitability"][-1]
     results["runtime_seconds"] = time.time() - start
@@ -423,27 +522,91 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory_capacity", type=int, default=100_000)
     parser.add_argument("--eval_every", type=int, default=5)
     parser.add_argument(
-        "--output", type=str, default=None, help="write results to this JSON file"
+        "--num_seeds",
+        type=int,
+        default=5,
+        help="runs one after the other; seed index i uses seed --seed + i",
+    )
+    parser.add_argument(
+        "--save_checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="policy network after half and all of the iterations",
+    )
+    parser.add_argument(
+        "--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "leduc")
+    )
+    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--project", type=str, default="bluffjax")
+    parser.add_argument("--job_type", type=str, default="leduc_deep_cfr")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="also write every seed's results to this JSON file",
     )
     return parser.parse_args(argv)
 
 
-def main() -> None:
-    config = parse_args()
-    print("Deep CFR for Leduc Poker")
-    print("=" * 50)
-    results = run_deep_cfr(config)
-    print("=" * 50)
-    print(f"Final exploitability: {results['final_exploitability']:.6f}")
-    print(
-        f"Runtime: {results['runtime_seconds']:.1f}s "
-        f"({results['eval_seconds']:.1f}s evaluating)"
+def main(argv: Sequence[str] | None = None) -> None:
+    config = parse_args(argv)
+    run_config = {
+        **vars(config),
+        "env_name": "leduc_poker",
+        "half_iterations": half_update_steps(config.iterations),
+    }
+    run_dir = make_run_dir(run_config)
+    group = run_config["env_name"] + datetime.datetime.now().strftime(
+        "_%Y-%m-%d_%H-%M-%S"
     )
-    if config.output:
-        with open(config.output, "w") as f:
-            json.dump(
-                {"game": "leduc_poker", "config": vars(config), **results}, f, indent=2
+    wandb_runs = [
+        wandb.init(
+            project=config.project,
+            group=group,
+            job_type=f"{config.job_type}_{run_config['env_name']}",
+            name=f"{config.seed}_{i}",
+            config={**run_config, "seed_index": i},
+            mode=None if config.wandb else "disabled",
+            dir=str(REPO_ROOT),
+            reinit="create_new",
+        )
+        for i in range(config.num_seeds)
+    ]
+    try:
+        results_log = ResultsLog(run_dir, wandb_runs)
+        print(f"Run directory: {run_dir}")
+        print("Deep CFR for Leduc Poker")
+        all_results = []
+        for i in range(config.num_seeds):
+            print("=" * 50)
+            print(f"seed index {i} (seed {config.seed + i})")
+            results = run_deep_cfr(
+                config, i, results_log, run_dir if config.save_checkpoints else None
             )
+            all_results.append({"seed": config.seed + i, "seed_index": i, **results})
+            print(f"Final exploitability: {results['final_exploitability']:.6f}")
+            print(
+                f"Runtime: {results['runtime_seconds']:.1f}s "
+                f"({results['eval_seconds']:.1f}s evaluating)"
+            )
+        finals = [r["final_exploitability"] for r in all_results]
+        print("=" * 50)
+        print(
+            f"final exploitability: mean {np.mean(finals):.6f} std "
+            f"{np.std(finals):.6f} over {len(finals)} seed(s)"
+        )
+        if config.save_checkpoints:
+            print(f"Saved checkpoints to {run_dir}")
+        if config.output:
+            with open(config.output, "w") as f:
+                json.dump(
+                    {"game": "leduc_poker", "config": vars(config), "runs": all_results},
+                    f,
+                    indent=2,
+                )
+    finally:
+        for run in wandb_runs:
+            run.finish()
 
 
 if __name__ == "__main__":
