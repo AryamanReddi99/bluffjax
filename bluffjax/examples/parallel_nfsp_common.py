@@ -13,18 +13,22 @@ its targets only involve its own rewards and observations: the scripts
 compute them independently for every (env, agent) column.
 """
 
-import datetime
-import os
 from typing import Any, Callable, NamedTuple
 
 import jax
-from flax import serialization
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-from omegaconf import OmegaConf
 
 from bluffjax.environments.env import ParallelEnv
+from bluffjax.examples.run_utils import (
+    CHECKPOINT_STAGES,
+    ResultsLog,
+    half_update_steps,
+    load_params,
+    save_seed_params,
+)
+from bluffjax.examples.run_utils import checkpoint_path as _checkpoint_path
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 
 
@@ -253,61 +257,21 @@ class Checkpoint(NamedTuple):
     br_params: Any  # best response
 
 
-CHECKPOINT_STAGES = ("half", "full")
-
-
-def half_update_steps(num_update_steps: int) -> int:
-    """Number of updates after which the half-budget checkpoint is taken."""
-    return num_update_steps // 2
-
-
-def load_params(path: str, template: Any) -> Any:
-    """Loads flax params written by save_checkpoints, failing loudly.
-
-    The file must exist and hold exactly the parameter tree of `template`
-    (same keys, shapes and dtypes); flax's from_bytes alone silently ignores
-    extra keys and doesn't check shapes.
-    """
-    if not path or not os.path.isfile(path):
-        raise FileNotFoundError(f"checkpoint not found: '{path}'")
-    with open(path, "rb") as f:
-        restored = serialization.msgpack_restore(f.read())
-    expected = serialization.to_state_dict(template)
-    if jax.tree_util.tree_structure(restored) != jax.tree_util.tree_structure(
-        expected
-    ):
-        raise ValueError(
-            f"checkpoint {path} doesn't match the network: parameter tree "
-            f"{jax.tree_util.tree_structure(restored)} vs expected "
-            f"{jax.tree_util.tree_structure(expected)}"
-        )
-    for (key, got), want in zip(
-        jax.tree_util.tree_flatten_with_path(restored)[0],
-        jax.tree_util.tree_leaves(expected),
-    ):
-        if np.shape(got) != np.shape(want) or np.asarray(got).dtype != want.dtype:
-            raise ValueError(
-                f"checkpoint {path} doesn't match the network at "
-                f"{jax.tree_util.keystr(key)}: {np.asarray(got).dtype}"
-                f"{np.shape(got)} vs expected {want.dtype}{np.shape(want)}"
-            )
-    return serialization.from_state_dict(template, restored)
-
-
 def checkpoint_path(run_dir: str, stage: str, name: str, seed_index: int) -> str:
     """{run_dir}/{stage}/{name}_{seed_index}.msgpack, name avg_policy or br."""
-    if stage not in CHECKPOINT_STAGES:
-        raise ValueError(f"stage must be one of {CHECKPOINT_STAGES}, got '{stage}'")
     if name not in ("avg_policy", "br"):
         raise ValueError(f"name must be 'avg_policy' or 'br', got '{name}'")
-    return os.path.join(run_dir, stage, f"{name}_{seed_index}.msgpack")
+    return _checkpoint_path(run_dir, stage, name, seed_index)
 
 
-def save_checkpoints(config: dict, half: Checkpoint, full: Checkpoint) -> str:
+def save_checkpoints(
+    run_dir: str, num_seeds: int, half: Checkpoint, full: Checkpoint
+) -> str:
     """Saves the networks of every seed at half and at the full budget.
 
-    Layout of {save_dir}/{job_type}_{timestamp}/:
+    Layout of the run directory (bluffjax.examples.run_utils.make_run_dir):
         config.yaml                  resolved config of the run
+        results.jsonl                everything logged (see run_utils)
         half/avg_policy_{i}.msgpack  after half_update_steps(num_update_steps)
         half/br_{i}.msgpack          (= num_update_steps // 2) updates
         full/avg_policy_{i}.msgpack  after all num_update_steps updates
@@ -334,23 +298,12 @@ def save_checkpoints(config: dict, half: Checkpoint, full: Checkpoint) -> str:
     actor_critic for PPO-NFSP files, actor for PQN-NFSP avg_policy files and
     q_network for PQN-NFSP br files.
     """
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    base = os.path.join(config["save_dir"], f"{config['job_type']}_{timestamp}")
-    run_dir, n = base, 0
-    while os.path.exists(run_dir):  # two runs started in the same second
-        n += 1
-        run_dir = f"{base}_{n}"
     for stage, checkpoint in zip(CHECKPOINT_STAGES, (half, full)):
-        os.makedirs(os.path.join(run_dir, stage))
         for name, params in (
             ("avg_policy", checkpoint.avg_params),
             ("br", checkpoint.br_params),
         ):
-            for i in range(config["num_seeds"]):
-                params_i = jax.tree_util.tree_map(lambda x: np.asarray(x[i]), params)
-                with open(checkpoint_path(run_dir, stage, name, i), "wb") as f:
-                    f.write(serialization.to_bytes(params_i))
-    OmegaConf.save(OmegaConf.create(config), os.path.join(run_dir, "config.yaml"))
+            save_seed_params(run_dir, stage, name, params, range(num_seeds))
     return run_dir
 
 
@@ -588,8 +541,10 @@ def kemps_horizon_cutoff(
 # =============================================================================
 
 
-def log_update(wandb_runs: list, evals_by_seed: dict, seed_val, metric_dict: dict) -> None:
-    """Logs the metrics of one update of one seed.
+def log_update(
+    results_log: ResultsLog, evals_by_seed: dict, seed_val, metric_dict: dict
+) -> None:
+    """Logs the metrics of one update of one seed to wandb and results.jsonl.
 
     metric_dict["evaluated"] says whether the evaluation metrics (keys with
     "_vs_") were computed in this update; they are logged, printed and kept in
@@ -610,7 +565,7 @@ def log_update(wandb_runs: list, evals_by_seed: dict, seed_val, metric_dict: dic
     else:
         for k in eval_keys:
             del metrics[k]
-    wandb_runs[seed].log(metrics)
+    results_log.log(metrics, seed)
 
 
 def format_eval(evals: dict[str, float]) -> str:
