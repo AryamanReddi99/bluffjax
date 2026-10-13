@@ -7,6 +7,11 @@
   rollouts, the half checkpoint is the networks after exactly
   half_update_steps updates, and half/ and full/ load strictly into the
   scripts' networks (also as the actor-critic evaluation opponent);
+- their evaluation (holdem_rebel.agent.play_hands): exactly compare_episodes
+  complete hands per policy, every deal from both seats, every
+  compare_interval updates and after the last, logged from exactly those
+  hands; random against random gives symmetric results; it doesn't change
+  training; ReBeL as the opponent;
 - ReBeL (bluffjax/examples/holdem_rebel/train.py) with a tiny budget: run
   directory, results.jsonl with the self-play game metrics at every
   evaluation, half/ and full/ value networks with their metadata.
@@ -57,7 +62,7 @@ def tiny_config(name, save_dir, **extra):
         num_envs=8, num_steps_per_env_per_update=6, num_epochs=1, num_minibatches=2,
         fc_dim_size=16, sl_reservoir_capacity=256, sl_batch_size=16,
         sl_num_steps_per_update=2, anticipatory_eta=0.4, num_seeds=2,
-        compare=True, compare_mode="random", compare_steps=4, compare_interval=2,
+        compare=True, compare_mode="random", compare_episodes=5, compare_interval=3,
         save_dir=str(save_dir), wandb=False, num_update_steps=5,
     )
     config.update(extra)
@@ -97,6 +102,77 @@ def networks(name, env, hidden):
     return avg, br
 
 
+EVAL_STATS = (
+    "avg_return", "win_rate", "loss_rate", "draw_rate", "win_rate_decided",
+    "avg_episode_length",
+)
+
+
+def eval_names(opponent):
+    """The evaluation metrics of both policies against `opponent`."""
+    return {f"{stat}_{p}_vs_{opponent}" for stat in EVAL_STATS for p in ("avg", "br")} | {
+        "eval_unfinished_hands"
+    }
+
+
+def spy_play_hands(mod, monkeypatch, learner=None):
+    """Records the hands of every evaluation the script plays (one
+    HandsResult per seed, policy and evaluation, in no particular order).
+    With `learner`, that player plays instead of the script's policy."""
+    from bluffjax.examples.holdem_rebel import agent
+
+    records = []
+
+    def record(*fields):
+        records.append(agent.HandsResult(*(np.asarray(x) for x in fields)))
+
+    def spy(env, game, player_a, *args, **kwargs):
+        out = agent.play_hands(env, game, learner or player_a, *args, **kwargs)
+        jax.debug.callback(record, *out)
+        return out
+
+    monkeypatch.setattr(mod, "play_hands", spy)
+    return records
+
+
+def check_eval_hands(records, num_hands):
+    """Every evaluation played exactly num_hands complete hands, hands 2k and
+    2k + 1 being one deal with the learner in each seat."""
+    for h in records:
+        assert h.rewards.shape == h.hand_length.shape == (num_hands,)
+        assert h.finished.all() and (h.hand_length >= 1).all()
+        np.testing.assert_array_equal(h.deal, np.arange(num_hands) // 2)
+        np.testing.assert_array_equal(h.seat_a, (h.seat_a[0] + np.arange(num_hands)) % 2)
+
+
+def eval_summary(h):
+    """The logged metrics of one evaluation, computed from its hands."""
+    r = h.rewards
+    win, loss = (r > 0).mean(), (r < 0).mean()
+    return (r.mean(), win, loss, (r == 0).mean(), win / max(win + loss, 1e-9), h.hand_length.mean())
+
+
+def check_eval_rows(rows, records, opponent, num_hands):
+    """The evaluation metrics of the evaluated rows are those of exactly the
+    recorded hands (two per row, one per policy)."""
+    from_rows = []
+    for r in rows:
+        assert int(r["eval_unfinished_hands"]) == 0
+        for p in ("avg", "br"):
+            stats = [r[f"{stat}_{p}_vs_{opponent}"] for stat in EVAL_STATS]
+            ret, win, loss, draw, decided, length = stats
+            for rate in (win, loss, draw):  # a whole number of hands (float32 rates)
+                assert rate * num_hands == pytest.approx(round(rate * num_hands), abs=0.01)
+            assert win + loss + draw == pytest.approx(1.0)
+            assert decided == pytest.approx(win / max(win + loss, 1e-9))
+            from_rows.append((ret, win, loss, draw, decided, length))
+    from_hands = [eval_summary(h) for h in records]
+    assert len(from_hands) == len(from_rows)
+    key = lambda t: tuple(round(float(x), 3) for x in t)  # noqa: E731
+    for got, want in zip(sorted(from_rows, key=key), sorted(from_hands, key=key)):
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+
+
 def _leaves_equal(a, b):
     return all(
         np.array_equal(np.asarray(x), np.asarray(y))
@@ -118,7 +194,9 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
     mod = _module(name)
     config = tiny_config(name, tmp_path)
     U, num_half = config["num_update_steps"], config["half_update_steps"]
+    records = spy_play_hands(mod, monkeypatch)
     run_dir, full = run(mod, config, monkeypatch)
+    records = list(records)  # this run's evaluations
     env = make(ENV_IDS[name.split("_")[0]], **config["env_kwargs"])
     gm = make_metrics(ENV_IDS[name.split("_")[0]], env)
 
@@ -132,10 +210,11 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
     for r in rows:
         assert r["env_steps"] == (r["update_step"] + 1) * T * N
         assert r["wall_time"] >= 0
-        evaluated = r["update_step"] % config["compare_interval"] == 0
+        # every compare_interval updates (0, 3) and after the last one (4)
+        evaluated = r["update_step"] in (0, 3, 4)
         assert bool(r["evaluated"]) == evaluated
-        assert ("avg_chips_avg_vs_random" in r) == evaluated
-        assert "avg_chips_avg_vs_baseline" not in r
+        names = {k for k in r if "_vs_" in k or k.startswith("eval_")}
+        assert names == (eval_names("random") if evaluated else set())
         for prefix in ("game", "game_br"):
             for rate in gm.rate_names:
                 v = r[f"{prefix}/{rate}"]
@@ -152,6 +231,18 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
             assert r["game/n_hands_sb"] + r["game_br/n_hands_sb"] == r["hands_completed"]
     assert sum(r["game/n_aggressive"] + r["game_br/n_aggressive"] for r in rows) > 0
     assert sum(r["game_br/n_aggressive"] for r in rows) > 0
+
+    # evaluation: 2 policies x 3 evaluations x 2 seeds, compare_episodes hands
+    # each, and the logged metrics are those of exactly these hands
+    assert len(records) == 2 * 3 * 2
+    check_eval_hands(records, config["compare_episodes"])
+    check_eval_rows([r for r in rows if r["evaluated"]], records, "random",
+                    config["compare_episodes"])
+
+    # the evaluation doesn't change training
+    _, off = run(mod, tiny_config(name, tmp_path / "off", compare=False), monkeypatch)
+    assert _leaves_equal(off.avg_train_state.params, full.avg_train_state.params)
+    assert _leaves_equal(off.br_train_state.params, full.br_train_state.params)
 
     # the carry is the hand in progress, kept across rollouts
     carry = full.metric_carry
@@ -217,7 +308,11 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
             )
             eval_dir, _ = run(_module(other), eval_config, monkeypatch, seeds=1)
             (row,) = read_results(eval_dir)
-            assert np.isfinite(row["avg_chips_avg_vs_baseline"])
+            assert {k for k in row if "_vs_" in k or k.startswith("eval_")} == eval_names(
+                "baseline"
+            )
+            assert all(np.isfinite(row[k]) for k in eval_names("baseline"))
+            assert row["eval_unfinished_hands"] == 0
 
 
 @pytest.mark.parametrize("name", ["hul_ppo_nfsp", "hunl_pqn_nfsp"])
@@ -237,6 +332,115 @@ def test_nfsp_game_metrics_follow_the_policy(name, monkeypatch, tmp_path):
             rates = [k for k in r if k.startswith(f"{empty}/") and not k.startswith(f"{empty}/n_")]
             assert all(math.isnan(r[k]) for k in rates)
             assert r[f"{full}/n_aggressive"] > 0 and r[f"{full}/n_folds"] > 0
+
+
+# =============================================================================
+# In-training evaluation
+# =============================================================================
+
+
+@pytest.mark.parametrize("game_name", ["hul", "hunl"])
+def test_play_hands_exact_count_and_mirrored_deals(game_name):
+    """play_hands plays exactly num_hands complete hands; hands 2k and 2k + 1
+    are one deal from both seats: two copies of a deterministic player get
+    exactly opposite results in them."""
+    from bluffjax.examples.holdem_rebel.agent import heuristic_players, play_hands
+    from bluffjax.examples.holdem_rebel.game import make_game
+
+    game = make_game(game_name)
+    env = make(game.env_id, num_agents=2)
+    players = heuristic_players(game)
+    for n in (1, 6, 7):
+        for a, b in (("always_call", "always_call"), ("random", "always_raise")):
+            hands = jax.jit(
+                lambda k: play_hands(env, game, players[a], None, players[b], None, n, k)
+            )(jax.random.PRNGKey(n))
+            hands = jax.tree_util.tree_map(np.asarray, hands)
+            check_eval_hands([hands], n)
+            if a == b:  # the same deal and the same actions from the other seat
+                pairs = hands.rewards[: 2 * (n // 2)].reshape(-1, 2)
+                np.testing.assert_array_equal(pairs[:, 0], -pairs[:, 1])
+                lengths = hands.hand_length[: 2 * (n // 2)].reshape(-1, 2)
+                np.testing.assert_array_equal(lengths[:, 0], lengths[:, 1])
+    # the seat of a pair's first hand (and of an odd count's last deal) is random
+    first_seat = jax.jit(
+        lambda k: play_hands(env, game, players["random"], None, players["random"], None,
+                             1, k).seat_a[0]
+    )
+    assert {int(first_seat(jax.random.PRNGKey(i))) for i in range(16)} == {0, 1}
+
+
+@pytest.mark.parametrize("name", ["hul_ppo_nfsp", "hunl_pqn_nfsp"])
+def test_eval_random_against_random_is_symmetric(name, monkeypatch, tmp_path):
+    """With random play in place of the learner, the evaluation (every
+    update, as with the default compare_interval 1) gives the symmetric
+    values of a zero-sum game: win rate = loss rate and return 0, up to
+    sampling error."""
+    from bluffjax.examples.holdem_rebel.agent import heuristic_players
+    from bluffjax.examples.holdem_rebel.game import make_game
+    from bluffjax.examples.run_utils import read_results
+
+    mod = _module(name)
+    n = 2000
+    config = tiny_config(name, tmp_path, num_update_steps=2, compare_episodes=n,
+                         compare_interval=1)
+    random_player = heuristic_players(make_game(name.split("_")[0]))["random"]
+    records = spy_play_hands(mod, monkeypatch, learner=random_player)
+    run_dir, _ = run(mod, config, monkeypatch)
+    rows = read_results(run_dir)
+    assert len(rows) == 4 and all(r["evaluated"] for r in rows)
+    assert len(records) == 2 * 2 * 2  # policies x updates x seeds
+    check_eval_hands(records, n)
+    check_eval_rows(rows, records, "random", n)
+    returns = np.concatenate([h.rewards for h in records])
+    se = returns.std() / np.sqrt(returns.size)
+    assert abs(returns.mean()) < 4 * se
+    win, loss = (returns > 0).mean(), (returns < 0).mean()
+    assert abs(win - loss) < 4 * np.sqrt((win + loss) / returns.size)
+    for r in rows:
+        for p in ("avg", "br"):
+            w, l = r[f"win_rate_{p}_vs_random"], r[f"loss_rate_{p}_vs_random"]
+            assert abs(w - l) < 5 * np.sqrt((w + l) / n)
+            assert abs(r[f"avg_return_{p}_vs_random"]) < 5 * returns.std() / np.sqrt(n)
+            assert r[f"win_rate_decided_{p}_vs_random"] == pytest.approx(0.5, abs=0.06)
+
+
+def tiny_rebel_checkpoint(game_name, path):
+    """A ReBeL value network file (random weights, 2 CFR iterations)."""
+    from bluffjax.examples.holdem_rebel.agent import save_checkpoint
+    from bluffjax.examples.holdem_rebel.cards import NUM_HANDS
+    from bluffjax.examples.holdem_rebel.game import PUBLIC_DIM, make_game
+    from bluffjax.examples.holdem_rebel.solver import ValueNetwork
+
+    game = make_game(game_name)
+    params = ValueNetwork(16, 1).init(KEY, jnp.zeros((PUBLIC_DIM,)), jnp.zeros((2, NUM_HANDS)))
+    return save_checkpoint(
+        str(path), params,
+        {"game": game.name, "max_raises": game.max_raises, "value_hidden_dim": 16,
+         "value_num_layers": 1, "cfr_iters": 2, "samples": 0, "seed": 0},
+    )
+
+
+@pytest.mark.parametrize("name", ["hul_ppo_nfsp", "hunl_pqn_nfsp"])
+def test_eval_against_rebel(name, monkeypatch, tmp_path):
+    """compare_mode checkpoint with a ReBeL value network: compare_episodes
+    complete hands per policy against the searching opponent."""
+    from bluffjax.examples.run_utils import read_results
+
+    mod = _module(name)
+    rebel_path = tiny_rebel_checkpoint(name.split("_")[0], tmp_path / "rebel" / "value_net.msgpack")
+    config = tiny_config(
+        name, tmp_path, num_update_steps=1, compare_mode="checkpoint",
+        compare_network_type="rebel", compare_with=rebel_path, compare_episodes=3,
+        compare_solve_chunk=2,
+    )
+    records = spy_play_hands(mod, monkeypatch)
+    run_dir, _ = run(mod, config, monkeypatch, seeds=1)
+    (row,) = read_results(run_dir)
+    assert {k for k in row if "_vs_" in k or k.startswith("eval_")} == eval_names("baseline")
+    assert len(records) == 2
+    check_eval_hands(records, 3)
+    check_eval_rows([row], records, "baseline", 3)
 
 
 # =============================================================================
@@ -313,10 +517,6 @@ def test_eval_nfsp_reads_the_run_directory(name, monkeypatch, tmp_path):
     import json
 
     from bluffjax.examples.holdem_rebel import eval_nfsp
-    from bluffjax.examples.holdem_rebel.agent import save_checkpoint
-    from bluffjax.examples.holdem_rebel.cards import NUM_HANDS
-    from bluffjax.examples.holdem_rebel.game import PUBLIC_DIM, make_game
-    from bluffjax.examples.holdem_rebel.solver import ValueNetwork
 
     mod = _module(name)
     config = tiny_config(name, tmp_path, num_update_steps=2, compare=False)
@@ -325,12 +525,8 @@ def test_eval_nfsp_reads_the_run_directory(name, monkeypatch, tmp_path):
         run_dir, 2, full.half,
         mod.Checkpoint(full.avg_train_state.params, full.br_train_state.params),
     )
-    game = make_game(name.split("_")[0])
-    params = ValueNetwork(16, 1).init(KEY, jnp.zeros((PUBLIC_DIM,)), jnp.zeros((2, NUM_HANDS)))
-    rebel_path = save_checkpoint(
-        str(tmp_path / "rebel" / "full" / "value_net.msgpack"), params,
-        {"game": game.name, "max_raises": game.max_raises, "value_hidden_dim": 16,
-         "value_num_layers": 1, "cfr_iters": 2, "samples": 0, "seed": 0},
+    rebel_path = tiny_rebel_checkpoint(
+        name.split("_")[0], tmp_path / "rebel" / "full" / "value_net.msgpack"
     )
     for stage in ("half", "full"):
         eval_nfsp.main(run_dir, rebel_path, 2, 2, stage)
