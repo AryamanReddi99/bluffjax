@@ -722,7 +722,7 @@
   GAMES.texas_limit_holdem = {
     title: "Limit Hold'em", who: "You vs 1 bot · heads-up", blurb: "Two hole cards, five on the board, fixed bet sizes.",
     art: () => card52(0) + card52(39) + `<span style="width:8px"></span>` + card52(12) + card52(25) + card52(51),
-    rules: `<p>Blinds 1/2. Bets are 2 before the turn and 4 from the turn on, four raises a round at most.</p><p>Best five cards from your two plus the five on the board.</p>`,
+    rules: `<p>Blinds 1/2. Bets are 2 before the turn and 4 from the turn on, four raises a round at most.</p><p>The small blind acts first before the flop, the big blind first on the flop, turn and river.</p><p>Best five cards from your two plus the five on the board.</p>`,
     labels(S) { return LIMIT_LABELS(S.stage[0] >= 2 ? 4 : 2); },
     render: holdemRender,
     controls(S, av) { return labelButtons(GAMES.texas_limit_holdem.labels(S), av); },
@@ -732,7 +732,7 @@
   GAMES.texas_nolimit_holdem = {
     title: "No-Limit Hold'em", who: "You vs 1 bot · 100 chips", blurb: "Two hole cards, five on the board, and any bet up to your stack.",
     art: () => card52(0) + card52(13) + `<span style="width:8px"></span>` + `<span class="pill red">All in</span>`,
-    rules: `<p>Blinds 1/2, stacks of 100. Raise half the pot, the pot, or go all in.</p><p>Best five cards from your two plus the five on the board.</p>`,
+    rules: `<p>Blinds 1/2, stacks of 100. Raise half the pot, the pot, or go all in.</p><p>The small blind acts first before the flop, the big blind first on the flop, turn and river.</p><p>Best five cards from your two plus the five on the board.</p>`,
     labels(S) { return NL_LABELS(S, S.current_player_idx[0]); },
     render: holdemRender,
     controls(S, av) { return labelButtons(GAMES.texas_nolimit_holdem.labels(S), av); },

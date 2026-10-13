@@ -4,7 +4,9 @@ Behaviour metrics of No-Limit Hold'em (texas_nolimit_holdem), from env steps.
 Env actions: 0 check/call, 1 raise half pot, 2 raise pot, 3 all-in, 4 fold
 (a "half-pot raise" puts floor(pot / 2) chips in, a "pot raise" the pot,
 both counting the chips to call). Every stack starts at init_chips; the env
-deals the whole board in advance.
+deals the whole board in advance. The env's turn order is the standard one
+(heads-up the small blind acts first preflop and the big blind first on the
+flop, turn and river); none of the metrics below depends on it.
 
 Every count of a hand is credited at the step where the hand ends (see
 bluffjax.metrics._holdem), to the player it describes; every rate below is

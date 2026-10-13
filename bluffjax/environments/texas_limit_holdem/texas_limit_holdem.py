@@ -1,5 +1,25 @@
 """
 Texas Limit Hold'em environment.
+
+One hand of limit hold'em with blinds of 1 and 2. The small blind is drawn at
+random every hand and the big blind is the next seat; the whole board is dealt
+in advance and shown street by street.
+
+Turn order (the standard rules):
+- Heads-up the small blind is the button: it acts first preflop and last on
+  every later street, so the big blind acts first on the flop, turn and river.
+- With 3 or more players the button sits just before the small blind.
+  Preflop the first player after the big blind acts first; on the flop, turn
+  and river the first player after the button still in the hand acts first
+  (the small blind, or the next player still in after it).
+Players then act in seat order, skipping those who folded.
+
+Betting: actions are call, raise (a bet when nothing is to call), fold and
+check. Bets and raises are 2 chips preflop and on the flop and 4 on the turn
+and river, at most 4 raises a round (the blinds don't count). A round ends
+once every player still in has called or checked since the last raise. The
+hand ends when one player is left or after the river; rewards are chips won
+minus chips put in, ties split the pot.
 """
 
 import jax
@@ -55,6 +75,12 @@ class TexasLimitHoldem(AECEnv):
 
     def action_space(self) -> Discrete:
         return Discrete(self.num_actions)
+
+    def _button_idx(self, small_blind_idx: IntArray) -> IntArray:
+        """Heads-up the small blind is the button; otherwise the player before it."""
+        if self.num_agents == 2:
+            return small_blind_idx
+        return (small_blind_idx - 1) % self.num_agents
 
     @partial(jax.jit, static_argnums=(0,))
     def obs_from_state(self, state: TexasLimitHoldEmState) -> FloatArray:
@@ -168,6 +194,8 @@ class TexasLimitHoldem(AECEnv):
         chips_in = jnp.zeros(self.num_agents)
         chips_in = chips_in.at[small_blind_agent].set(self.small_blind)
         chips_in = chips_in.at[big_blind_agent].set(self.big_blind)
+        # Preflop the player after the big blind acts first (heads-up: the
+        # small blind).
         current_player_idx = (small_blind_agent + 2) % self.num_agents
 
         # Initialize raise_nums: track raises per betting round (4 rounds)
@@ -297,14 +325,14 @@ class TexasLimitHoldem(AECEnv):
             return final_idx
 
         # Determine next player
-        # If round is over, start new round from small blind (or first non-folded after small blind)
+        # If round is over, the new round starts with the first non-folded
+        # player after the button (heads-up: the big blind; with 3 or more
+        # players: the small blind or the next non-folded player after it).
         # Otherwise, advance to next non-folded player
         next_player_after_action = get_next_player(current_player, new_folded)
 
-        next_player_new_round = jnp.where(
-            ~new_folded[state.small_blind_idx],
-            state.small_blind_idx,
-            get_next_player(state.small_blind_idx, new_folded),
+        next_player_new_round = get_next_player(
+            self._button_idx(state.small_blind_idx), new_folded
         )
 
         new_current_player_idx = jnp.where(

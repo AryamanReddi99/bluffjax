@@ -15,8 +15,8 @@ Algorithm (paper Algorithm 2 with the released Liar's Dice code's details)
     PBS: public state (street, board, contributions, all-in) plus each
     player's normalised reach over the 1,326 hands; the joint deal is
     proportional to x_SB(h) x_BB(h') for hands sharing no card with each other
-    or the board. Players are indexed by position (the small blind acts first
-    on every street, as in the envs).
+    or the board. Players are indexed by position (as in the envs, the small
+    blind acts first preflop and the big blind on the flop, turn and river).
     Subgames run to the end of the current betting round. Leaves are folds,
     showdowns (river, or both all-in on the river) and end-of-round PBSs,
     valued by the network. They are solved with alternating-update Linear
