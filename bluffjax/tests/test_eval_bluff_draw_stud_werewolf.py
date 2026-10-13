@@ -114,11 +114,9 @@ def test_plays_exactly_num_games_complete_games(game, algo):
         np.testing.assert_array_equal(result.win + result.loss + result.draw, 1.0)
 
 
-@pytest.mark.parametrize("game,algo", SCRIPTS)
+@pytest.mark.parametrize("game,algo", [s for s in SCRIPTS if s[0] != "werewolf"])
 def test_learner_seat_rotates(game, algo):
-    kwargs = dict(ENV_KWARGS[game])
-    if game != "werewolf":
-        kwargs["num_agents"] = 3
+    kwargs = dict(ENV_KWARGS[game], num_agents=3)
     env = make(game, **kwargs)
     n = env.num_agents
     play = getattr(_module(game, algo), _evaluator_name(game))
@@ -258,10 +256,11 @@ def test_training_run_evaluates_every_update(game, algo, monkeypatch):
             counting_env(env), learner, learner_params, baseline, baseline_params,
             num_games, rng,
         )
+        # Werewolf: the learner's team (1 = the werewolves) instead of a seat
         jax.debug.callback(
             lambda ret, seat: ran.append((np.asarray(ret), np.asarray(seat))),
             result.ret,
-            result.seat,
+            result.werewolf if game == "werewolf" else result.seat,
         )
         return result
 
@@ -273,7 +272,7 @@ def test_training_run_evaluates_every_update(game, algo, monkeypatch):
 
     assert traced and set(traced) == {E}
     assert len(ran) == 2 * U  # the average policy and the BR, every update
-    n = ENV_KWARGS[game]["num_agents"]
+    n = 2 if game == "werewolf" else ENV_KWARGS[game]["num_agents"]  # teams or seats
     for ret, seat in ran:
         np.testing.assert_array_equal(ret, np.ones(E))  # E games, each ended once
         np.testing.assert_array_equal(seat, (seat[0] + np.arange(E)) % n)
@@ -286,3 +285,31 @@ def test_training_run_evaluates_every_update(game, algo, monkeypatch):
             total = sum(r[f"{x}_rate_{name}"] for x in ("win", "loss", "draw"))
             assert total == pytest.approx(1.0, abs=1e-6)
             assert r[f"avg_episode_length_{name}"] >= 1.0
+
+
+@pytest.mark.parametrize("algo", ["ppo", "pqn"])
+def test_werewolf_learner_plays_one_team(algo):
+    """Werewolf: the learner controls every player of one team, the werewolves
+    and the humans alternating over the games from a random start."""
+    from bluffjax.environments.werewolf.werewolf import DOCTOR, SEER, VILLAGER, WEREWOLF
+
+    mod = _module("werewolf", algo)
+    env = make("werewolf", **ENV_KWARGS["werewolf"])
+    sides = jax.jit(
+        jax.vmap(
+            lambda k: mod.play_eval_games(
+                env, random_policy, None, random_policy, None, 10, k
+            ).werewolf
+        )
+    )(jax.random.split(KEY, 40))
+    sides = np.asarray(sides)
+    for row in sides:
+        np.testing.assert_array_equal(row, (row[0] + np.arange(10)) % 2)
+    assert set(sides[:, 0]) == {0.0, 1.0}  # random start
+    roles = jnp.array([WEREWOLF, VILLAGER, SEER, WEREWOLF, DOCTOR, VILLAGER])
+    np.testing.assert_array_equal(
+        mod.learner_team_mask(roles, jnp.bool_(True)), [1, 0, 0, 1, 0, 0]
+    )
+    np.testing.assert_array_equal(
+        mod.learner_team_mask(roles, jnp.bool_(False)), [0, 1, 1, 0, 1, 1]
+    )

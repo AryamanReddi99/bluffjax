@@ -20,11 +20,11 @@ and holds its role (and, for a werewolf, its teammates).
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
 - Evaluation: every compare_interval updates and after the last one, the
-  average policy and the BR each play compare_episodes complete games against
-  the opponent (uniformly random legal play or a checkpoint in every other
-  seat), with the learner's seat rotating over the games from a random seat
-  (see play_eval_games). Roles are dealt at random, so the learner plays both
-  teams. Logged per policy: win, loss and draw (no winner at the horizon)
+  average policy and the BR each play compare_episodes complete games, the
+  learner's policy controlling every player of one team and the opponent
+  (uniformly random legal play or a checkpoint) every player of the other;
+  the learner's team alternates over the games from a random one, so it plays
+  the werewolves in half of them (see play_eval_games). Logged per policy: win, loss and draw (no winner at the horizon)
   rates, the win rate of the decided games, the return and the game length,
   and the win rates by the learner's team, as
   {stat}_{avg|br}_vs_{random|baseline}.
@@ -326,10 +326,15 @@ class EvalResult(NamedTuple):
     win: FloatArray  # the learner's team won
     loss: FloatArray  # the other team won
     draw: FloatArray  # the env horizon ended the game without a winner
-    ret: FloatArray  # the learner's total reward (+10, -10 or 0)
+    ret: FloatArray  # the learner's team's total reward (+10, -10 or 0)
     length: FloatArray  # env steps
-    seat: IntArray  # the learner's seat
-    werewolf: FloatArray  # the learner was dealt a werewolf
+    werewolf: FloatArray  # the learner played the werewolves (else the humans)
+
+
+def learner_team_mask(roles: IntArray, werewolf_team: BoolArray) -> BoolArray:
+    """(num_agents,) the players the learner controls: every werewolf if it
+    plays the werewolves, every other player if it plays the humans."""
+    return (roles == WEREWOLF) == werewolf_team
 
 
 def play_eval_games(
@@ -341,47 +346,48 @@ def play_eval_games(
     num_games: int,
     rng: PRNGKeyArray,
 ) -> EvalResult:
-    """Plays num_games complete games in parallel, the learner in one seat and
-    the baseline in all the other seats (its teammates' included).
+    """Plays num_games complete games in parallel, the learner controlling
+    every player of one team and the baseline every player of the other.
 
-    The learner's seat rotates over the games, starting from a random seat
-    (game g: seat (offset + g) % num_agents). Roles, the first speaker and
-    the night order are dealt at random at reset, so the learner plays both
-    teams (a werewolf in num_werewolves / num_agents of the games on
-    average) and the results are also split by its team. Every game is played
-    with env.step_env (no auto-reset) until a team has won or the env horizon
-    ends it without a winner. The env pays +10 to the winning team and -10 to
-    the losing one when the game ends, so the learner's return is a win if
-    positive, a loss if negative and a draw (no winner) if zero.
+    The learner's team alternates over the games, starting from a random one
+    (game g: the werewolves if (offset + g) % 2 == 0, else the humans), so it
+    plays each team in half of the games. Roles, the first speaker and the
+    night order are dealt at random at reset, and the learner's policy acts
+    for whichever players hold its team's roles. Every game is played with
+    env.step_env (no auto-reset) until a team has won or the env horizon ends
+    it without a winner. The env pays +10 to every player of the winning team
+    and -10 to every player of the losing one when the game ends, so the
+    learner's return (its team's) is a win if positive, a loss if negative
+    and a draw (no winner) if zero.
     """
-    num_agents = env.num_agents
-    rng_seat, rng_games = jax.random.split(rng)
-    offset = jax.random.randint(rng_seat, (), 0, num_agents)
-    seats = (offset + jnp.arange(num_games)) % num_agents
+    rng_team, rng_games = jax.random.split(rng)
+    offset = jax.random.randint(rng_team, (), 0, 2)
+    werewolf_team = (offset + jnp.arange(num_games)) % 2 == 0
 
-    def one_game(rng_game: PRNGKeyArray, seat: IntArray):
+    def one_game(rng_game: PRNGKeyArray, werewolf_team: BoolArray):
         rng_reset, rng_play = jax.random.split(rng_game)
         state, obs = env.reset(rng_reset)
-        is_werewolf = state.roles[seat] == WEREWOLF  # roles are fixed at reset
+        on_team = learner_team_mask(state.roles, werewolf_team)  # roles fixed at reset
+        member = jnp.argmax(on_team)  # a player of the learner's team
 
         def body(carry):
             state_s, obs_s, _, ret, length, rng_s = carry
             rng_s, rng_learner, rng_baseline, rng_step = jax.random.split(rng_s, 4)
             action_mask = env.get_avail_actions(state_s)
             action = jnp.where(
-                state_s.current_player_idx == seat,
+                on_team[state_s.current_player_idx],
                 learner(learner_params, obs_s, action_mask, rng_learner),
                 baseline(baseline_params, obs_s, action_mask, rng_baseline),
             )
             state_s, obs_s, reward, _, done, _ = env.step_env(rng_step, state_s, action)
-            return state_s, obs_s, done, ret + reward[seat], length + 1, rng_s
+            return state_s, obs_s, done, ret + reward[member], length + 1, rng_s
 
         init = (state, obs, jnp.bool_(False), jnp.float32(0.0), jnp.int32(0), rng_play)
         _, _, _, ret, length, _ = lax.while_loop(lambda c: ~c[2], body, init)
-        return ret, length, is_werewolf
+        return ret, length
 
-    ret, length, is_werewolf = jax.vmap(one_game)(
-        jax.random.split(rng_games, num_games), seats
+    ret, length = jax.vmap(one_game)(
+        jax.random.split(rng_games, num_games), werewolf_team
     )
     return EvalResult(
         win=(ret > 0).astype(jnp.float32),
@@ -389,15 +395,15 @@ def play_eval_games(
         draw=(ret == 0).astype(jnp.float32),
         ret=ret,
         length=length.astype(jnp.float32),
-        seat=seats,
-        werewolf=is_werewolf.astype(jnp.float32),
+        werewolf=werewolf_team.astype(jnp.float32),
     )
 
 
 def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
     """Means over the evaluation games; win_rate_decided excludes draws, and
     win_rate_as_werewolf / win_rate_as_human are the win rates of the games
-    in which the learner was on that team."""
+    in which the learner played that team (learner_werewolf_frac: the share
+    of games it played the werewolves, 1/2 for an even number of games)."""
     decided = result.win.sum() + result.loss.sum()
     werewolf, human = result.werewolf, 1.0 - result.werewolf
     return {

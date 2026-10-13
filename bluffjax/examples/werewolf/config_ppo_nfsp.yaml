@@ -34,8 +34,9 @@ env_kwargs:
   horizon: 200
 
 # comparison: the average and best-response policies each play compare_episodes
-# complete games with the learner in one seat (rotating over the games) and
-# the opponent in all the other seats; results overall and by the learner's team
+# complete games, the learner controlling every player of one team (werewolves
+# and humans alternating) and the opponent the other team; results overall and
+# by the learner's team
 compare: true
 compare_mode: random  # "random" or "checkpoint"
 # checkpoint opponent: a .msgpack file written by save_checkpoints of
