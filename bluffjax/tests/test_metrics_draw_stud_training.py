@@ -57,7 +57,7 @@ def tiny_config(name: str, **extra) -> dict:
         | (dict(init_chips=100) if game == "five_card_draw" else {}),
         compare=False, compare_mode="random", compare_with="",
         compare_network_type="actor_critic" if ppo else "actor",
-        compare_episodes=4, compare_steps=4, compare_interval=2,
+        compare_episodes=4, compare_interval=2,
         project="bluffjax", job_type=name, wandb=False, save_checkpoints=True,
         num_update_steps=5,
     )
@@ -187,6 +187,26 @@ def _check_game_metrics(name: str, records: list[dict]) -> None:
             assert sum(row[key] for row in records) > 0
 
 
+# logged per policy as {stat}_{avg|br}_vs_{random|baseline}
+EVAL_STATS = (
+    "win_rate", "loss_rate", "draw_rate", "win_rate_decided", "avg_return",
+    "avg_episode_length",
+)
+
+
+def _check_eval_metrics(row: dict, opponent: str) -> None:
+    """The evaluation metrics of both policies, and nothing else with _vs_."""
+    names = [f"{policy}_vs_{opponent}" for policy in ("avg", "br")]
+    assert {k for k in row if "_vs_" in k} == {
+        f"{stat}_{name}" for stat in EVAL_STATS for name in names
+    }
+    for name in names:
+        total = sum(row[f"{x}_rate_{name}"] for x in ("win", "loss", "draw"))
+        assert total == pytest.approx(1.0, abs=1e-6)
+        assert 0.0 <= row[f"win_rate_decided_{name}"] <= 1.0
+        assert row[f"avg_episode_length_{name}"] >= 1.0
+
+
 def _params_close(a, b, atol=1e-6):
     leaves = zip(jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b))
     return all(np.allclose(np.asarray(x), np.asarray(y), rtol=0, atol=atol) for x, y in leaves)
@@ -223,6 +243,9 @@ def test_results_log_half_checkpoint_and_round_trip(monkeypatch, tmp_path, name)
         # evaluation metrics only where an evaluation ran
         evaluated = [any("_vs_random" in k for k in r) for r in rows]
         assert evaluated == [u % 2 == 0 or u == U - 1 for u in range(U)]
+        for r in rows:
+            if any("_vs_" in k for k in r):
+                _check_eval_metrics(r, "random")
     _check_game_metrics(name, records)
 
     # the half checkpoint is the state of the run after exactly 2 updates
@@ -306,7 +329,7 @@ def test_results_log_half_checkpoint_and_round_trip(monkeypatch, tmp_path, name)
     )
     jax.block_until_ready(jax.jit(mod.make_train(eval_config))(KEY, jnp.int32(0)))
     jax.effects_barrier()
-    assert any("_vs_baseline" in k for k in log.rows[0])
+    _check_eval_metrics(log.rows[0], "baseline")
     with pytest.raises(ValueError):
         mod.make_train(dict(eval_config, compare_network_type="q_network"))
 
@@ -342,6 +365,11 @@ def test_main_writes_the_run_directory(monkeypatch, tmp_path, name):
         (i, u) for i in range(2) for u in range(3)
     ]
     _check_game_metrics(name, records)
+    for r in records:  # evaluated every compare_interval (2) updates and after the last
+        evaluated = any("_vs_" in k for k in r)
+        assert evaluated == (r["update_step"] in (0, 2))
+        if evaluated:
+            _check_eval_metrics(r, "random")
     for stage in ("half", "full"):
         assert sorted(os.listdir(os.path.join(run_dir, stage))) == [
             "avg_policy_0.msgpack", "avg_policy_1.msgpack", "br_0.msgpack", "br_1.msgpack"

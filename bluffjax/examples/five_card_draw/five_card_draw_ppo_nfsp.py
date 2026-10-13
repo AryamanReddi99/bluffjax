@@ -17,11 +17,14 @@ average-policy network.
 - Average policy: every BR decision (obs, action) is added to a reservoir
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
-- Evaluation (compare): the average and BR policies each play compare_episodes
-  hands against the baseline (uniform random legal actions, or a checkpoint)
-  in every other seat. The learner's seat rotates over the hands (hand h: seat
-  h % num_agents), so every seat is used equally. Runs every compare_interval
-  updates and after the last one; chips per hand, env units.
+- Evaluation (compare): every compare_interval updates and after the last
+  one, the average and BR policies each play compare_episodes complete hands
+  against the baseline (uniform random legal actions, or a checkpoint) in
+  every other seat, with the learner's seat rotating over the hands from a
+  random seat (see play_eval_games). Logged per policy: win, loss and draw
+  rates (net chips positive, negative, zero), the win rate of the decided
+  hands, chips per hand (env units) and hand length, as
+  {stat}_{avg|br}_vs_{random|baseline}.
 
 Units: the env pays raw chips per hand (stacks init_chips, blinds 1/2), and
 training and logging use them as they are.
@@ -82,7 +85,7 @@ from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
 # results.jsonl of the run (and wandb), created in main()
 RESULTS_LOG: ResultsLog | None = None
-# EVALUATIONS[seed] = [(env_steps, {metric name: chips per hand}), ...]
+# EVALUATIONS[seed] = [(env_steps, {metric: value}), ...]
 EVALUATIONS: dict[int, list[tuple[int, dict[str, float]]]] = {}
 
 
@@ -278,6 +281,122 @@ def reservoir_append(
     )
 
 
+# =============================================================================
+# Evaluation against a baseline
+# =============================================================================
+
+# act(params, obs, action_mask, rng) -> action, for one observation
+Policy = Callable[[Any, FloatArray, BoolArray, PRNGKeyArray], IntArray]
+
+
+class EvalResult(NamedTuple):
+    """Per hand, from the learner's point of view."""
+
+    win: FloatArray  # the learner won chips (its return is positive)
+    loss: FloatArray  # the learner lost chips
+    draw: FloatArray  # neither (e.g. a split pot that returned its stake)
+    ret: FloatArray  # the learner's net chips of the hand
+    length: FloatArray  # env steps
+    seat: IntArray  # the learner's seat
+
+
+def play_eval_games(
+    env: Any,
+    learner: Policy,
+    learner_params: Any,
+    baseline: Policy,
+    baseline_params: Any,
+    num_games: int,
+    rng: PRNGKeyArray,
+) -> EvalResult:
+    """Plays num_games complete hands in parallel, the learner in one seat and
+    the baseline in every other seat.
+
+    The learner's seat rotates over the hands, starting from a random seat
+    (hand g: seat (offset + g) % num_agents), so every seat is used equally
+    up to one hand (and the env draws the small blind at random every hand).
+    Every hand is played with env.step_env (no auto-reset) until it is over.
+    The env pays the result of a hand when it ends, so the learner's return
+    is its net chips: a win if positive, a loss if negative and a draw if
+    zero.
+    """
+    num_agents = env.num_agents
+    rng_seat, rng_games = jax.random.split(rng)
+    offset = jax.random.randint(rng_seat, (), 0, num_agents)
+    seats = (offset + jnp.arange(num_games)) % num_agents
+
+    def one_hand(rng_hand: PRNGKeyArray, seat: IntArray):
+        rng_reset, rng_play = jax.random.split(rng_hand)
+        state, obs = env.reset(rng_reset)
+
+        def body(carry):
+            state, obs, _, ret, length, rng_s = carry
+            rng_s, rng_learner, rng_baseline, rng_step = jax.random.split(rng_s, 4)
+            action_mask = env.get_avail_actions(state)
+            action = jnp.where(
+                state.current_player_idx == seat,
+                learner(learner_params, obs, action_mask, rng_learner),
+                baseline(baseline_params, obs, action_mask, rng_baseline),
+            )
+            state, obs, reward, _, done, _ = env.step_env(rng_step, state, action)
+            return state, obs, done, ret + reward[seat], length + 1, rng_s
+
+        init = (state, obs, jnp.bool_(False), jnp.float32(0.0), jnp.int32(0), rng_play)
+        _, _, _, ret, length, _ = lax.while_loop(lambda c: ~c[2], body, init)
+        return ret, length
+
+    ret, length = jax.vmap(one_hand)(jax.random.split(rng_games, num_games), seats)
+    return EvalResult(
+        win=(ret > 0).astype(jnp.float32),
+        loss=(ret < 0).astype(jnp.float32),
+        draw=(ret == 0).astype(jnp.float32),
+        ret=ret,
+        length=length.astype(jnp.float32),
+        seat=seats,
+    )
+
+
+def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
+    """Means over the evaluation hands; win_rate_decided excludes draws."""
+    decided = result.win.sum() + result.loss.sum()
+    return {
+        f"win_rate_{name}": result.win.mean(),
+        f"loss_rate_{name}": result.loss.mean(),
+        f"draw_rate_{name}": result.draw.mean(),
+        f"win_rate_decided_{name}": result.win.sum() / jnp.maximum(decided, 1.0),
+        f"avg_return_{name}": result.ret.mean(),
+        f"avg_episode_length_{name}": result.length.mean(),
+    }
+
+
+def format_eval(evals: dict[str, float]) -> str:
+    """One line for the policies evaluated, from eval_metrics' metrics."""
+    names = sorted(
+        k[len("win_rate_"):]
+        for k in evals
+        if k.startswith("win_rate_") and not k.startswith("win_rate_decided_")
+    )
+    return "; ".join(
+        f"{name} W/L/D {evals[f'win_rate_{name}']:.3f}/"
+        f"{evals[f'loss_rate_{name}']:.3f}/{evals[f'draw_rate_{name}']:.3f} "
+        f"(win rate of decided hands {evals[f'win_rate_decided_{name}']:.3f}), "
+        f"chips per hand {evals[f'avg_return_{name}']:+.3f}, "
+        f"length {evals[f'avg_episode_length_{name}']:.1f}"
+        for name in names
+    )
+
+
+def print_eval_summary() -> None:
+    """The last evaluation of every seed and the mean over seeds."""
+    finals = {seed: evals[-1][1] for seed, evals in sorted(EVALUATIONS.items())}
+    for seed, evals in finals.items():
+        print(f"final evaluation seed {seed}: {format_eval(evals)}")
+    if finals:
+        keys = next(iter(finals.values())).keys()
+        mean = {k: float(np.mean([e[k] for e in finals.values()])) for k in keys}
+        print(f"final evaluation, mean of {len(finals)} seed(s): {format_eval(mean)}")
+
+
 def make_train(config: dict) -> Callable[..., RunnerState]:
     env = make("five_card_draw", **config["env_kwargs"])
     action_dim = env.num_actions
@@ -332,32 +451,27 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         frac = 1.0 - count / config["num_gradient_steps"]
         return config["lr"] * frac
 
-    eval_names = (
-        ("avg_return_avg_vs_random", "avg_return_br_vs_random")
-        if compare_against_random
-        else ("avg_return_avg_vs_baseline", "avg_return_br_vs_baseline")
-    )
+    opponent = "random" if compare_against_random else "baseline"
 
     def logging_callback(seed_val, metric_dict, evaluated) -> None:
-        """Logs the metrics; evaluation metrics only when an evaluation ran."""
+        """Logs the metrics; the evaluation ones (keys with "_vs_") only when
+        an evaluation ran."""
         seed_i = int(seed_val)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
+        eval_keys = [k for k in metrics if "_vs_" in k]
         if bool(evaluated):
             update = int(metrics["update_step"])
             env_steps = int(metrics["env_steps"])
-            result = {name: float(metrics[name]) for name in eval_names}
-            EVALUATIONS.setdefault(seed_i, []).append((env_steps, result))
+            evals = {k: float(metrics[k]) for k in eval_keys}
+            EVALUATIONS.setdefault(seed_i, []).append((env_steps, evals))
             print(
                 f"seed {seed_i} update {update + 1}/{last_update + 1} "
-                f"({env_steps} env steps): chips per hand vs "
-                f"{'random' if compare_against_random else 'baseline'}: "
-                f"average policy {result[eval_names[0]]:+.3f}, "
-                f"BR {result[eval_names[1]]:+.3f}",
+                f"({env_steps} env steps): {format_eval(evals)}",
                 flush=True,
             )
         else:
-            for name in eval_names + ("avg_eval_episode_length",):
-                metrics.pop(name, None)
+            for k in eval_keys:
+                del metrics[k]
         RESULTS_LOG.log(metrics, seed_i)
 
     def init_sl_buffer(obs_dim: int) -> SLBufferState:
@@ -417,54 +531,27 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             baseline_network, params, obs, mask, rng
         )
 
-    def play_eval_hands(
-        rng: PRNGKeyArray, learner_params: Any, num_hands: int
-    ) -> tuple[FloatArray, FloatArray]:
-        """num_hands hands in parallel; in hand h the learner sits in seat
-        h % num_agents and the baseline in every other seat. Returns the
-        learner's chips and the length of every hand."""
-
-        def one_hand(rng_hand, seat):
-            rng_hand, rng_reset = jax.random.split(rng_hand)
-            state, obs = env.reset(rng_reset)
-
-            def body(carry):
-                state, obs, rng_s, _, _, length = carry
-                rng_s, rng_learner, rng_base, rng_step = jax.random.split(rng_s, 4)
-                mask = env.get_avail_actions(state)
-                action = jnp.where(
-                    state.current_player_idx == seat,
-                    learner_act(learner_params, obs, mask, rng_learner),
-                    baseline_act(baseline_params, obs, mask, rng_base),
-                )
-                state, obs, reward, _, done, _ = env.step_env(rng_step, state, action)
-                return state, obs, rng_s, done, reward, length + 1
-
-            init = (
-                state,
-                obs,
-                rng_hand,
-                jnp.bool_(False),
-                jnp.zeros(num_agents),
-                jnp.int32(0),
-            )
-            _, _, _, _, reward, length = lax.while_loop(lambda c: ~c[3], body, init)
-            return reward[seat], length
-
-        seats = jnp.arange(num_hands) % num_agents
-        return jax.vmap(one_hand)(jax.random.split(rng, num_hands), seats)
-
     def run_compare_eval(
         rng: PRNGKeyArray, avg_params: Any, br_params: Any
-    ) -> tuple[FloatArray, FloatArray, FloatArray]:
-        """Chips per hand of the average and best-response policies."""
+    ) -> dict[str, FloatArray]:
+        """Evaluation metrics of the average policy and the BR."""
         rng_avg, rng_br = jax.random.split(rng)
-        avg_chips, avg_len = play_eval_hands(
-            rng_avg, avg_params, config["compare_episodes"]
-        )
-        br_chips, br_len = play_eval_hands(rng_br, br_params, config["compare_episodes"])
-        eval_len = (avg_len.mean() + br_len.mean()) / 2
-        return avg_chips.mean(), br_chips.mean(), eval_len
+        metrics = {}
+        for name, act, params, rng_eval in (
+            ("avg", learner_act, avg_params, rng_avg),
+            ("br", learner_act, br_params, rng_br),
+        ):
+            result = play_eval_games(
+                env,
+                act,
+                params,
+                baseline_act,
+                baseline_params,
+                config["compare_episodes"],
+                rng_eval,
+            )
+            metrics.update(eval_metrics(f"{name}_vs_{opponent}", result))
+        return metrics
 
     def train(
         rng: PRNGKeyArray, seed: int, num_updates: int | None = None
@@ -797,17 +884,29 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             avg_train_state = sl_state.train_state
             sl_loss_info = jax.tree_util.tree_map(lambda x: x.mean(), sl_loss_info)
 
+            # Evaluate every compare_interval updates and after the last one.
             update = runner_state.update_step
             should_compare = compare_enabled & (
                 (update % config["compare_interval"] == 0) | (update == last_update)
             )
-            avg_chips, br_chips, eval_len = lax.cond(
-                should_compare,
-                lambda: run_compare_eval(
-                    rng_compare, avg_train_state.params, br_train_state.params
-                ),
-                lambda: (jnp.float32(0.0), jnp.float32(0.0), jnp.float32(0.0)),
-            )
+            if compare_enabled:
+                eval_template = jax.eval_shape(
+                    run_compare_eval,
+                    rng_compare,
+                    avg_train_state.params,
+                    br_train_state.params,
+                )
+                compare_metrics = lax.cond(
+                    should_compare,
+                    lambda: run_compare_eval(
+                        rng_compare, avg_train_state.params, br_train_state.params
+                    ),
+                    lambda: jax.tree_util.tree_map(
+                        lambda x: jnp.zeros(x.shape, x.dtype), eval_template
+                    ),
+                )
+            else:
+                compare_metrics = {}
 
             # Self-play payoffs per finished hand in chips, split by the policy
             # the player followed in that hand. Against the mixed opponents
@@ -837,10 +936,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     if config["anneal_lr"]
                     else jnp.asarray(config["lr"])
                 ),
-                eval_names[0]: avg_chips,
-                eval_names[1]: br_chips,
-                "avg_eval_episode_length": eval_len,
             }
+            metric.update(compare_metrics)
             metric.update(ppo_loss_info)
             metric.update(sl_loss_info)
             # Game metrics of this rollout's decisions, by the policy the
@@ -944,19 +1041,6 @@ def save_checkpoints(
         ):
             save_seed_params(run_dir, stage, name, params, range(num_seeds))
     return run_dir
-
-
-def print_eval_summary() -> None:
-    """Last evaluation of every seed, and the mean over seeds."""
-    if not EVALUATIONS:
-        return
-    for name in EVALUATIONS[min(EVALUATIONS)][-1][1]:
-        finals = [EVALUATIONS[s][-1][1][name] for s in sorted(EVALUATIONS)]
-        values = " ".join(f"{v:+.3f}" for v in finals)
-        print(
-            f"final {name} (chips per hand): mean {np.mean(finals):+.3f} "
-            f"std {np.std(finals):.3f} over {len(finals)} seed(s): {values}"
-        )
 
 
 @hydra.main(version_base=None, config_path="./", config_name="config_ppo_nfsp")

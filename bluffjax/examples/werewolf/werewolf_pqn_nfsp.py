@@ -24,11 +24,15 @@ player to act and holds its role (and, for a werewolf, its teammates).
 - Average policy: every BR decision (obs, action) is added to a reservoir
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
-- Evaluation: compare_steps games against the opponent (uniformly random
-  legal play or a checkpoint in every other seat), game i with the learner in
-  seat i % num_agents. Roles are dealt at random, so the learner plays both
-  teams; win rates are reported overall and by the learner's team. The BR is
-  evaluated greedily.
+- Evaluation: every compare_interval updates and after the last one, the
+  average policy (sampled) and the greedy BR each play compare_episodes
+  complete games against the opponent (uniformly random legal play or a
+  checkpoint in every other seat), with the learner's seat rotating over the
+  games from a random seat (see play_eval_games). Roles are dealt at random,
+  so the learner plays both teams. Logged per policy: win, loss and draw (no
+  winner at the horizon) rates, the win rate of the decided games, the
+  return and the game length, and the win rates by the learner's team, as
+  {stat}_{avg|br}_vs_{random|baseline}.
 - Game metrics (bluffjax.metrics.werewolf: villager vote, elimination and
   accusation accuracy, seer information use, doctor save rate, votes received
   by werewolves and villagers) are counted at every rollout step and logged
@@ -314,57 +318,117 @@ def load_params(path: str, template: Any, what: str) -> Any:
     return serialization.from_state_dict(template, restored)
 
 
+# act(params, obs, action_mask, rng) -> action, for one observation
+Policy = Callable[[Any, FloatArray, BoolArray, PRNGKeyArray], IntArray]
+
+
+class EvalResult(NamedTuple):
+    """Per game, from the learner's point of view."""
+
+    win: FloatArray  # the learner's team won
+    loss: FloatArray  # the other team won
+    draw: FloatArray  # the env horizon ended the game without a winner
+    ret: FloatArray  # the learner's total reward (+10, -10 or 0)
+    length: FloatArray  # env steps
+    seat: IntArray  # the learner's seat
+    werewolf: FloatArray  # the learner was dealt a werewolf
+
+
 def play_eval_games(
     env: Any,
+    learner: Policy,
+    learner_params: Any,
+    baseline: Policy,
+    baseline_params: Any,
     num_games: int,
     rng: PRNGKeyArray,
-    learner_act: Callable,
-    learner_params: Any,
-    opponent_act: Callable,
-    opponent_params: Any,
-) -> dict[str, FloatArray]:
-    """num_games games in parallel, game i with the learner in seat
-    i % num_agents and the opponent in all the other seats.
+) -> EvalResult:
+    """Plays num_games complete games in parallel, the learner in one seat and
+    the baseline in all the other seats (its teammates' included).
 
-    act(params, obs, action_mask, rng) -> action. Roles and the first speaker
-    are dealt at random, so the learner plays both teams. Returns the learner's
-    win rate overall and by its team, the fraction of games in which it was a
-    werewolf, its mean return and the mean game length.
+    The learner's seat rotates over the games, starting from a random seat
+    (game g: seat (offset + g) % num_agents). Roles, the first speaker and
+    the night order are dealt at random at reset, so the learner plays both
+    teams (a werewolf in num_werewolves / num_agents of the games on
+    average) and the results are also split by its team. Every game is played
+    with env.step_env (no auto-reset) until a team has won or the env horizon
+    ends it without a winner. The env pays +10 to the winning team and -10 to
+    the losing one when the game ends, so the learner's return is a win if
+    positive, a loss if negative and a draw (no winner) if zero.
     """
-    seats = jnp.arange(num_games) % env.num_agents
+    num_agents = env.num_agents
+    rng_seat, rng_games = jax.random.split(rng)
+    offset = jax.random.randint(rng_seat, (), 0, num_agents)
+    seats = (offset + jnp.arange(num_games)) % num_agents
 
     def one_game(rng_game: PRNGKeyArray, seat: IntArray):
-        rng_game, rng_reset = jax.random.split(rng_game)
+        rng_reset, rng_play = jax.random.split(rng_game)
         state, obs = env.reset(rng_reset)
+        is_werewolf = state.roles[seat] == WEREWOLF  # roles are fixed at reset
 
         def body(carry):
-            state_s, obs_s, rng_s, _, ret, length = carry
-            rng_s, rng_l, rng_o, rng_step = jax.random.split(rng_s, 4)
+            state_s, obs_s, _, ret, length, rng_s = carry
+            rng_s, rng_learner, rng_baseline, rng_step = jax.random.split(rng_s, 4)
             action_mask = env.get_avail_actions(state_s)
             action = jnp.where(
                 state_s.current_player_idx == seat,
-                learner_act(learner_params, obs_s, action_mask, rng_l),
-                opponent_act(opponent_params, obs_s, action_mask, rng_o),
+                learner(learner_params, obs_s, action_mask, rng_learner),
+                baseline(baseline_params, obs_s, action_mask, rng_baseline),
             )
             state_s, obs_s, reward, _, done, _ = env.step_env(rng_step, state_s, action)
-            return state_s, obs_s, rng_s, done, ret + reward[seat], length + 1
+            return state_s, obs_s, done, ret + reward[seat], length + 1, rng_s
 
-        init = (state, obs, rng_game, jnp.bool_(False), jnp.float32(0), jnp.int32(0))
-        _, _, _, _, ret, length = lax.while_loop(lambda c: ~c[3], body, init)
-        return ret, length, state.roles[seat] == WEREWOLF
+        init = (state, obs, jnp.bool_(False), jnp.float32(0.0), jnp.int32(0), rng_play)
+        _, _, _, ret, length, _ = lax.while_loop(lambda c: ~c[2], body, init)
+        return ret, length, is_werewolf
 
-    ret, length, is_ww = jax.vmap(one_game)(jax.random.split(rng, num_games), seats)
-    won = (ret > 0).astype(jnp.float32)
-    ww = is_ww.astype(jnp.float32)
-    human = 1.0 - ww
+    ret, length, is_werewolf = jax.vmap(one_game)(
+        jax.random.split(rng_games, num_games), seats
+    )
+    return EvalResult(
+        win=(ret > 0).astype(jnp.float32),
+        loss=(ret < 0).astype(jnp.float32),
+        draw=(ret == 0).astype(jnp.float32),
+        ret=ret,
+        length=length.astype(jnp.float32),
+        seat=seats,
+        werewolf=is_werewolf.astype(jnp.float32),
+    )
+
+
+def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
+    """Means over the evaluation games; win_rate_decided excludes draws, and
+    win_rate_as_werewolf / win_rate_as_human are the win rates of the games
+    in which the learner was on that team."""
+    decided = result.win.sum() + result.loss.sum()
+    werewolf, human = result.werewolf, 1.0 - result.werewolf
     return {
-        "win_rate": won.mean(),
-        "win_rate_as_werewolf": (won * ww).sum() / jnp.maximum(ww.sum(), 1.0),
-        "win_rate_as_human": (won * human).sum() / jnp.maximum(human.sum(), 1.0),
-        "learner_werewolf_frac": ww.mean(),
-        "return": ret.mean(),
-        "episode_length": length.astype(jnp.float32).mean(),
+        f"win_rate_{name}": result.win.mean(),
+        f"loss_rate_{name}": result.loss.mean(),
+        f"draw_rate_{name}": result.draw.mean(),
+        f"win_rate_decided_{name}": result.win.sum() / jnp.maximum(decided, 1.0),
+        f"avg_return_{name}": result.ret.mean(),
+        f"avg_episode_length_{name}": result.length.mean(),
+        f"win_rate_as_werewolf_{name}": (result.win * werewolf).sum()
+        / jnp.maximum(werewolf.sum(), 1.0),
+        f"win_rate_as_human_{name}": (result.win * human).sum()
+        / jnp.maximum(human.sum(), 1.0),
+        f"learner_werewolf_frac_{name}": werewolf.mean(),
     }
+
+
+def format_eval(evals: dict[str, float]) -> str:
+    """One line for the policies evaluated, from eval_metrics' metrics."""
+    names = sorted(k[len("avg_return_"):] for k in evals if k.startswith("avg_return_"))
+    return "; ".join(
+        f"{name} W/L/D {evals[f'win_rate_{name}']:.3f}/"
+        f"{evals[f'loss_rate_{name}']:.3f}/{evals[f'draw_rate_{name}']:.3f} "
+        f"(as werewolf {evals[f'win_rate_as_werewolf_{name}']:.3f}, "
+        f"as human {evals[f'win_rate_as_human_{name}']:.3f}), "
+        f"return {evals[f'avg_return_{name}']:+.2f}, "
+        f"length {evals[f'avg_episode_length_{name}']:.1f}"
+        for name in names
+    )
 
 
 def make_train(config: dict) -> Callable[..., RunnerState]:
@@ -475,6 +539,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     def act_random(params, obs, action_mask, rng):
         return jax.random.categorical(rng, jnp.where(action_mask, 0.0, -jnp.inf))
 
+    def avg_act(params, obs, action_mask, rng):
+        return act_actor(avg_network, params, obs, action_mask, rng)
+
+    def br_act(params, obs, action_mask, rng):
+        return act_q_greedy(br_network, params, obs, action_mask, rng)
+
     if compare_against_random:
         baseline_act = act_random
     else:
@@ -495,59 +565,41 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     ) -> dict[str, FloatArray]:
         """Evaluation metrics of the average policy and the greedy BR."""
         rng_avg, rng_br = jax.random.split(rng)
-        players = [
-            (
-                "avg",
-                avg_params,
-                rng_avg,
-                lambda p, o, m, r: act_actor(avg_network, p, o, m, r),
-            ),
-            (
-                "br",
-                br_params,
-                rng_br,
-                lambda p, o, m, r: act_q_greedy(br_network, p, o, m, r),
-            ),
-        ]
         metrics = {}
-        for name, params, rng_i, act in players:
-            results = play_eval_games(
+        for name, act, params, rng_eval in (
+            ("avg", avg_act, avg_params, rng_avg),
+            ("br", br_act, br_params, rng_br),
+        ):
+            result = play_eval_games(
                 env,
-                config["compare_steps"],
-                rng_i,
                 act,
                 params,
                 baseline_act,
                 opponent_params,
+                config["compare_episodes"],
+                rng_eval,
             )
-            for key, value in results.items():
-                metrics[f"eval/{key}_{name}_vs_{opponent}"] = value
+            metrics.update(eval_metrics(f"{name}_vs_{opponent}", result))
         return metrics
 
     def logging_callback(seed_val, update, evaluated, metric_dict) -> None:
+        """Logs the metrics; the evaluation ones (keys with "_vs_") only when
+        an evaluation ran."""
         seed_i, update = int(seed_val), int(update)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
-        if not evaluated:
-            metrics = {k: v for k, v in metrics.items() if not k.startswith("eval/")}
-        else:
-            evals = {k: float(v) for k, v in metrics.items() if k.startswith("eval/")}
+        eval_keys = [k for k in metrics if "_vs_" in k]
+        if bool(evaluated):
+            evals = {k: float(metrics[k]) for k in eval_keys}
             env_steps = int(metrics["env_steps"])
             EVALUATIONS.setdefault(seed_i, []).append((update, env_steps, evals))
-
-            def rate(stat, name):
-                return evals[f"eval/{stat}_{name}_vs_{opponent}"]
-
-            line = ", ".join(
-                f"{name} {rate('win_rate', name):.3f} "
-                f"(werewolf {rate('win_rate_as_werewolf', name):.3f}, "
-                f"human {rate('win_rate_as_human', name):.3f})"
-                for name in ("avg", "br")
-            )
             print(
                 f"seed {seed_i} update {update + 1}/{config['num_update_steps']} "
-                f"({env_steps} env steps): win rate vs {opponent}: {line}",
+                f"({env_steps} env steps): {format_eval(evals)}",
                 flush=True,
             )
+        else:
+            for k in eval_keys:
+                del metrics[k]
         RESULTS_LOG.log(metrics, seed_i)
 
     def train(
@@ -984,7 +1036,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 )
 
             if compare_enabled:
-                eval_metrics = lax.cond(
+                compare_metrics = lax.cond(
                     should_compare,
                     do_compare,
                     lambda rng_c: jax.tree_util.tree_map(
@@ -993,7 +1045,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     ),
                     rng_compare,
                 )
-                metric.update(eval_metrics)
+                metric.update(compare_metrics)
 
             jax.experimental.io_callback(
                 logging_callback,

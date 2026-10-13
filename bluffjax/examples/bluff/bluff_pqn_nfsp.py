@@ -26,10 +26,12 @@ act).
 - Average policy: every BR decision (obs, action) is added to a reservoir
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
-- Evaluation: the average policy (sampled) and the greedy BR each play
-  compare_steps games against copies of a baseline (random legal moves or a
-  checkpoint), with the learner's seat rotating over the games; wins, losses
-  and draws (games cut off at the horizon) are reported separately.
+- Evaluation: every compare_interval updates and after the last one, the
+  average policy (sampled) and the greedy BR each play compare_episodes
+  complete games (until a player wins or the env horizon cuts the game off)
+  against copies of a baseline (random legal moves or a checkpoint), with the
+  learner's seat rotating over the games (bluff_nfsp_common.play_games); wins,
+  losses and draws (games cut off at the horizon) are reported separately.
 - Game metrics (bluffjax.metrics.bluff: lie rate, lie success, challenge
   precision and recall, final-play lie rate) are counted at every rollout step
   and logged every update, as game/<rate> for the decisions of players
@@ -330,7 +332,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 params,
                 act_baseline,
                 baseline_params,
-                config["compare_steps"],
+                config["compare_episodes"],
                 rng_eval,
             )
             metrics.update(eval_metrics(f"{name}_vs_{baseline_name}", result))

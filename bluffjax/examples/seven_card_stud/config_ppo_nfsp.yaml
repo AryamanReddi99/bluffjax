@@ -39,7 +39,7 @@ compare_mode: random  # "random" or "checkpoint"
 # ${repo_root:}/checkpoints/seven_card_stud/<job_type>_<timestamp>/full/avg_policy_0.msgpack
 compare_with: ""
 compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
-compare_episodes: 10  # deals per evaluation, each played with the learner in every seat
+compare_episodes: 10  # complete games against random, for each policy
 compare_interval: 1  # updates between evaluations (and after the last)
 
 # wandb

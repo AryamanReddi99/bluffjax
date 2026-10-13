@@ -828,7 +828,8 @@ def test_reservoir_matches_algorithm_r():
 def test_seat_rotated_evaluation_matches_random_play():
     """A uniformly random learner evaluated against random opponents, with the
     learner's seat rotating over the games, wins as often as random play does,
-    as a werewolf and as a human."""
+    as a werewolf and as a human; every game has a winner within the horizon,
+    so there are no draws and the return is 10 per win and -10 per loss."""
     ppo, pqn = _training_modules()
     roles, total = random_outcomes(6, 2, num_games=20000, num_steps=80, seed=11)
     ww = roles == WEREWOLF
@@ -841,15 +842,19 @@ def test_seat_rotated_evaluation_matches_random_play():
 
     num_games = 6000
     for i, module in enumerate((ppo, pqn)):
-        play = jax.jit(module.play_eval_games, static_argnums=(0, 1, 3, 5))
-        res = _np(
-            play(env, num_games, jax.random.PRNGKey(20 + i), act, None, act, None)
-        )
-        frac = res["learner_werewolf_frac"]
+        result = jax.jit(
+            lambda key, m=module: m.play_eval_games(
+                env, act, None, act, None, num_games, key
+            )
+        )(jax.random.PRNGKey(20 + i))
+        seat = np.asarray(result.seat)
+        np.testing.assert_array_equal(seat, (seat[0] + np.arange(num_games)) % 6)
+        res = _np(module.eval_metrics("x", result))
+        frac = res["learner_werewolf_frac_x"]
         assert abs(frac - 1 / 3) < 5 * np.sqrt(2 / 9 / num_games), frac
         for key, p, games in [
-            ("win_rate_as_werewolf", p_ww, frac * num_games),
-            ("win_rate_as_human", p_human, (1 - frac) * num_games),
+            ("win_rate_as_werewolf_x", p_ww, frac * num_games),
+            ("win_rate_as_human_x", p_human, (1 - frac) * num_games),
         ]:
             assert abs(res[key] - p) < 5 * np.sqrt(p * (1 - p) / games), (
                 key,
@@ -857,8 +862,13 @@ def test_seat_rotated_evaluation_matches_random_play():
                 p,
             )
         np.testing.assert_allclose(
-            res["win_rate"],
-            frac * res["win_rate_as_werewolf"] + (1 - frac) * res["win_rate_as_human"],
+            res["win_rate_x"],
+            frac * res["win_rate_as_werewolf_x"]
+            + (1 - frac) * res["win_rate_as_human_x"],
             rtol=1e-5,
         )
-        np.testing.assert_allclose(res["return"], 20 * res["win_rate"] - 10, rtol=1e-5)
+        assert res["draw_rate_x"] == 0.0
+        np.testing.assert_allclose(res["win_rate_x"] + res["loss_rate_x"], 1.0, rtol=1e-6)
+        np.testing.assert_allclose(res["win_rate_decided_x"], res["win_rate_x"], rtol=1e-6)
+        np.testing.assert_allclose(res["avg_return_x"], 20 * res["win_rate_x"] - 10, rtol=1e-5)
+        assert 0 < res["avg_episode_length_x"] <= 80

@@ -212,6 +212,7 @@ class EvalResult(NamedTuple):
     draw: FloatArray  # cut off at the horizon without a winner
     ret: FloatArray  # the learner's total reward over the game
     length: FloatArray  # env steps
+    seat: IntArray  # the learner's seat
 
 
 def play_games(
@@ -223,12 +224,14 @@ def play_games(
     num_games: int,
     rng: PRNGKeyArray,
 ) -> EvalResult:
-    """Plays num_games games in parallel, the learner against baseline copies.
+    """Plays num_games complete games in parallel, the learner in one seat and
+    baseline copies in every other seat.
 
     The learner's seat rotates over the games, starting from a random seat
     (game g: seat (offset + g) % num_agents), and the env draws the first
-    player at random, so no seat is favoured. Every game is played until it
-    ends or reaches the env horizon.
+    player at random, so no seat is favoured. Every game is played with
+    env.step_env (no auto-reset) until it ends or reaches the env horizon (a
+    draw), and the loop runs until all of them are over.
     """
     n = env.num_agents
     rng_seat, rng_reset, rng_play = jax.random.split(rng, 3)
@@ -259,7 +262,7 @@ def play_games(
         live = ~finished
         ends = live & done
         won = info["game_winner"][games, seats]
-        result = EvalResult(
+        result = result._replace(
             win=jnp.where(ends & won, 1.0, result.win),
             loss=jnp.where(ends & absorbing[:, 0] & ~won, 1.0, result.loss),
             draw=jnp.where(ends & ~absorbing[:, 0], 1.0, result.draw),
@@ -278,7 +281,7 @@ def play_games(
         states,
         obs,
         jnp.zeros((num_games,), dtype=bool),
-        EvalResult(zeros, zeros, zeros, zeros, zeros),
+        EvalResult(zeros, zeros, zeros, zeros, zeros, seats),
         rng_play,
     )
     _, _, _, result, _ = lax.while_loop(cond, body, init)

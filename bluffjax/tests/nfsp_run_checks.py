@@ -5,7 +5,10 @@ test_metrics_werewolf.py).
 check_training_run runs the script's hydra main() on CPU with a tiny config
 and checks:
 - results.jsonl has one record per update and seed, with env_steps and every
-  game/ and game_br/ rate and event count;
+  game/ and game_br/ rate and event count, and the evaluation against random
+  (win, loss and draw rates, win rate of decided games, return and length of
+  both policies) exactly in the updates where it runs: every compare_interval
+  (2) updates and after the last one;
 - the game/ and game_br/ masks are the policies of the credited players: an
   extra count credited to the player to act sums, under each mask, to the
   decisions of that policy (br_action_frac_rollout), and in a separate run
@@ -29,6 +32,15 @@ import pytest
 
 KEY = jax.random.PRNGKey(0)
 NUM_ENVS, NUM_STEPS = 8, 16
+# logged per policy as {stat}_{avg|br}_vs_{random|baseline}
+EVAL_STATS = (
+    "win_rate",
+    "loss_rate",
+    "draw_rate",
+    "win_rate_decided",
+    "avg_return",
+    "avg_episode_length",
+)
 
 
 def acting_metrics(metrics_cls):
@@ -205,6 +217,19 @@ def check_training_run(
             for key in metrics_cls.rate_names:
                 value = r[f"{prefix}/{key}"]
                 assert math.isnan(value) or value >= 0.0, (prefix, key, value)
+        # the evaluation, logged only in the updates where it ran
+        evaluated = r["update_step"] % 2 == 0 or r["update_step"] == U - 1
+        if not evaluated:
+            assert not [k for k in r if "_vs_" in k]
+        else:
+            for policy in ("avg", "br"):
+                name = f"{policy}_vs_random"
+                for stat in EVAL_STATS:
+                    assert f"{stat}_{name}" in r, (stat, name)
+                total = sum(r[f"{x}_rate_{name}"] for x in ("win", "loss", "draw"))
+                assert total == pytest.approx(1.0, abs=1e-6)
+                assert 0.0 <= r[f"win_rate_decided_{name}"] <= 1.0
+                assert r[f"avg_episode_length_{name}"] >= 1.0
         # masked by the credited player's policy: the decisions of each policy
         assert r["game/acting"] + r["game_br/acting"] == decisions
         assert r["game_br/acting"] == pytest.approx(
