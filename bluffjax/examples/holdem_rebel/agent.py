@@ -13,7 +13,8 @@ contains it, and continues from there.
 
 play_match runs a batch of hands between two players with every deal played
 twice, once from each seat (duplicate poker), so luck of the cards largely
-cancels in the paired results.
+cancels in the paired results. It can also count the game metrics
+(bluffjax.metrics) of each side.
 """
 
 import json
@@ -40,6 +41,7 @@ from bluffjax.examples.holdem_rebel.game import (
     slot_action,
 )
 from bluffjax.examples.holdem_rebel.solver import ValueNetwork, solve_batch
+from bluffjax.metrics.base import Counts, GameMetrics, masked_totals
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 
 
@@ -290,6 +292,10 @@ class MatchResult(NamedTuple):
     hand_length: FloatArray  # (n_deals, 2) actions per hand
     unfinished: IntArray  # hands that hit the solve limit (should be 0)
     resolves: IntArray  # opponent actions outside a ReBeL player's subgame
+    # with play_match(metrics=...): the metric counts credited to player A
+    # (to B) over all hands, summed (name -> (*extra), see masked_totals)
+    counts_a: Counts | None = None
+    counts_b: Counts | None = None
 
 
 def play_match(
@@ -302,8 +308,18 @@ def play_match(
     n_deals: int,
     rng: PRNGKeyArray,
     max_solves: int = 64,
+    metrics: GameMetrics | None = None,
 ) -> MatchResult:
-    """Play n_deals deals twice each, swapping seats; jittable."""
+    """Play n_deals deals twice each, swapping seats; jittable.
+
+    With `metrics` (e.g. bluffjax.metrics.make_metrics(game.env_id, env)),
+    metrics.step runs on every action of every hand and the counts credited
+    to each side are summed into counts_a / counts_b. Hands are played with
+    env.step_env, so metrics.step gets the state after the action, not the
+    next hand's first state, when a hand ends (the Hold'em metrics don't
+    read it). The Hold'em metrics credit a hand's counts when it ends, so a
+    hand that hits the solve limit (unfinished) isn't counted.
+    """
     rng_deal, rng_play = jax.random.split(rng)
     keys = jax.random.split(rng_deal, n_deals)
     keys = jnp.concatenate([keys, keys])
@@ -312,6 +328,21 @@ def play_match(
     seat_a = jnp.concatenate([jnp.zeros(n_deals, jnp.int32), jnp.ones(n_deals, jnp.int32)])
     seat_b = 1 - seat_a
     views_of = lambda s, seat: jax.vmap(lambda e, k: public_view(game, e, k))(s, seat)  # noqa: E731
+    step_env = jax.vmap(env.step_env)
+    if metrics is None:
+        metric_carry, zero_counts = (), ()
+    else:
+        metric_carry = jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (n,) + x.shape), metrics.init_carry()
+        )
+        actions0 = jnp.zeros(n, jnp.int32)
+        step_shape = jax.eval_shape(step_env, jax.random.split(rng, n), env_states, actions0)
+        counts_shape = jax.eval_shape(
+            jax.vmap(metrics.step), metric_carry, env_states, actions0, env_states,
+            step_shape[2], step_shape[4], step_shape[5],
+        )[1]
+        zero_counts = {k: jnp.zeros(v.shape[2:], v.dtype) for k, v in counts_shape.items()}
+    is_seat_a = jax.nn.one_hot(seat_a, env.num_agents, dtype=bool)  # (n, num_agents)
 
     class Carry(NamedTuple):
         env_states: Any
@@ -326,6 +357,9 @@ def play_match(
         rng: PRNGKeyArray
         solves: IntArray
         resolves: IntArray
+        metric_carry: Any
+        counts_a: Any
+        counts_b: Any
 
     def inner_cond(c: Carry):
         return jnp.any(~c.done & ~c.need_a & ~c.need_b)
@@ -345,12 +379,23 @@ def play_match(
         go = active & ~hold
         st_a = player_a.observe(c.st_a, va, actions, go)
         st_b = player_b.observe(c.st_b, vb, actions, go)
-        nxt, _, rew, _, nxt_done, _ = jax.vmap(env.step_env)(
+        nxt, _, rew, _, nxt_done, info = step_env(
             jax.random.split(rng, n), c.env_states, actions
         )
         new_round = go & ~nxt_done & (nxt.stage != c.env_states.stage)
         env_states = _where(go, nxt, c.env_states)
         reward_a = rew[jnp.arange(n), seat_a]
+        metric_carry, counts_a, counts_b = c.metric_carry, c.counts_a, c.counts_b
+        if metrics is not None:
+            new_carry, counts = jax.vmap(metrics.step)(
+                c.metric_carry, c.env_states, actions, nxt, rew, nxt_done, info
+            )
+            metric_carry = _where(go, new_carry, c.metric_carry)
+            add = lambda total, side: jax.tree.map(  # noqa: E731
+                jnp.add, total, masked_totals(counts, go[:, None] & side)
+            )
+            counts_a = add(c.counts_a, is_seat_a)
+            counts_b = add(c.counts_b, ~is_seat_a)
         return Carry(
             env_states=env_states,
             st_a=st_a,
@@ -364,6 +409,9 @@ def play_match(
             rng=rng,
             solves=c.solves,
             resolves=c.resolves + jnp.sum(hold),
+            metric_carry=metric_carry,
+            counts_a=counts_a,
+            counts_b=counts_b,
         )
 
     def outer_cond(c: Carry):
@@ -397,6 +445,9 @@ def play_match(
         rng=rng_play,
         solves=jnp.int32(0),
         resolves=jnp.int32(0),
+        metric_carry=metric_carry,
+        counts_a=zero_counts,
+        counts_b=zero_counts,
     )
     out = lax.while_loop(outer_cond, outer_body, init)
     return MatchResult(
@@ -404,6 +455,8 @@ def play_match(
         hand_length=out.length.reshape(2, n_deals).T,
         unfinished=jnp.sum(~out.done),
         resolves=out.resolves,
+        counts_a=None if metrics is None else out.counts_a,
+        counts_b=None if metrics is None else out.counts_b,
     )
 
 
