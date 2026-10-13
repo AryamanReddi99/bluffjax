@@ -1,8 +1,11 @@
 """5-Card Draw metrics (bluffjax.metrics.five_card_draw): scripted hands for
-every metric (detection, credit, no double counting, carry reset at the end of
-a hand, including the env's auto-reset), a plain-Python replay of random
-rollouts that recomputes every count from the true post-step states with an
-independent hand evaluator, and the values known under uniform random play."""
+every metric (detection, credit, no double counting, nothing credited before
+the hand ends and everything at its end, carry reset at the end of a hand,
+including the env's auto-reset and a hand spanning two rollouts), a
+plain-Python replay of random rollouts that recomputes every hand's counts
+from the true post-step states with an independent hand evaluator and credits
+them at the hand's last step, and the values known under uniform random
+play."""
 
 import functools
 
@@ -44,30 +47,39 @@ def _setup(n: int):
     return env, gm, jax.jit(env.step), jax.jit(gm.step), jax.jit(env.get_avail_actions)
 
 
-def table(n: int, hands: list[str], stock: str = "", sb: int = 0):
-    """Start of a hand where player p holds hands[p], the stock starts with
-    `stock` and player sb posts the small blind."""
-    env = _setup(n)[0]
+def deal(state, hands: list[str], stock: str = ""):
+    """The first state of a hand (e.g. the env's auto-reset state) with player
+    p holding hands[p] and the stock starting with `stock`."""
     held = [cards(h) for h in hands]
     first = [x for h in held for x in sorted(h)] + cards(stock)
     assert len(set(first)) == len(first)
-    deck = first[: 5 * n] + first[5 * n :] + [x for x in range(52) if x not in first]
-    key = next(k for k in range(200) if int(env.reset(jax.random.PRNGKey(k))[0].small_blind_idx) == sb)
-    state, _ = env.reset(jax.random.PRNGKey(key))
+    assert int(state.deck_idx) == 5 * len(hands) and int(state.stage) == 0
+    deck = first + [x for x in range(52) if x not in first]
     return state.replace(
         agent_cards=jnp.array([sorted(h) for h in held], dtype=jnp.int32),
         shuffled_deck=jnp.array(deck, dtype=jnp.int32),
     )
 
 
+def table(n: int, hands: list[str], stock: str = "", sb: int = 0):
+    """Start of a hand where player p holds hands[p], the stock starts with
+    `stock` and player sb posts the small blind."""
+    env = _setup(n)[0]
+    key = next(k for k in range(200) if int(env.reset(jax.random.PRNGKey(k))[0].small_blind_idx) == sb)
+    state, _ = env.reset(jax.random.PRNGKey(key))
+    return deal(state, hands, stock)
+
+
 class Play:
-    """Steps env.step (auto-reset, as in training) through Metrics.step."""
+    """Steps env.step (auto-reset, as in training) through Metrics.step, and
+    checks that nothing is credited before a hand ends."""
 
     def __init__(self, n: int, state):
         self.env, self.gm, self._step, self._mstep, self._avail = _setup(n)
         self.state = state
         self.carry = self.gm.init_carry()
         self.totals = None
+        self.steps = []  # the counts of every step
         self.dones = []
         self.t = 0
 
@@ -82,13 +94,27 @@ class Play:
             self.carry, self.state, jnp.int32(action), nxt, reward, done, info
         )
         counts = {k: np.asarray(v) for k, v in counts.items()}
+        if not done:
+            for k, v in counts.items():
+                assert not v.any(), f"{k} credited before the hand ended"
         self.totals = counts if self.totals is None else {
             k: self.totals[k] + counts[k] for k in counts
         }
+        self.steps.append(counts)
         self.state = nxt
         self.dones.append(bool(done))
         self.last_reward = np.asarray(reward)
         return bool(done)
+
+    def rollout(self, start: int, stop: int) -> dict:
+        """The counts of steps start..stop-1 (as one update's rollout sums
+        them), summed over the steps, by player."""
+        return {k: sum(c[k] for c in self.steps[start:stop]) for k in self.steps[0]}
+
+    def rates(self, counts: dict) -> dict:
+        """summarize() of counts by player, summed over the players."""
+        rates = self.gm.summarize({k: v.sum(0) for k, v in counts.items()})
+        return {k: float(v) for k, v in rates.items()}
 
     def count(self, name: str) -> list[float]:
         return self.totals[name].tolist()
@@ -290,7 +316,8 @@ def test_carry_resets_between_hands():
     p.act(B, CALL)
     p.act(B, keep(cards(PAIR), cards("8s 8h")))
     p.act(A, KEEP_ALL)
-    assert np.asarray(p.carry.snowed).tolist() == [True, False]
+    assert np.asarray(p.carry.hand["snows"]).tolist() == [1, 0]
+    assert np.asarray(p.carry.hand["cards"]).tolist() == [0, 3]
     p.act(B, CALL)
     assert p.act(A, CALL)  # showdown
     assert p.carry_is_reset()
@@ -301,6 +328,66 @@ def test_carry_resets_between_hands():
     for k in before:
         np.testing.assert_array_equal(p.totals[k], before[k], err_msg=k)
     assert p.count("snow_wins") == [0, 0]
+
+
+def test_hand_spanning_two_rollouts_is_credited_when_it_ends():
+    """A hand starts in one rollout (an update's window of steps, the carry
+    kept across it) and ends in the next: its first rollout credits nothing,
+    the next one all of it (the snow and the bluff with their wins), so each
+    rollout's rates are shares of the hands that ended in it. The hand after
+    the env's auto-reset again spans two rollouts and is credited, alone,
+    when it ends."""
+    p = Play(2, table(2, [SNOWER, PAIR], stock="Jc 6d Tc", sb=A))
+    # rollout 1: the draw (A snows) and A's bet
+    p.act(A, CALL)
+    p.act(B, CALL)
+    p.act(B, keep(cards(PAIR), cards("8s 8h")))
+    p.act(A, KEEP_ALL)
+    p.act(B, CALL)
+    p.act(A, POT)
+    first = p.rollout(0, 6)
+    assert not any(v.any() for v in first.values())
+    rates = p.rates(first)
+    assert all(np.isnan(rates[name]) for name in p.gm.rate_names)
+    # rollout 2: B folds, then the next hand (auto-reset) reaches the draw
+    assert p.act(B, FOLD)
+    assert p.carry_is_reset()
+    sb = int(p.state.small_blind_idx)
+    bb = 1 - sb
+    hands = {sb: SNOWER, bb: PAIR}
+    p.state = deal(p.state, [hands[0], hands[1]], stock="Jc 6d Tc")
+    p.act(sb, CALL)
+    p.act(bb, CALL)
+    p.act(bb, keep(cards(PAIR), cards("8s 8h")))
+    p.act(sb, KEEP_ALL)
+    second = p.rollout(6, 11)
+    for name, value in {
+        "draws": [1, 1], "cards": [0, 3], "draws_known": [1, 1], "draws_improved": [0, 0],
+        "high_card_draws": [1, 0], "snows": [1, 0], "snow_wins": [1, 0],
+        "postdraw_aggressive": [1, 0], "postdraw_bluffs": [1, 0],
+        "postdraw_bluff_wins": [1, 0], "postdraw_folds": [0, 1],
+        "postdraw_correct_folds": [0, 0],
+    }.items():
+        assert second[name].tolist() == value, name
+    rates = p.rates(second)
+    assert rates["snow_success"] == 1 and rates["n_snows"] == 1
+    assert rates["postdraw_bluff_success"] == 1 and rates["n_postdraw_bluffs"] == 1
+    # rollout 3: the second hand's bluff is called; it is credited, alone
+    p.act(bb, CALL)
+    p.act(sb, HALF_POT)
+    assert p.act(bb, CALL)  # showdown: the pair beats king high
+    assert p.last_reward[bb] > 0
+    third = p.rollout(11, 14)
+    snower = [float(q == sb) for q in range(2)]
+    for name, value in {
+        "draws": [1, 1], "high_card_draws": snower, "snows": snower, "snow_wins": [0, 0],
+        "postdraw_aggressive": snower, "postdraw_bluffs": snower,
+        "postdraw_bluff_wins": [0, 0], "postdraw_folds": [0, 0],
+    }.items():
+        assert third[name].tolist() == value, name
+    rates = p.rates(third)
+    assert rates["snow_success"] == 0 and rates["postdraw_bluff_success"] == 0
+    assert p.carry_is_reset()
 
 
 # ---------------------------------------------------------------- random play
@@ -334,8 +421,10 @@ def random_rollout(n: int, envs: int, steps: int, seed: int):
 
 
 def reference_counts(n: int, states, actions, raws, dones) -> dict[str, np.ndarray]:
-    """Every count of the metric recomputed per step from the true states,
-    in plain Python with an independent hand evaluator."""
+    """Every count of the metric recomputed hand by hand from the true
+    states, in plain Python with an independent hand evaluator: a hand's
+    counts, summed over its steps, are credited at its last step (the step
+    with done); a hand not finished by the end is not counted."""
     T, N = dones.shape
     names = ("draws", "cards", "draws_known", "draws_improved", "high_card_draws",
              "snows", "snow_wins", "postdraw_aggressive", "postdraw_bluffs",
@@ -344,6 +433,7 @@ def reference_counts(n: int, states, actions, raws, dones) -> dict[str, np.ndarr
     key = functools.lru_cache(maxsize=None)(lambda hand: five_card_key(list(hand)))
     for e in range(N):
         snowed, aggressor, bluffed = set(), None, False
+        hand = {k: np.zeros(n, np.float32) for k in names}  # this hand's counts
         for t in range(T):
             hands = [tuple(sorted(int(x) for x in h)) for h in states.agent_cards[t, e]]
             folded = states.folded[t, e]
@@ -356,42 +446,58 @@ def reference_counts(n: int, states, actions, raws, dones) -> dict[str, np.ndarr
                 # the env reshuffles discards (with its own key) only when the
                 # stock is short; the metric can't see such a hand-ending draw
                 known = not (dones[t, e] and int(states.deck_idx[t, e]) + drawn > 52)
-                out["draws"][t, e, p] = 1
-                out["cards"][t, e, p] = drawn
-                out["draws_known"][t, e, p] = known
-                out["draws_improved"][t, e, p] = known and key(after)[0] > key(hands[p])[0]
+                hand["draws"][p] += 1
+                hand["cards"][p] += drawn
+                hand["draws_known"][p] += known
+                hand["draws_improved"][p] += known and key(after)[0] > key(hands[p])[0]
                 if key(hands[p])[0] == 1:
-                    out["high_card_draws"][t, e, p] = 1
+                    hand["high_card_draws"][p] += 1
                     if drawn == 0:
-                        out["snows"][t, e, p] = 1
+                        hand["snows"][p] += 1
                         snowed.add(p)
             if stage == 2:
                 loses = any(key(hands[q]) > key(hands[p]) for q in range(n) if q != p and not folded[q])
                 if a in (1, 2, 3):
-                    out["postdraw_aggressive"][t, e, p] = 1
-                    out["postdraw_bluffs"][t, e, p] = loses
+                    hand["postdraw_aggressive"][p] += 1
+                    hand["postdraw_bluffs"][p] += loses
                     aggressor, bluffed = p, loses
                 elif a == 4:
-                    out["postdraw_folds"][t, e, p] = 1
-                    out["postdraw_correct_folds"][t, e, p] = loses
+                    hand["postdraw_folds"][p] += 1
+                    hand["postdraw_correct_folds"][p] += loses
                 else:
                     aggressor = None
             if dones[t, e]:
                 left = [q for q in range(n) if not raws.folded[t, e][q]]
                 if len(left) == 1:
                     w = left[0]
-                    out["snow_wins"][t, e, w] = w in snowed
-                    out["postdraw_bluff_wins"][t, e, w] = aggressor == w and bluffed
+                    hand["snow_wins"][w] += w in snowed
+                    hand["postdraw_bluff_wins"][w] += aggressor == w and bluffed
+                for k in names:
+                    out[k][t, e] = hand[k]
                 snowed, aggressor, bluffed = set(), None, False
+                hand = {k: np.zeros(n, np.float32) for k in names}
     return out
 
 
 @pytest.mark.parametrize("n, envs, steps", [(2, 64, 300), (3, 48, 300), (6, 32, 300), (10, 16, 300)])
 def test_counts_match_plain_python_replay(n, envs, steps):
+    """Every step's counts equal the replay's: zero before a hand's last
+    step, the whole hand's at it. So any window of steps (an update's
+    rollout) holds exactly the hands that ended in it, and its rates are in
+    [0, 1] (cards_drawn in [0, 5])."""
     states, actions, raws, dones, counts = random_rollout(n, envs, steps, seed=n)
     ref = reference_counts(n, states, actions, raws, dones)
+    assert set(counts) == set(ref)
     for k, v in ref.items():
         np.testing.assert_array_equal(counts[k], v, err_msg=k)
+        assert not counts[k][~dones].any(), k
+    gm = _setup(n)[1]
+    for start in range(0, steps, 8):  # rollouts of 8 steps, as in the training tests
+        window = {k: v[start : start + 8] for k, v in counts.items()}
+        rates = gm.summarize(masked_totals(window, np.ones(dones[start : start + 8].shape + (n,), bool)))
+        for name in gm.rate_names:
+            value = float(rates[name])
+            assert np.isnan(value) or 0 <= value <= (5 if name == "cards_drawn" else 1), (name, value)
     totals = {k: v.sum() for k, v in ref.items()}
     assert totals["draws_improved"] > 0 and totals["snows"] > 0
     if n <= 3:  # rare with more players (most hands end before the draw)

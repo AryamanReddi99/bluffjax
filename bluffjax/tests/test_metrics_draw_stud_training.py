@@ -1,8 +1,11 @@
 """5-Card Draw and 7-Card Stud training scripts (PPO-NFSP, PQN-NFSP): the game
 metrics are counted at every rollout step with their carry kept across
-updates and logged every update for both policies, everything logged goes to
-results.jsonl, and the half- and full-budget checkpoints are the networks
-after exactly half and all of the updates and load strictly.
+updates and logged every update for both policies; every count of a hand is
+credited when the hand ends, so each update's rates are shares of events of
+the hands that ended in its rollout (in [0, 1], numerator at most the
+denominator, in every update); everything logged goes to results.jsonl, and
+the half- and full-budget checkpoints are the networks after exactly half
+and all of the updates and load strictly.
 """
 
 import functools
@@ -158,23 +161,42 @@ def _metric_keys(name: str) -> set[str]:
     return {f"{prefix}/{k}" for prefix in ("game", "game_br") for k in keys}
 
 
-# 7-Card Stud success rates and their denominators. A win is counted at the
-# end of the hand and its bluff or steal at the action, so in one update a
-# hand that began in the previous rollout can add a win without its bluff
-# (the logged rate can then exceed 1); over the whole run the wins never
-# exceed the bluffs or steals.
-STUD_SUCCESS = {
-    "bluff_success": "n_bluffs",
-    "bluff_success_board_ahead": "n_bluffs_board_ahead",
-    "bluff_success_board_not_ahead": "n_bluffs_board_not_ahead",
-    "steal_success": "n_steals",
+# The denominator (logged as n_<name>) of every rate of a game.
+DENOMINATORS = {
+    "five_card_draw": {
+        "cards_drawn": "n_draws",
+        "draw_improve_rate": "n_draws_known",
+        "snow_rate": "n_high_card_draws",
+        "snow_success": "n_snows",
+        "postdraw_bluff_rate": "n_postdraw_aggressive",
+        "postdraw_bluff_success": "n_postdraw_bluffs",
+        "postdraw_correct_fold_rate": "n_postdraw_folds",
+    },
+    "seven_card_stud": {
+        "bluff_rate": "n_aggressive",
+        "bluff_success": "n_bluffs",
+        "correct_fold_rate": "n_folds",
+        "bluff_rate_board_ahead": "n_aggressive_board_ahead",
+        "bluff_success_board_ahead": "n_bluffs_board_ahead",
+        "bluff_rate_board_not_ahead": "n_aggressive_board_not_ahead",
+        "bluff_success_board_not_ahead": "n_bluffs_board_not_ahead",
+        "steal_success": "n_steals",
+        **{f"fold_street_{k}": "n_hands" for k in range(3, 8)},
+        "showdown_rate": "n_hands",
+    },
 }
 
 
 def _check_game_metrics(name: str, records: list[dict]) -> None:
+    """Every update's game metrics, for both policies: each rate is NaN
+    exactly when its denominator is 0 and otherwise in [0, 1] (cards_drawn in
+    [0, 5]), its numerator (rate x denominator) a whole number of events at
+    most the denominator (cards_drawn: at most 5 per draw); every count
+    covers the hands that ended in the update's rollout."""
     keys = _metric_keys(name)
-    stud = _game(name) == "seven_card_stud"
-    wins, events = {}, {}
+    game = _game(name)
+    denominators = DENOMINATORS[game]
+    assert {k.split("/", 1)[1] for k in keys if "/n_" not in k} == set(denominators)
     for row in records:
         assert keys <= set(row), sorted(keys - set(row))
         for key in keys:
@@ -182,33 +204,34 @@ def _check_game_metrics(name: str, records: list[dict]) -> None:
             prefix, stat = key.split("/", 1)
             if stat.startswith("n_"):
                 assert value >= 0 and value == int(value), (key, value)
-            elif stat == "cards_drawn":
-                assert math.isnan(value) or 0 <= value <= 5, (key, value)
-            elif stud and stat in STUD_SUCCESS:
-                n = row[f"{prefix}/{STUD_SUCCESS[stat]}"]
-                assert math.isnan(value) == (n == 0), (key, value, n)
-                assert math.isnan(value) or value >= 0, (key, value)
-                run = (row["seed_index"], key)
-                wins[run] = wins.get(run, 0) + (0 if n == 0 else round(value * n))
-                events[run] = events.get(run, 0) + n
-            else:
-                assert math.isnan(value) or 0 <= value <= 1, (key, value)
+                continue
+            n = row[f"{prefix}/{denominators[stat]}"]
+            assert math.isnan(value) == (n == 0), (key, value, n)
+            if n == 0:
+                continue
+            top = 5 if stat == "cards_drawn" else 1
+            assert 0 <= value <= top, (key, value)
+            numerator = value * n
+            assert numerator == pytest.approx(round(numerator), abs=1e-3), (key, value, n)
+            assert round(numerator) <= top * n, (key, value, n)
         hands = row["episodes_completed"]
-        if _game(name) == "seven_card_stud":
+        both = {k: row[f"game/{k}"] + row[f"game_br/{k}"] for k in denominators.values()}
+        if game == "seven_card_stud":
             # every hand is credited to both players, under either policy
-            assert row["game/n_hands"] + row["game_br/n_hands"] == 2 * hands
+            assert both["n_hands"] == 2 * hands
             for prefix in ("game", "game_br"):
                 if row[f"{prefix}/n_hands"] > 0:
                     total = row[f"{prefix}/showdown_rate"] + sum(
                         row[f"{prefix}/fold_street_{k}"] for k in range(3, 8)
                     )
                     assert total == pytest.approx(1.0, abs=1e-5)
-    for run in events:
-        assert wins[run] <= events[run], (run, wins[run], events[run])
+        else:
+            # at most one draw per player in each hand that ended
+            assert both["n_draws"] <= 2 * hands, (both["n_draws"], hands)
     # the metrics see events, not only NaN
-    for key in ("game/n_draws", "game/n_hands"):
+    for key in ("game/n_draws", "game/n_hands", "game/n_postdraw_bluffs", "game/n_bluffs"):
         if key in keys:
-            assert sum(row[key] for row in records) > 0
+            assert sum(row[key] for row in records) > 0, key
 
 
 # logged as {stat}_vs_{random|baseline} for the average policy and

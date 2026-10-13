@@ -19,6 +19,17 @@
   for free on a later street; that isn't a bluff that made anyone fold.)
   Only the last aggressive action of a hand can succeed.
 
+When counts are credited (both games): an event's outcome (a bluff's,
+snow's or steal's success, how the hand ends) is only known when the hand
+ends, so every count of a hand, of its events and of their outcomes alike,
+is accumulated in the carry and credited, to the player it describes, at
+the step where the hand ends (the step with `done`, whose next_state is
+already the next hand after the env's auto-reset); every other step credits
+nothing. The counts of a rollout therefore cover exactly the hands that
+ended in it, and every rate of a rollout is a share of events of those
+hands (a success rate can't exceed 1). A hand still running when training
+stops is not counted.
+
 These helpers work on one env (no batch axis) and any number of players.
 
 Cost. The metrics run at every env step, vmapped over the envs, where
@@ -29,6 +40,7 @@ input).
 
 import jax.numpy as jnp
 
+from bluffjax.metrics.base import Counts
 from bluffjax.utils.game_utils.poker_utils import (
     _card_rank,
     _encode_score,
@@ -45,6 +57,22 @@ NO_PLAYER = -1
 CATEGORY_BASE = 15**5
 HIGH_CARD = 1
 
+
+def zero_counts(names: tuple[str, ...], num_agents: int) -> Counts:
+    """Counts of a hand before its first action: name -> zeros (num_agents,)."""
+    return {name: jnp.zeros(num_agents, jnp.float32) for name in names}
+
+
+def hand_end_counts(
+    hand: Counts, step: Counts, done: BoolArray
+) -> tuple[Counts, Counts]:
+    """Adds a step's event counts to those of the hand in progress (the
+    carry's, same names). Returns the hand's counts after the step (to keep
+    in the carry, which the caller resets when `done`) and the counts to
+    credit at this step: all of the hand's when it ends here, zeros
+    otherwise."""
+    hand = {name: hand[name] + step[name] for name in hand}
+    return hand, {name: done * value for name, value in hand.items()}
 
 
 def five_card_score(cards: IntArray) -> IntArray:

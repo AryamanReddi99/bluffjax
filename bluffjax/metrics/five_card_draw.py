@@ -7,8 +7,11 @@ high card (1) < pair < two pair < trips < straight < flush < full house <
 quads < straight flush (9). Aggressive
 action, would lose at showdown, bluff and bluff success are defined in
 bluffjax.metrics._poker_draw_stud. Every count is credited to one player
-(shape (num_agents,)); each rate below is numerator / denominator, NaN
-without events, and summarize() also returns the denominator as n_<name>.
+(shape (num_agents,)), at the step where the hand ends (see "When counts are
+credited" in bluffjax.metrics._poker_draw_stud): the counts of a rollout are
+those of the hands that ended in it. Each rate below is numerator /
+denominator, NaN without events, and summarize() also returns the
+denominator as n_<name>.
 
 The draw. The env gives every player still in the hand (all-in players
 included) exactly one draw action per hand, 5 + k with keep pattern k (bit j
@@ -67,9 +70,11 @@ from bluffjax.metrics._poker_draw_stud import (
     HIGH_CARD,
     NO_PLAYER,
     five_card_score,
+    hand_end_counts,
     unanswered_aggressor,
     won_without_showdown,
     would_lose,
+    zero_counts,
 )
 from bluffjax.metrics.base import Counts, GameMetrics, credit, rate
 from bluffjax.utils.typing import Array, BoolArray, FloatArray, IntArray
@@ -101,8 +106,23 @@ def hand_after_draw(
     return jnp.where(keep, hand, stock), exact
 
 
+#: the counts of a hand's events, kept in the carry until the hand ends
+EVENTS = (
+    "draws",
+    "cards",
+    "draws_known",
+    "draws_improved",
+    "high_card_draws",
+    "snows",
+    "postdraw_aggressive",
+    "postdraw_bluffs",
+    "postdraw_folds",
+    "postdraw_correct_folds",
+)
+
+
 class FiveCardDrawCarry(NamedTuple):
-    snowed: BoolArray  # (num_agents,) stood pat with a high card at this hand's draw
+    hand: Counts  # EVENTS of this hand so far, by player: name -> (num_agents,)
     aggressor: IntArray  # bettor of the post-draw bet or raise followed only by folds
     aggressor_bluffed: BoolArray  # that bet or raise was a bluff
 
@@ -120,7 +140,7 @@ class Metrics(GameMetrics):
 
     def init_carry(self) -> FiveCardDrawCarry:
         return FiveCardDrawCarry(
-            snowed=jnp.zeros(self.num_agents, dtype=bool),
+            hand=zero_counts(EVENTS, self.num_agents),
             aggressor=jnp.int32(NO_PLAYER),
             aggressor_bluffed=jnp.bool_(False),
         )
@@ -169,33 +189,39 @@ class Metrics(GameMetrics):
             carry.aggressor,
         )
         aggressor_bluffed = jnp.where(aggressive, bluff, carry.aggressor_bluffed)
-        snowed = carry.snowed.at[player].set(carry.snowed[player] | snow)
+
+        # This step's events, added to the hand's and credited when it ends.
+        hand, counts = hand_end_counts(
+            carry.hand,
+            {
+                "draws": credit(n, player, draw),
+                "cards": credit(n, player, jnp.where(draw, num_drawn, 0)),
+                "draws_known": credit(n, player, known),
+                "draws_improved": credit(n, player, known & improved),
+                "high_card_draws": credit(n, player, high_card_draw),
+                "snows": credit(n, player, snow),
+                "postdraw_aggressive": credit(n, player, aggressive),
+                "postdraw_bluffs": credit(n, player, bluff),
+                "postdraw_folds": credit(n, player, fold),
+                "postdraw_correct_folds": credit(n, player, fold & loses),
+            },
+            done,
+        )
 
         # A fold at either betting stage can end the hand.
         any_fold = (state.stage != DRAW_STAGE) & (action == FOLD)
         folded_after = state.folded.at[player].set(state.folded[player] | any_fold)
         uncontested, winner = won_without_showdown(folded_after, done)
         bluff_won = uncontested & (aggressor == winner) & aggressor_bluffed
-        snow_won = uncontested & snowed[winner]
+        # the winner snowed in this hand (it draws once per hand)
+        snow_won = uncontested & (hand["snows"][winner] > 0)
+        counts["snow_wins"] = credit(n, winner, snow_won)
+        counts["postdraw_bluff_wins"] = credit(n, winner, bluff_won)
 
-        counts = {
-            "draws": credit(n, player, draw),
-            "cards": credit(n, player, jnp.where(draw, num_drawn, 0)),
-            "draws_known": credit(n, player, known),
-            "draws_improved": credit(n, player, known & improved),
-            "high_card_draws": credit(n, player, high_card_draw),
-            "snows": credit(n, player, snow),
-            "snow_wins": credit(n, winner, snow_won),
-            "postdraw_aggressive": credit(n, player, aggressive),
-            "postdraw_bluffs": credit(n, player, bluff),
-            "postdraw_bluff_wins": credit(n, winner, bluff_won),
-            "postdraw_folds": credit(n, player, fold),
-            "postdraw_correct_folds": credit(n, player, fold & loses),
-        }
         carry = jax.tree_util.tree_map(
             lambda reset, kept: jnp.where(done, reset, kept),
             self.init_carry(),
-            FiveCardDrawCarry(snowed, aggressor, aggressor_bluffed),
+            FiveCardDrawCarry(hand, aggressor, aggressor_bluffed),
         )
         return carry, counts
 

@@ -8,9 +8,12 @@ completes to one small bet. Aggressive actions are the raises (action 1):
 completing the bring-in (by the bring-in at its first decision, or by a later
 player after the bring-in was posted), the first bet of a later street and
 every raise. Aggressive action, would lose at showdown, bluff and bluff
-success are defined in bluffjax.metrics._poker_draw_stud. Each rate below is
-numerator / denominator, NaN without events, and summarize() also returns
-the denominator as n_<name>.
+success are defined in bluffjax.metrics._poker_draw_stud. Every count of a
+hand is credited at the step where the hand ends (see "When counts are
+credited" in bluffjax.metrics._poker_draw_stud), to the player it describes:
+the counts of a rollout are those of the hands that ended in it. Each rate
+below is numerator / denominator, NaN without events, and summarize() also
+returns the denominator as n_<name>.
 
 Final hands. The env shuffles the deck at the deal and deals each later
 street from its front to the players still in at that point (a fold changes
@@ -31,9 +34,7 @@ card alone (the scorers' exact values, computed without sorting). The
 bettor's board is ahead if it scores strictly higher than the best board
 among the opponents still in.
 
-Per action, credited to the acting player (wins to the bettor, counted at the
-step that ends the hand; so the counts of one update's rollout can hold the
-win of a bluff or steal made in the previous rollout):
+Per action, credited to the acting player (wins to the bettor):
 - bluff_rate = bluffs / aggressive.
 - bluff_success = bluff_wins / bluffs: the hand then ends without a showdown
   and the actions after the bluff were all folds.
@@ -53,8 +54,7 @@ win of a bluff or steal made in the previous rollout):
   that everyone just called); it wins if every other player then folds
   before anyone calls or raises.
 
-Per hand, credited to every player (all are dealt in), counted at the step
-that ends the hand:
+Per hand, credited to every player (all are dealt in):
 - fold_street_<k> = fold_street[k - 3] / hands for k = 3..7: share of hands
   that end because all players but one folded, the last fold on street k.
 - showdown_rate = showdowns / hands: share of hands that reach a showdown.
@@ -70,10 +70,12 @@ from bluffjax.environments.seven_card_stud.seven_card_stud import SevenCardStudS
 from bluffjax.metrics._poker_draw_stud import (
     NO_PLAYER,
     five_card_score,
+    hand_end_counts,
     unanswered_aggressor,
     visible_score,
     won_without_showdown,
     would_lose,
+    zero_counts,
 )
 from bluffjax.metrics.base import Counts, GameMetrics, credit, rate
 from bluffjax.utils.game_utils.poker_utils import _score_seven_card_hand
@@ -123,7 +125,22 @@ def board_scores(state: SevenCardStudState) -> IntArray:
     return scores
 
 
+#: the counts of a hand's actions, kept in the carry until the hand ends
+EVENTS = (
+    "aggressive",
+    "bluffs",
+    "folds",
+    "correct_folds",
+    "aggressive_board_ahead",
+    "bluffs_board_ahead",
+    "aggressive_board_not_ahead",
+    "bluffs_board_not_ahead",
+    "steals",
+)
+
+
 class SevenCardStudCarry(NamedTuple):
+    hand: Counts  # EVENTS of this hand so far, by player: name -> (num_agents,)
     aggressor: IntArray  # bettor of the bet or raise followed only by folds
     aggressor_bluffed: BoolArray  # that bet or raise was a bluff
     aggressor_ahead: BoolArray  # ... made with the board ahead
@@ -146,6 +163,7 @@ class Metrics(GameMetrics):
 
     def init_carry(self) -> SevenCardStudCarry:
         return SevenCardStudCarry(
+            hand=zero_counts(EVENTS, self.num_agents),
             aggressor=jnp.int32(NO_PLAYER),
             aggressor_bluffed=jnp.bool_(False),
             aggressor_ahead=jnp.bool_(False),
@@ -182,7 +200,25 @@ class Metrics(GameMetrics):
         ahead = board[player] > jnp.max(jnp.where(others, board, -1))
         steal = aggressive & (state.stage == 0) & (state.raise_nums[0] == 0)
 
+        # This step's action, added to the hand's counts and credited when
+        # the hand ends.
+        hand, counts = hand_end_counts(
+            carry.hand,
+            {
+                "aggressive": credit(n, player, aggressive),
+                "bluffs": credit(n, player, bluff),
+                "folds": credit(n, player, fold),
+                "correct_folds": credit(n, player, fold & loses),
+                "aggressive_board_ahead": credit(n, player, aggressive & ahead),
+                "bluffs_board_ahead": credit(n, player, bluff & ahead),
+                "aggressive_board_not_ahead": credit(n, player, aggressive & ~ahead),
+                "bluffs_board_not_ahead": credit(n, player, bluff & ~ahead),
+                "steals": credit(n, player, steal),
+            },
+            done,
+        )
         last = SevenCardStudCarry(
+            hand=hand,
             aggressor=unanswered_aggressor(carry.aggressor, player, aggressive, fold),
             aggressor_bluffed=jnp.where(aggressive, bluff, carry.aggressor_bluffed),
             aggressor_ahead=jnp.where(aggressive, ahead, carry.aggressor_ahead),
@@ -193,28 +229,20 @@ class Metrics(GameMetrics):
         won = uncontested & (last.aggressor == winner)
         bluff_won = won & last.aggressor_bluffed
 
+        # The hand's outcome, known (and credited) at its end only.
         everyone = jnp.ones(n, dtype=jnp.float32)
         street = jax.nn.one_hot(state.stage, NUM_STREETS, dtype=jnp.float32)
-        counts = {
-            "aggressive": credit(n, player, aggressive),
-            "bluffs": credit(n, player, bluff),
-            "bluff_wins": credit(n, winner, bluff_won),
-            "folds": credit(n, player, fold),
-            "correct_folds": credit(n, player, fold & loses),
-            "aggressive_board_ahead": credit(n, player, aggressive & ahead),
-            "bluffs_board_ahead": credit(n, player, bluff & ahead),
-            "bluff_wins_board_ahead": credit(n, winner, bluff_won & last.aggressor_ahead),
-            "aggressive_board_not_ahead": credit(n, player, aggressive & ~ahead),
-            "bluffs_board_not_ahead": credit(n, player, bluff & ~ahead),
-            "bluff_wins_board_not_ahead": credit(
+        counts.update(
+            bluff_wins=credit(n, winner, bluff_won),
+            bluff_wins_board_ahead=credit(n, winner, bluff_won & last.aggressor_ahead),
+            bluff_wins_board_not_ahead=credit(
                 n, winner, bluff_won & ~last.aggressor_ahead
             ),
-            "steals": credit(n, player, steal),
-            "steal_wins": credit(n, winner, won & last.aggressor_steal),
-            "hands": everyone * done,
-            "fold_street": everyone[:, None] * street * uncontested,
-            "showdowns": everyone * (done & ~uncontested),
-        }
+            steal_wins=credit(n, winner, won & last.aggressor_steal),
+            hands=everyone * done,
+            fold_street=everyone[:, None] * street * uncontested,
+            showdowns=everyone * (done & ~uncontested),
+        )
         carry = jax.tree_util.tree_map(
             lambda reset, kept: jnp.where(done, reset, kept), self.init_carry(), last
         )
