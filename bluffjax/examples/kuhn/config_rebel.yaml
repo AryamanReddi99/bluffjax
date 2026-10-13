@@ -19,7 +19,7 @@ save_dir: ${repo_root:}/checkpoints/kuhn
 
 env_name: kuhn_poker
 seed: 0
-num_seeds: 1
+num_seeds: 5
 env_kwargs: {}
 
 project: bluffjax
