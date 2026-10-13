@@ -42,10 +42,18 @@ A rate with no events is NaN.
 import jax.numpy as jnp
 
 from bluffjax.environments.bluff.bluff import CHALLENGE, PLAY, BluffState
-from bluffjax.metrics.base import Counts, GameMetrics, credit, rate
+from bluffjax.metrics.base import Counts, GameMetrics, rate
 from bluffjax.utils.typing import Array, BoolArray, FloatArray
 
 CHALLENGE_ACTION = 0  # in phase CHALLENGE; any other action passes
+
+
+def credit(num_agents: int, player: Array, value: Array = 1.0) -> FloatArray:
+    """(num_agents,) array with `value` at index `player` and 0 elsewhere, as
+    bluffjax.metrics.base.credit (player is always a valid index here), but as
+    a one-hot product instead of a scatter: XLA fuses it with the rest of the
+    step, which takes a few percent off the training scripts' run time."""
+    return (jnp.arange(num_agents) == player) * jnp.asarray(value, jnp.float32)
 
 
 class Metrics(GameMetrics):
