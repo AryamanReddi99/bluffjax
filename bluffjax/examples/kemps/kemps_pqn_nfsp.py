@@ -277,9 +277,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     ) -> dict[str, FloatArray]:
         rng_avg, rng_br = jax.random.split(rng)
         metrics = {}
-        for name, act, params, rng_eval in (
-            ("avg", act_avg, avg_params, rng_avg),
-            ("br", act_br_greedy, br_params, rng_br),
+        # {stat}_vs_{opponent} for the average policy, {stat}_br_vs_{opponent}
+        # for the greedy BR
+        for prefix, act, params, rng_eval in (
+            ("", act_avg, avg_params, rng_avg),
+            ("br_", act_br_greedy, br_params, rng_br),
         ):
             result = evaluate_kemps(
                 env,
@@ -290,7 +292,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 config["compare_episodes"],
                 rng_eval,
             )
-            metrics.update(eval_metrics(f"{name}_vs_{baseline_name}", result))
+            metrics.update(eval_metrics(f"{prefix}vs_{baseline_name}", result))
         return metrics
 
     def train(
@@ -439,7 +441,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             last_q_vals = br_network.apply(br_train_state.params, runner_state.obs)
             last_q_max = jnp.max(jnp.where(last_mask, last_q_vals, -jnp.inf), axis=-1)
 
-            # Per-agent Q(lambda) targets in scaled reward units. Q-learning is
+            # Per-agent Q(lambda) targets in env reward units. Q-learning is
             # off-policy, so (as in NFSP) every decision with a known outcome
             # trains the Q-network; the trace is cut at average-policy decisions.
             targets, valid = per_agent_q_lambda_targets(
@@ -624,7 +626,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
             # Self-play statistics of the hands that ended in this rollout,
             # per agent and split by the policy it followed in that hand.
-            games_completed = transitions.done.sum()
+            episodes_completed = transitions.done.sum()
             agent_game_end = jnp.broadcast_to(
                 transitions.done[..., None], transitions.is_br.shape
             )
@@ -633,19 +635,19 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             metric = {
                 "update_step": runner_state.update_step,
                 "env_steps": (runner_state.update_step + 1) * num_envs * num_steps,
-                "games_completed": games_completed,
-                "games_truncated_frac": (
+                "episodes_completed": episodes_completed,
+                "episodes_truncated_frac": (
                     transitions.done & transitions.truncated.any(axis=-1)
                 ).sum()
-                / jnp.maximum(games_completed, 1),
+                / jnp.maximum(episodes_completed, 1),
                 "ep_length_avg": jnp.where(
                     transitions.done, transitions.game_length, 0
                 ).sum()
-                / jnp.maximum(games_completed, 1),
-                "br_return_per_game": (transitions.game_return * br_games).sum()
-                / jnp.maximum(br_games.sum(), 1),
-                "avg_return_per_game": (transitions.game_return * avg_games).sum()
+                / jnp.maximum(episodes_completed, 1),
+                "return_per_episode": (transitions.game_return * avg_games).sum()
                 / jnp.maximum(avg_games.sum(), 1),
+                "return_per_episode_br": (transitions.game_return * br_games).sum()
+                / jnp.maximum(br_games.sum(), 1),
                 "br_action_frac_rollout": transitions.is_br.mean(),
                 "q_sample_frac": train_mask.mean(),
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),

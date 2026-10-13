@@ -8,7 +8,7 @@ num_epochs: 4  # 4 x 4 in every model-free config
 num_minibatches: 4
 
 # BR (PPO), trained only on decisions made while following the BR
-lr: 2.5e-4  # as in every fixed NFSP config (the paper's PPO table says 3e-5)
+lr: 2.5e-4  # the same in every game
 anneal_lr: true  # linear decay to 0 over all gradient steps (false: constant)
 gamma: 0.99
 gae_lambda: 0.95

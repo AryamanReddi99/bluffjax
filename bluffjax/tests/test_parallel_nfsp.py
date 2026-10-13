@@ -624,11 +624,13 @@ def test_real_run_mixing_targets_and_reservoir(common, monkeypatch, tmp_path, na
         mask, action = seen["reservoir"][u][1], seen["reservoir"][u][2]
         assert np.take_along_axis(mask, action[:, None], 1).all()
         assert row["sl_buffer_seen"] == is_br[: (u + 1) * T].sum()
-        has_eval = "win_rate_avg_vs_random" in row
+        has_eval = "win_rate_vs_random" in row
         assert has_eval == (u % config["compare_interval"] == 0 or u == U - 1)
+        assert ("win_rate_br_vs_random" in row) == has_eval
+        assert "evaluated" not in row  # a flag, not logged
         if has_eval:
-            for who in ("avg", "br"):
-                total = sum(row[f"{k}_rate_{who}_vs_random"] for k in ("win", "loss", "draw"))
+            for who in ("", "br_"):  # the average policy, the BR
+                total = sum(row[f"{k}_rate_{who}vs_random"] for k in ("win", "loss", "draw"))
                 assert total == pytest.approx(1.0)
     # the per-game returns logged for the games that ended in each update, by
     # the policy the agent followed, are the env's
@@ -642,8 +644,8 @@ def test_real_run_mixing_targets_and_reservoir(common, monkeypatch, tmp_path, na
     for u, row in enumerate(logger.rows):
         sl = slice(u * T, (u + 1) * T)
         ended = np.broadcast_to(done[sl, :, None], is_br[sl].shape)
-        assert row["games_completed"] == done[sl].sum()
-        for key, mode in (("br_return_per_game", is_br[sl]), ("avg_return_per_game", ~is_br[sl])):
+        assert row["episodes_completed"] == done[sl].sum()
+        for key, mode in (("return_per_episode_br", is_br[sl]), ("return_per_episode", ~is_br[sl])):
             games = ended & mode
             want = game_return[sl][games].sum() / max(games.sum(), 1)
             assert row[key] == pytest.approx(want, rel=1e-5, abs=1e-5)
@@ -862,7 +864,7 @@ def test_main_writes_results_and_checkpoints(common, monkeypatch, tmp_path, name
             n_key = "n_player_rounds" if game == "goofspiel" else "n_decisions"
             assert row[f"game/{n_key}"] + row[f"game_br/{n_key}"] == T * N * env.num_agents
             evaluated = u % config["compare_interval"] == 0 or u == U - 1
-            assert ("win_rate_avg_vs_random" in row) == evaluated
+            assert ("win_rate_vs_random" in row) == evaluated
 
     obs = jnp.zeros((env.obs_dim,))
     A, H = env.num_actions, config["fc_dim_size"]
@@ -1020,8 +1022,8 @@ def test_half_checkpoint_and_round_trip(common, monkeypatch, tmp_path, name):
         jax.block_until_ready(jax.jit(mod.make_train(eval_config))(KEY, jnp.int32(0)))
         jax.effects_barrier()
         row = logger.rows[0]
-        for who in ("avg", "br"):
-            total = sum(row[f"{k}_rate_{who}_vs_baseline"] for k in ("win", "loss", "draw"))
+        for who in ("", "br_"):  # the average policy, the BR
+            total = sum(row[f"{k}_rate_{who}vs_baseline"] for k in ("win", "loss", "draw"))
             assert total == pytest.approx(1.0)
         wrong_type = "q_network" if network_type != "q_network" else "actor"
         with pytest.raises(ValueError):
@@ -1049,6 +1051,36 @@ def test_rotating_seats_and_teams(common):
         assert int(env._partner_idx(a)) == b  # the learner plays a team of partners
     first = np.flatnonzero(teams[:, 0])
     np.testing.assert_array_equal(np.diff(first), 3)
+
+
+def test_eval_metrics(common):
+    """{stat}_{name}: means over the games, win_rate_decided over the decided
+    ones (NaN when every game was a draw); format_eval prints every policy."""
+    f32 = jnp.float32
+    result = common.EvalResult(
+        win=jnp.array([1, 0, 0, 1], f32),
+        loss=jnp.array([0, 1, 0, 0], f32),
+        draw=jnp.array([0, 0, 1, 0], f32),
+        ret=jnp.array([2.0, -1.0, 0.0, 1.0]),
+        length=jnp.array([3.0, 4.0, 5.0, 4.0]),
+    )
+    metrics = {k: float(v) for k, v in common.eval_metrics("vs_random", result).items()}
+    assert metrics == pytest.approx({
+        "win_rate_vs_random": 0.5,
+        "loss_rate_vs_random": 0.25,
+        "draw_rate_vs_random": 0.25,
+        "win_rate_decided_vs_random": 2 / 3,
+        "avg_return_vs_random": 0.5,
+        "avg_episode_length_vs_random": 4.0,
+    })
+    zeros = jnp.zeros(4, f32)
+    all_draws = result._replace(win=zeros, loss=zeros, draw=jnp.ones(4, f32))
+    br = {k: float(v) for k, v in common.eval_metrics("br_vs_random", all_draws).items()}
+    assert np.isnan(br["win_rate_decided_br_vs_random"])
+    assert br["draw_rate_br_vs_random"] == 1.0 and br["win_rate_br_vs_random"] == 0.0
+    line = common.format_eval(metrics | br)
+    assert line.startswith("br_vs_random W/L/D 0.000/0.000/1.000 (win rate of decided games nan)")
+    assert "; vs_random W/L/D 0.500/0.250/0.250 (win rate of decided games 0.667)" in line
 
 
 def _random_policy(common):

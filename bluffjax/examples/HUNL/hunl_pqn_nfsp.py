@@ -32,11 +32,11 @@ and one average-policy network.
   seat, so every deal is played from both seats (with an odd count the last
   deal once). See run_compare_eval for the logged metrics.
 
-Units: the env pays raw chips per hand (stacks 100, blinds 1/2). Training (Q-values)
-and the logged returns use chips per hand. The two chip counts in the observation (raw chips, up
-to the 100-chip stack) are divided by the starting stack inside the networks
-(ChipScaledInput); the env and the observations stored in the reservoir stay
-in raw chips.
+Units: the env pays raw chips per hand (stacks 100, blinds 1/2). Training
+(Q-values) and the logged returns use chips per hand. The two chip counts in
+the observation (raw chips, up to the 100-chip stack) are divided by the
+starting stack inside the networks (chip_scaled); the env and the
+observations stored in the reservoir stay in raw chips.
 
 Game metrics (bluffjax.metrics.texas_nolimit_holdem: raise-size shares,
 all-in calls and their outcome, bluff rate and success, correct folds) are
@@ -92,6 +92,7 @@ from bluffjax.networks.mlp import (
     ActorDiscreteMLP,
     QNetworkDiscreteMLP,
 )
+from bluffjax.networks.scaled_input import ScaledInput
 from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
@@ -116,7 +117,7 @@ class Transition(NamedTuple):
     action: IntArray
     reward: FloatArray  # (num_agents,) env reward for every player, env units
     done: BoolArray  # the hand ended at this step (the env auto-resets)
-    q_max: FloatArray  # max over legal actions of Q(obs), scaled reward units
+    q_max: FloatArray  # max over legal actions of Q(obs), env reward units (chips)
     player_idx: IntArray
     info: dict[str, Any]
     is_br: BoolArray  # the acting player follows the BR in this hand
@@ -173,22 +174,16 @@ class SLUpdateState(NamedTuple):
     rng: PRNGKeyArray
 
 
-class ChipScaledInput(nn.Module):
-    """Applies `net` to the HUNL observation with its two chip-count features
-    (the acting player's chips in the pot and the largest chips in the pot, raw
-    chips up to the starting stack) divided by the starting stack. The 52 card
-    indicators pass through unchanged. Every use of the networks, training and
-    evaluation alike, goes through this, so they all see the same inputs."""
-
-    net: nn.Module
-    num_cards: int
-    init_chips: float
-
-    @nn.compact
-    def __call__(self, x: FloatArray) -> Any:
-        scale = jnp.ones(x.shape[-1], dtype=jnp.float32)
-        scale = scale.at[self.num_cards :].set(1.0 / self.init_chips)
-        return self.net(x * scale)
+def chip_scaled(net: nn.Module, env: Any) -> nn.Module:
+    """`net` applied to the HUNL observation with its two chip counts (the
+    acting player's chips in the pot and the largest chips in the pot,
+    features 52 and 53, raw chips up to init_chips) divided by init_chips;
+    the 52 card indicators pass through unchanged. Every use of the networks,
+    training, evaluation and checkpoints alike, goes through this, so they
+    all see the same inputs. The parameters of `net` sit under "net"."""
+    return ScaledInput(
+        net=net, start=env.deck_size, stop=env.deck_size + 2, factor=1.0 / env.init_chips
+    )
 
 
 def _pick(arr: FloatArray, player: IntArray) -> FloatArray:
@@ -363,12 +358,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             )
         elif compare_network_type == "actor_critic":
             # a HUNL PPO-NFSP network, which scales the chip counts itself
-            actor_critic_network = ChipScaledInput(
+            actor_critic_network = chip_scaled(
                 ActorCriticDiscreteMLP(
                     action_dim=action_dim, hidden_dim=config["fc_dim_size"]
                 ),
-                num_cards=env.deck_size,
-                init_chips=env.init_chips,
+                env,
             )
             template_obs = jnp.zeros((env.obs_dim,), dtype=jnp.float32)
             template_params = actor_critic_network.init(
@@ -509,19 +503,20 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         br_net: QNetworkDiscreteMLP,
         avg_net: ActorDiscreteMLP,
     ) -> dict[str, FloatArray]:
-        """Evaluation of the average policy (p = avg, sampling from the
-        actor) and the BR (p = br, greedy in Q).
+        """Evaluation of the average policy (p = "", NFSP's output policy,
+        sampling from the actor) and the BR (p = "br_", greedy in Q).
 
         Each plays exactly compare_episodes complete hands against the
         opponent (o = random or baseline), in mirrored pairs (play_hands).
         Per policy, with the learner's result r of a hand in chips:
-            avg_return_{p}_vs_{o}         mean r per hand
-            win_rate_{p}_vs_{o}           share of hands with r > 0
-            loss_rate_{p}_vs_{o}          r < 0
-            draw_rate_{p}_vs_{o}          r = 0 (a split pot)
-            win_rate_decided_{p}_vs_{o}   wins / (wins + losses)
-            avg_episode_length_{p}_vs_{o} actions (env steps) per hand
-        and eval_unfinished_hands, the hands of both policies stopped at the
+            avg_return_{p}vs_{o}          mean r per hand
+            win_rate_{p}vs_{o}            share of hands with r > 0
+            loss_rate_{p}vs_{o}           r < 0
+            draw_rate_{p}vs_{o}           r = 0 (a split pot)
+            win_rate_decided_{p}vs_{o}    wins / (wins + losses), NaN if none
+            avg_episode_length_{p}vs_{o}  actions (env steps) per hand
+        (e.g. win_rate_vs_random and win_rate_br_vs_random) and
+        eval_unfinished_hands, the hands of both policies stopped at the
         ReBeL opponent's solve limit (0 for opponents without search; such
         a hand would count as a draw).
         """
@@ -537,8 +532,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         )
         metrics = {}
         unfinished = jnp.int32(0)
-        for name, player, params, rng_eval in zip(
-            ("avg", "br"),
+        for prefix, player, params, rng_eval in zip(
+            ("", "br_"),
             (avg_player, br_player),
             (avg_params, br_params),
             jax.random.split(rng),
@@ -555,7 +550,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 ret=r,
                 length=hands.hand_length,
             )
-            metrics.update(eval_metrics(f"{name}_vs_{opponent}", result))
+            metrics.update(eval_metrics(f"{prefix}vs_{opponent}", result))
             unfinished += jnp.sum(~hands.finished)
         metrics["eval_unfinished_hands"] = unfinished
         return metrics
@@ -582,19 +577,17 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             state, obs = jax.vmap(env.reset, in_axes=(0))(rng_resets)
 
             rng_inner, rng_br_init, rng_avg_init = jax.random.split(rng_inner, 3)
-            br_network = ChipScaledInput(
+            br_network = chip_scaled(
                 QNetworkDiscreteMLP(
                     action_dim=action_dim, hidden_dim=config["fc_dim_size"]
                 ),
-                num_cards=env.deck_size,
-                init_chips=env.init_chips,
+                env,
             )
-            avg_network = ChipScaledInput(
+            avg_network = chip_scaled(
                 ActorDiscreteMLP(
                     action_dim=action_dim, hidden_dim=config["fc_dim_size"]
                 ),
-                num_cards=env.deck_size,
-                init_chips=env.init_chips,
+                env,
             )
             br_params = br_network.init(rng_br_init, obs)
             avg_params = avg_network.init(rng_avg_init, obs)
@@ -761,9 +754,10 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             )
             last_q_max = jnp.max(jnp.where(last_mask, last_q_vals, -jnp.inf), axis=-1)
 
-            # Per-player Q(lambda) targets in scaled reward units. Q-learning is
-            # off-policy, so (as in NFSP) every decision with a known outcome
-            # trains the Q-network; the trace is cut at average-policy decisions.
+            # Per-player Q(lambda) targets in env reward units (chips).
+            # Q-learning is off-policy, so (as in NFSP) every decision with a
+            # known outcome trains the Q-network; the trace is cut at
+            # average-policy decisions.
             targets, valid = per_player_q_lambda_targets(
                 transitions.q_max,
                 transitions.reward,
@@ -1005,6 +999,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
                 "sl_buffer_seen": sl_buffer.seen.astype(jnp.float32),
                 "update_step": runner_state.update_step,
+                # the flag that logging_callback reads (not logged itself)
                 "evaluated": should_compare,
             }
             metric.update(eval_results)
@@ -1022,11 +1017,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     "env_steps": (runner_state.update_step + 1)
                     * config["num_envs"]
                     * config["num_steps_per_env_per_update"],
-                    "hands_completed": transitions.done.sum(),
-                    "br_return_per_hand": (transitions.reward * br_hands).sum()
-                    / jnp.maximum(br_hands.sum(), 1),
-                    "avg_return_per_hand": (transitions.reward * avg_hands).sum()
+                    "episodes_completed": transitions.done.sum(),
+                    "return_per_episode": (transitions.reward * avg_hands).sum()
                     / jnp.maximum(avg_hands.sum(), 1),
+                    "return_per_episode_br": (transitions.reward * br_hands).sum()
+                    / jnp.maximum(br_hands.sum(), 1),
                     "q_sample_frac": train_mask.mean(),
                     "epsilon": epsilon_schedule(
                         jnp.asarray(runner_state.update_step, dtype=jnp.float32)
@@ -1126,12 +1121,13 @@ def send_to_log(seed: IntArray, metric: dict[str, Any]) -> None:
 
 def logging_callback(float_names, int_names, bool_names, seed_val, packed) -> None:
     """Logs one update of one seed to results.jsonl and wandb; the
-    evaluation results only in the updates that evaluated."""
+    evaluation results only in the updates that evaluated (metric
+    "evaluated", a flag that isn't logged)."""
     float_values, int_values = (np.asarray(x) for x in packed)
     metrics = dict(zip(float_names, float_values)) | dict(zip(int_names, int_values))
     for k in bool_names:
         metrics[k] = bool(metrics[k])
-    if not metrics["evaluated"]:
+    if not metrics.pop("evaluated"):
         metrics = {k: v for k, v in metrics.items() if not is_eval_metric(k)}
     RESULTS_LOG.log(metrics, int(seed_val))
 
@@ -1156,11 +1152,14 @@ def save_checkpoints(
     strategy), br the PQN best-response Q-network. Each file holds the flax
     params of one network, without a seed axis, written with
     flax.serialization.to_bytes. The average policy is
-    ChipScaledInput(ActorDiscreteMLP(action_dim, fc_dim_size), 52, 100)
-    mapping a raw env observation (env.obs_from_state(state), env.obs_dim
-    floats, for the player to act) to action logits over the env's 5
-    actions; the BR is ChipScaledInput(QNetworkDiscreteMLP(action_dim,
-    fc_dim_size), 52, 100) mapping it to Q-values in chips (its policy is the argmax over legal actions). Restore with
+    chip_scaled(ActorDiscreteMLP(action_dim, fc_dim_size), env) mapping a raw
+    env observation (env.obs_from_state(state), env.obs_dim floats, for the
+    player to act) to action logits over the env's 5 actions; the BR is
+    chip_scaled(QNetworkDiscreteMLP(action_dim, fc_dim_size), env) mapping it
+    to Q-values in chips (its policy is the argmax over legal actions).
+    chip_scaled(net, env) is bluffjax.networks.scaled_input.ScaledInput(net,
+    start=52, stop=54, factor=1 / env.init_chips) (1 / 100 with the default
+    stack), with the MLP's parameters under "net". Restore with
     run_utils.load_params(path, template), template = network.init(rng,
     obs), and mask illegal actions (env.get_avail_actions(state)).
     The files aren't evaluation opponents of these scripts (compare_network_type
@@ -1201,14 +1200,11 @@ def main(config: dict) -> None:
         exp_ids = jnp.arange(config["num_seeds"])
 
         train_fn = make_train(config)
+
+        # The run directory and the results log come first, so that
+        # results.jsonl fills while the run trains (wall_time counts from
+        # here, compilation included).
         run_dir = make_run_dir(config)
-        print(f"Run directory: {run_dir}")
-
-        print("Starting compile...")
-        start = time.time()
-        train_vjit = jax.jit(jax.vmap(train_fn)).lower(rng_seeds, exp_ids).compile()
-        print(f"Compile finished in {time.time() - start:.1f} s")
-
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
@@ -1227,10 +1223,17 @@ def main(config: dict) -> None:
             for i in range(config["num_seeds"])
         ]
         RESULTS_LOG = ResultsLog(run_dir, WANDB_RUNS)
+        print(f"Run directory: {run_dir}")
+
+        print("Starting compile...")
+        start = time.time()
+        train_vjit = jax.jit(jax.vmap(train_fn)).lower(rng_seeds, exp_ids).compile()
+        print(f"Compile finished in {time.time() - start:.1f} s")
 
         print("Running...")
         start = time.time()
         final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        jax.effects_barrier()  # every update's record is in results.jsonl
         run_time = time.time() - start
         print(
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "
