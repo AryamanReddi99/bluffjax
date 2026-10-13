@@ -37,6 +37,7 @@ every seed after half and after all of the updates, see save_checkpoints.
 """
 
 import datetime
+import functools
 import time
 from typing import Callable, NamedTuple
 
@@ -1004,7 +1005,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 )
             )
 
-            jax.experimental.io_callback(logging_callback, None, seed, metric)
+            send_to_log(seed, metric)
 
             # Half-budget checkpoint: the networks after num_half updates.
             take_half = runner_state.update_step + 1 == num_half
@@ -1051,11 +1052,33 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     return train
 
 
-def logging_callback(seed_val, metric_dict) -> None:
+def send_to_log(seed: IntArray, metric: dict[str, Any]) -> None:
+    """Calls logging_callback on the host with the update's scalar metrics
+    packed into one float32 and one int32 array: every array passed to a
+    host callback is a transfer of its own, and one per metric costs more
+    than the rollout's game metrics."""
+    names = sorted(metric)
+    values = {k: jnp.asarray(metric[k]) for k in names}
+    floats = [k for k in names if jnp.issubdtype(values[k].dtype, jnp.floating)]
+    ints = [k for k in names if k not in floats]
+    bools = [k for k in ints if values[k].dtype == jnp.bool_]
+    packed = (
+        jnp.stack([values[k].astype(jnp.float32) for k in floats]),
+        jnp.stack([values[k].astype(jnp.int32) for k in ints]),
+    )
+    jax.experimental.io_callback(
+        functools.partial(logging_callback, floats, ints, bools), None, seed, packed
+    )
+
+
+def logging_callback(float_names, int_names, bool_names, seed_val, packed) -> None:
     """Logs one update of one seed to results.jsonl and wandb; the
     evaluation results only in the updates that evaluated."""
-    metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
-    if not bool(metrics["evaluated"]):
+    float_values, int_values = (np.asarray(x) for x in packed)
+    metrics = dict(zip(float_names, float_values)) | dict(zip(int_names, int_values))
+    for k in bool_names:
+        metrics[k] = bool(metrics[k])
+    if not metrics["evaluated"]:
         for k in EVAL_KEYS:
             metrics.pop(k, None)
     RESULTS_LOG.log(metrics, int(seed_val))
