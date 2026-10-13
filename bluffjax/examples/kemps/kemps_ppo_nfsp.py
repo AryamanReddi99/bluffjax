@@ -37,12 +37,40 @@ env.get_avail_actions (a game action is legal with every signal).
   actions or a checkpoint) playing the other team(s), the learner's team
   alternating over the hands; wins, losses and draws (real deals and hands
   cut off at the horizon) are reported separately.
+- Game metrics (bluffjax/metrics/kemps.py: KEMPS and STOP KEMPS precision,
+  interception and own-call rates of four of a kind, signal mutual
+  information, KEMPS latency) of every update's self-play rollout,
+  credited to the players they describe: game/<metric> over the players
+  following the average policy in that hand, game_br/ over those following
+  the BR, each rate with its number of events (n_...). Their per-hand part
+  is carried across updates in the runner state; a hand cut off at the
+  horizon ends without a call. They need each step's player order, which
+  env.step draws from its key and doesn't return (metrics.kemps.step_order).
 
 Units: the env pays each team k / (k - 1) * (mean(letters) - its letter) at
 the end of a hand, +1 / -1 with two teams; logged returns are in these units.
 
-Checkpoints (save_checkpoints): half- and full-budget networks of every seed,
-see parallel_nfsp_common.save_checkpoints.
+Run directory, {save_dir}/{job_type}_{timestamp}/, made when the run starts
+(bluffjax.examples.run_utils.make_run_dir):
+    config.yaml                  the resolved config, with num_update_steps,
+                                 half_update_steps and run_dir
+    results.jsonl                one record per update and seed: seed_index,
+                                 wall_time and every metric sent to wandb,
+                                 env_steps included (run_utils.read_results)
+    half/avg_policy_{i}.msgpack  if save_checkpoints: the networks of seed i
+    half/br_{i}.msgpack          after half_update_steps(num_update_steps)
+    full/avg_policy_{i}.msgpack  updates and after all num_update_steps, from
+    full/br_{i}.msgpack          the same run (the learning rate decays over
+                                 the whole run)
+Every checkpoint file holds the flax params, without a seed axis, of an
+ActorCriticDiscreteMLP(action_dim=env.num_actions, hidden_dim=fc_dim_size):
+input one player's observation (env.obs_from_state(state)[p], env.obs_dim
+floats), output (logits over the actions game_action * comm_dim + signal,
+value in units of reward_scale * env reward). Mask the illegal swaps
+(env.get_avail_actions(state)[p]) before the softmax; the average policy's
+value head is untrained. Load a file with run_utils.load_params(path,
+network.init(rng, obs)), or both networks of a seed with
+parallel_nfsp_common.load_checkpoint.
 """
 
 import datetime
@@ -76,10 +104,8 @@ from bluffjax.examples.parallel_nfsp_common import (
     eval_metrics,
     evaluate_kemps,
     greedy_random_ties,
-    half_update_steps,
     init_sl_buffer,
     kemps_horizon_cutoff,
-    load_params,
     log_update,
     per_agent_gae,
     print_final_evals,
@@ -89,6 +115,14 @@ from bluffjax.examples.parallel_nfsp_common import (
     sample_sl_batch,
     save_checkpoints,
 )
+from bluffjax.examples.run_utils import (
+    ResultsLog,
+    half_update_steps,
+    load_params,
+    make_run_dir,
+)
+from bluffjax.metrics import Counts, make_metrics, masked_totals, prefixed
+from bluffjax.metrics.kemps import step_order
 from bluffjax.networks.mlp import (
     ActorCriticDiscreteMLP,
     ActorDiscreteMLP,
@@ -97,7 +131,8 @@ from bluffjax.networks.mlp import (
 from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
-WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
+# results.jsonl of the run and its wandb runs (one per vmapped seed), made in main()
+RESULTS_LOG: ResultsLog | None = None
 # EVALS[seed] = [(env_steps, {metric: value}), ...]
 EVALS: dict[int, list[tuple[int, dict[str, float]]]] = {}
 
@@ -116,6 +151,7 @@ class Transition(NamedTuple):
     is_br: BoolArray  # the agent follows the BR in this hand
     game_return: FloatArray  # env rewards of the hand so far, this step included
     game_length: IntArray  # (num_envs,) steps of the hand so far, this one included
+    game_counts: Counts  # game metrics of the step, credited per agent
 
 
 class RunnerState(NamedTuple):
@@ -127,6 +163,7 @@ class RunnerState(NamedTuple):
     br_mode: BoolArray  # (num_envs, num_agents) policy drawn for the current hand
     game_return: FloatArray  # (num_envs, num_agents) rewards so far this hand
     game_length: IntArray  # (num_envs,) steps so far this hand
+    metric_carry: Any  # per-env carry of the game metrics (current hand)
     half: Checkpoint  # networks after half_update_steps updates
     update_step: IntArray
     rng: PRNGKeyArray
@@ -158,6 +195,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     if config["batch_shuffle_dim"] % config["num_minibatches"]:
         raise ValueError("num_minibatches must divide the number of decisions per update")
     num_half = half_update_steps(config["num_update_steps"])
+    gm = make_metrics("kemps", env)  # bluffjax/metrics/kemps.py
     template_obs = jnp.zeros((env.obs_dim,), dtype=jnp.float32)
 
     network = ActorCriticDiscreteMLP(
@@ -318,19 +356,32 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     0.0,
                 )
 
+                step_keys = jax.random.split(rng_step, num_envs)
                 next_state, next_obs, reward, absorbing, done, info = jax.vmap(
                     env.step
-                )(jax.random.split(rng_step, num_envs), state_s, action)
+                )(step_keys, state_s, action)
                 # Cut off at the horizon, not over: done without absorbing,
                 # or (as this env sets absorbing then too) done without a
                 # declaration or a real deal.
                 cutoff = kemps_horizon_cutoff(env, state_s, action, done)
                 truncated = done[:, None] & (~absorbing | cutoff[:, None])
 
+                # Game metrics of this step. They need the step's player order
+                # (whose declaration counts), which env.step draws from its key
+                # but doesn't return.
+                order = jax.vmap(lambda key: step_order(env, key))(step_keys)
+                metric_carry, game_counts = jax.vmap(gm.step)(
+                    runner_state_inner.metric_carry,
+                    state_s,
+                    action,
+                    next_state,
+                    reward,
+                    done,
+                    {**info, "order": order},
+                )
+
                 game_return = runner_state_inner.game_return + reward
                 game_length = runner_state_inner.game_length + 1
-                # Game-specific per-step data (from state_s, action, info) can
-                # be added to the Transition here for logging.
                 transition = Transition(
                     obs=obs_s,
                     action_mask=action_mask,
@@ -343,6 +394,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     is_br=is_br,
                     game_return=game_return,
                     game_length=game_length,
+                    game_counts=game_counts,
                 )
                 runner_state_inner = runner_state_inner._replace(
                     state=next_state,
@@ -352,6 +404,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     ),
                     game_return=jnp.where(done[:, None], 0.0, game_return),
                     game_length=jnp.where(done, 0, game_length),
+                    metric_carry=metric_carry,
                     rng=rng_s,
                 )
                 return runner_state_inner, transition
@@ -662,6 +715,17 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             metric.update(ppo_loss_info)
             metric.update(sl_loss_info)
 
+            # Game metrics of this rollout, credited to the players they
+            # describe: game/ for the players following the average policy
+            # (NFSP's output strategy) in that hand, game_br/ for those
+            # following the BR.
+            for prefix, mask in (
+                ("game", ~transitions.is_br),
+                ("game_br", transitions.is_br),
+            ):
+                totals = masked_totals(transitions.game_counts, mask)
+                metric.update(prefixed(prefix, gm.summarize(totals)))
+
             io_callback(logging_callback, None, seed, metric)
 
             # Half-budget checkpoint: the networks after num_half updates.
@@ -690,6 +754,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             br_mode=br_mode,
             game_return=jnp.zeros((num_envs, num_agents), dtype=jnp.float32),
             game_length=jnp.zeros((num_envs,), dtype=jnp.int32),
+            metric_carry=jax.tree_util.tree_map(
+                lambda x: jnp.broadcast_to(x, (num_envs,) + x.shape), gm.init_carry()
+            ),
             half=Checkpoint(avg_params, br_params),  # replaced after num_half updates
             update_step=jnp.array(0, dtype=jnp.int32),
             rng=rng,
@@ -706,12 +773,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
 
 def logging_callback(seed_val, metric_dict) -> None:
-    log_update(WANDB_RUNS, EVALS, seed_val, metric_dict)
+    log_update(RESULTS_LOG, EVALS, seed_val, metric_dict)
 
 
 @hydra.main(version_base=None, config_path="./", config_name="config_ppo_nfsp")
 def main(config: dict) -> None:
-    global WANDB_RUNS
+    global RESULTS_LOG
+    wandb_runs = []
     try:
         config = OmegaConf.to_container(config, resolve=True)
         config["num_update_steps"] = int(
@@ -730,23 +798,16 @@ def main(config: dict) -> None:
             * config["num_envs"]
             * config["num_steps_per_env_per_update"]
         )
+        train = make_train(config)  # completes config (batch_shuffle_dim)
 
-        rng = jax.random.PRNGKey(config["seed"])
-        rng_seeds = jax.random.split(rng, config["num_seeds"])
-        exp_ids = jnp.arange(config["num_seeds"])
-
-        print("Starting compile...")
-        start = time.time()
-        train_vjit = (
-            jax.jit(jax.vmap(make_train(config))).lower(rng_seeds, exp_ids).compile()
-        )
-        print(f"Compile finished in {time.time() - start:.1f} s")
-
+        # The run directory and the results log come first, so that
+        # results.jsonl fills while the run trains.
+        run_dir = make_run_dir(config)
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
         )
-        WANDB_RUNS = [
+        wandb_runs = [
             wandb.init(
                 project=config["project"],
                 group=group,
@@ -759,10 +820,22 @@ def main(config: dict) -> None:
             )
             for i in range(config["num_seeds"])
         ]
+        RESULTS_LOG = ResultsLog(run_dir, wandb_runs)
+        print(f"Run directory: {run_dir}")
+
+        rng = jax.random.PRNGKey(config["seed"])
+        rng_seeds = jax.random.split(rng, config["num_seeds"])
+        exp_ids = jnp.arange(config["num_seeds"])
+
+        print("Starting compile...")
+        start = time.time()
+        train_vjit = jax.jit(jax.vmap(train)).lower(rng_seeds, exp_ids).compile()
+        print(f"Compile finished in {time.time() - start:.1f} s")
 
         print("Running...")
         start = time.time()
         final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        jax.effects_barrier()  # every update's record is in results.jsonl
         run_time = time.time() - start
         print(
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "
@@ -771,8 +844,9 @@ def main(config: dict) -> None:
         )
         print_final_evals(EVALS)
         if config["save_checkpoints"]:
-            run_dir = save_checkpoints(
-                config,
+            save_checkpoints(
+                run_dir,
+                config["num_seeds"],
                 final_runner_state.half,
                 Checkpoint(
                     final_runner_state.avg_train_state.params,
@@ -781,7 +855,7 @@ def main(config: dict) -> None:
             )
             print(f"Saved checkpoints to {run_dir}")
     finally:
-        for run in WANDB_RUNS:
+        for run in wandb_runs:
             run.finish()
         print("Finished.")
 

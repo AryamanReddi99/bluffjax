@@ -245,6 +245,17 @@ def greedy_random_ties(
     return jax.random.categorical(rng, jnp.where(ties, 0.0, -jnp.inf))
 
 
+def epsilon_greedy_probs(
+    greedy_action: IntArray, action_mask: BoolArray, eps: FloatArray
+) -> FloatArray:
+    """Action distribution of the PQN scripts' epsilon-greedy BR: a uniformly
+    random legal action with probability eps, greedy_action otherwise.
+    greedy_action (...,), action_mask (..., num_actions) -> (..., num_actions)."""
+    uniform = action_mask / action_mask.sum(axis=-1, keepdims=True)
+    greedy = jax.nn.one_hot(greedy_action, action_mask.shape[-1], dtype=jnp.float32)
+    return eps * uniform + (1.0 - eps) * greedy
+
+
 # =============================================================================
 # Checkpoints
 # =============================================================================
