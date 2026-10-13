@@ -14,8 +14,8 @@ solve_chunk: 64  # subgames solved at once (bounds GPU memory)
 steps_per_chunk: 8  # self-play steps per jitted call
 
 # Value network (MLP with LayerNorm and GeLU) and its training
-value_hidden_dim: 512
-value_num_layers: 3
+value_hidden_dim: 128  # 2 x 128, the network size of every baseline
+value_num_layers: 2
 value_lr: 3e-4
 lr_halve_at: [0.5, 0.75]  # fractions of training at which the lr halves
 batch_size: 512

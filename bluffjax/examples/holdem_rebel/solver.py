@@ -58,8 +58,8 @@ MIN_MASS = 1e-6
 class ValueNetwork(nn.Module):
     """MLP with LayerNorm and GeLU (as in ReBeL), both players' values out."""
 
-    hidden_dim: int = 512
-    num_layers: int = 3
+    hidden_dim: int = 128
+    num_layers: int = 2
 
     @nn.compact
     def __call__(self, pub: FloatArray, beliefs: FloatArray) -> FloatArray:
