@@ -1,8 +1,10 @@
 """5-Card Draw metrics (bluffjax-metrics.md), from environment steps.
 
-Hands are scored with the env's scorer, poker_utils._score_five_card_hand,
-and a hand's category is score // 15**5: high card (1) < pair < two pair <
-trips < straight < flush < full house < quads < straight flush (9). Aggressive
+Hands are scored with the env's showdown scorer (the values of
+poker_utils._score_five_card_hand, computed without sorting: see
+_poker_draw_stud.five_card_score), and a hand's category is score // 15**5:
+high card (1) < pair < two pair < trips < straight < flush < full house <
+quads < straight flush (9). Aggressive
 action, would lose at showdown, bluff and bluff success are defined in
 bluffjax.metrics._poker_draw_stud. Every count is credited to one player
 (shape (num_agents,)); each rate below is numerator / denominator, NaN
@@ -64,27 +66,19 @@ from bluffjax.metrics._poker_draw_stud import (
     CATEGORY_BASE,
     HIGH_CARD,
     NO_PLAYER,
+    credit,
+    five_card_score,
     unanswered_aggressor,
     won_without_showdown,
     would_lose,
 )
-from bluffjax.metrics.base import Counts, GameMetrics, credit, rate
-from bluffjax.utils.game_utils.poker_utils import (
-    _card_rank,
-    _card_suit,
-    _score_five_card_hand,
-)
+from bluffjax.metrics.base import Counts, GameMetrics, rate
 from bluffjax.utils.typing import Array, BoolArray, FloatArray, IntArray
 
 DRAW_STAGE = 1
 POST_DRAW_STAGE = 2
 # raise half the pot, raise the pot, all-in
 FIRST_RAISE, LAST_RAISE = 1, 3
-
-
-def hand_score(cards: IntArray) -> IntArray:
-    """Score of a 5-card hand, as the env's showdown scores it."""
-    return _score_five_card_hand(_card_rank(cards), _card_suit(cards))
 
 
 def hand_after_draw(
@@ -146,7 +140,7 @@ class Metrics(GameMetrics):
         n = self.num_agents
         player = state.current_player_idx
         in_hand = ~state.folded
-        scores = jax.vmap(hand_score)(state.agent_cards)
+        scores = jax.vmap(five_card_score)(state.agent_cards)
 
         # The draw: one action per player still in, at the draw stage.
         draw = (
@@ -160,7 +154,7 @@ class Metrics(GameMetrics):
         new_hand = jnp.where(done, rebuilt, next_state.agent_cards[player])
         known = draw & (~done | rebuilt_exact)
         category = scores[player] // CATEGORY_BASE
-        improved = hand_score(new_hand) // CATEGORY_BASE > category
+        improved = five_card_score(new_hand) // CATEGORY_BASE > category
         high_card_draw = draw & (category == HIGH_CARD)
         snow = high_card_draw & (num_drawn == 0)
 

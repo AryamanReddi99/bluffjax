@@ -17,19 +17,71 @@
   Only the last aggressive action of a hand can succeed.
 
 These helpers work on one env (no batch axis) and any number of players.
+
+Cost. The metrics run at every env step, vmapped over the envs, where
+jnp.sort and scatters are slow; the scorers below give exactly the values of
+the env's sort-based scorers without sorting (tests compare them on every
+possible input), and credit() is metrics.base.credit without a scatter.
 """
 
 import jax.numpy as jnp
 
-from bluffjax.utils.typing import BoolArray, IntArray
+from bluffjax.utils.game_utils.poker_utils import (
+    _card_rank,
+    _encode_score,
+    _score_seven_card_hand,
+    _top_ranks,
+)
+from bluffjax.utils.typing import Array, BoolArray, FloatArray, IntArray
 
 #: no player (e.g. no unanswered bet or raise)
 NO_PLAYER = -1
-#: score // CATEGORY_BASE is the category of a poker_utils hand score:
-#: 1 high card, 2 pair, 3 two pair, 4 trips, 5 straight, 6 flush, 7 full
-#: house, 8 quads, 9 straight flush
+#: a poker_utils hand score is category * 15**5 + tiebreaks, so score //
+#: CATEGORY_BASE is its category: 1 high card, 2 pair, 3 two pair, 4 trips,
+#: 5 straight, 6 flush, 7 full house, 8 quads, 9 straight flush
 CATEGORY_BASE = 15**5
 HIGH_CARD = 1
+
+
+def credit(num_agents: int, player: IntArray, value: Array = 1.0) -> FloatArray:
+    """(num_agents,) array with `value` at index `player` and 0 elsewhere
+    (metrics.base.credit, as a comparison instead of a scatter)."""
+    return (jnp.arange(num_agents) == player) * jnp.asarray(value, jnp.float32)
+
+
+def five_card_score(cards: IntArray) -> IntArray:
+    """poker_utils._score_five_card_hand of a 5-card hand (the env's showdown
+    scorer), computed by _score_seven_card_hand, which is equal to it on
+    every 5-card hand (tests/test_poker_utils.py) and doesn't sort."""
+    return _score_seven_card_hand(cards)
+
+
+def visible_score(cards: IntArray) -> IntArray:
+    """poker_utils._score_visible_upcards of 1-4 face-up cards (the env's
+    betting-order scorer), with its sorts replaced by _top_ranks: the same
+    categories (high card, pair, two pair, trips, quads) and tiebreaks."""
+    ranks = _card_rank(cards)
+    rank_vals = jnp.arange(2, 15, dtype=jnp.int32)
+    counts = jnp.sum(ranks[:, None] == rank_vals, axis=0)
+    quad_rank = jnp.max(jnp.where(counts == 4, rank_vals, -1))
+    trip_rank = jnp.max(jnp.where(counts == 3, rank_vals, -1))
+    num_pairs = jnp.sum(counts == 2)
+    high_pair, low_pair = _top_ranks(counts == 2, 2)
+    k = jnp.maximum(_top_ranks(counts == 1, 4), 0)
+    score = _encode_score(1, jnp.array([k[0], k[1], k[2], k[3], 0]))
+    score = jnp.where(
+        num_pairs >= 1, _encode_score(2, jnp.array([high_pair, k[0], k[1], k[2], 0])), score
+    )
+    score = jnp.where(
+        num_pairs == 2, _encode_score(3, jnp.array([high_pair, low_pair, k[0], 0, 0])), score
+    )
+    score = jnp.where(
+        trip_rank > 0, _encode_score(4, jnp.array([trip_rank, k[0], k[1], 0, 0])), score
+    )
+    score = jnp.where(
+        quad_rank > 0, _encode_score(5, jnp.array([quad_rank, k[0], 0, 0, 0])), score
+    )
+    return score
 
 
 def would_lose(scores: IntArray, in_hand: BoolArray, player: IntArray) -> BoolArray:

@@ -23,8 +23,9 @@ cards as the env ranks them for the betting order
 (SevenCardStud._first_to_act_by_upcards: poker_utils._score_visible_upcards
 of the 2-4 up cards, or the five-card score when a 7th-street community card
 makes a five-card board), on 3rd street _score_visible_upcards of the door
-card alone. The bettor's board is ahead if it scores strictly higher than the
-best board among the opponents still in.
+card alone (the scorers' exact values, computed without sorting). The
+bettor's board is ahead if it scores strictly higher than the best board
+among the opponents still in.
 
 Per action, credited to the acting player (wins to the bettor):
 - bluff_rate = bluffs / aggressive.
@@ -60,18 +61,15 @@ import jax.numpy as jnp
 from bluffjax.environments.seven_card_stud.seven_card_stud import SevenCardStudState
 from bluffjax.metrics._poker_draw_stud import (
     NO_PLAYER,
+    credit,
+    five_card_score,
     unanswered_aggressor,
+    visible_score,
     won_without_showdown,
     would_lose,
 )
-from bluffjax.metrics.base import Counts, GameMetrics, credit, rate
-from bluffjax.utils.game_utils.poker_utils import (
-    _card_rank,
-    _card_suit,
-    _score_five_card_hand,
-    _score_seven_card_hand,
-    _score_visible_upcards,
-)
+from bluffjax.metrics.base import Counts, GameMetrics, rate
+from bluffjax.utils.game_utils.poker_utils import _score_seven_card_hand
 from bluffjax.utils.typing import Any, Array, BoolArray, FloatArray, IntArray
 
 CALL, RAISE, FOLD, CHECK = 0, 1, 2, 3
@@ -100,20 +98,22 @@ def final_hands(env: Any, state: SevenCardStudState) -> IntArray:
 def board_scores(state: SevenCardStudState) -> IntArray:
     """(num_agents,) score of every player's face-up cards on the current
     street, as SevenCardStud._first_to_act_by_upcards ranks them (on 3rd
-    street the door card alone)."""
+    street the door card alone): _score_visible_upcards of 1-4 cards, or the
+    five-card score of a 7th-street board with a community card.
+
+    The scores are the env scorers' values (computed without sorting, see
+    _poker_draw_stud). A community card on 7th street needs more than 7
+    players (7 cards each for at most 7 players fit in the deck), so the
+    five-card board is only scored then.
+    """
     up = jnp.maximum(state.agent_cards[:, 2:], 0)  # face-up card of streets 0-4
-    num_up = jnp.where(
-        (state.stage == 4) & state.community[4], 5, jnp.minimum(state.stage + 1, 4)
-    )
-
-    def score_board(k):
-        return jax.vmap(_score_visible_upcards)(up[:, :k])
-
-    return jnp.select(
-        [num_up == k for k in (1, 2, 3, 4)],
-        [score_board(k) for k in (1, 2, 3, 4)],
-        jax.vmap(lambda c: _score_five_card_hand(_card_rank(c), _card_suit(c)))(up),
-    )
+    boards = [jax.vmap(visible_score)(up[:, :k]) for k in (1, 2, 3, 4)]
+    num_up = jnp.minimum(state.stage + 1, 4)
+    scores = jnp.select([num_up == k for k in (1, 2, 3)], boards[:3], boards[3])
+    if 7 * state.agent_cards.shape[0] > 52:
+        five_card_board = (state.stage == 4) & state.community[4]
+        scores = jnp.where(five_card_board, jax.vmap(five_card_score)(up), scores)
+    return scores
 
 
 class SevenCardStudCarry(NamedTuple):

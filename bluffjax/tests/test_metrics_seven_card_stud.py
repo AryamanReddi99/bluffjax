@@ -519,3 +519,34 @@ def test_uniform_random_play_values():
     assert abs(rates["bluff_success"] - p_win.mean()) < 4 * se
     for name in gm.rate_names:
         assert 0 <= rates[name] <= 1, name
+
+
+# ---------------------------------------------------------------- scorers
+
+
+def test_board_scores_are_the_env_scorers_values():
+    """visible_score equals poker_utils._score_visible_upcards on every board
+    of 1 to 4 cards; the 5-card community board uses five_card_score (equal
+    to _score_five_card_hand, see test_metrics_five_card_draw)."""
+    import itertools
+
+    from bluffjax.metrics._poker_draw_stud import visible_score
+    from bluffjax.utils.game_utils.poker_utils import _score_visible_upcards
+
+    fast, env_scorer = jax.jit(jax.vmap(visible_score)), jax.jit(jax.vmap(_score_visible_upcards))
+    for k in (1, 2, 3, 4):
+        boards = jnp.asarray(np.array(list(itertools.combinations(range(52), k)), np.int32))
+        np.testing.assert_array_equal(np.asarray(fast(boards)), np.asarray(env_scorer(boards)), err_msg=str(k))
+
+
+def test_credit_matches_base_credit():
+    from bluffjax.metrics import credit as base_credit
+    from bluffjax.metrics._poker_draw_stud import credit
+
+    for n in (2, 5):
+        for player in range(n):
+            for value in (True, False, 3, 0.5):
+                np.testing.assert_array_equal(
+                    np.asarray(credit(n, jnp.int32(player), value)),
+                    np.asarray(base_credit(n, jnp.int32(player), value)),
+                )

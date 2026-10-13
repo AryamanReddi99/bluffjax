@@ -447,3 +447,20 @@ def test_uniform_random_play_values():
     assert rates["n_draws_known"] == rates["n_draws"]
     for name in gm.rate_names:
         assert 0 <= rates[name] <= (5 if name == "cards_drawn" else 1)
+
+
+def test_five_card_score_is_the_env_showdown_scorer():
+    """five_card_score equals poker_utils._score_five_card_hand (the env's
+    showdown scorer) on all 2,598,960 five-card hands."""
+    import itertools
+
+    from bluffjax.metrics._poker_draw_stud import five_card_score
+    from bluffjax.utils.game_utils.poker_utils import _card_rank, _card_suit, _score_five_card_hand
+
+    hands = np.array(list(itertools.combinations(range(52), 5)), np.int32)
+    assert len(hands) == 2_598_960
+    fast = jax.jit(jax.vmap(five_card_score))
+    env_scorer = jax.jit(jax.vmap(lambda h: _score_five_card_hand(_card_rank(h), _card_suit(h))))
+    for chunk in np.array_split(hands, 13):
+        chunk = jnp.asarray(chunk)
+        np.testing.assert_array_equal(np.asarray(fast(chunk)), np.asarray(env_scorer(chunk)))
