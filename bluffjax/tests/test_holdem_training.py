@@ -13,8 +13,10 @@
   hands; random against random gives symmetric results; it doesn't change
   training; ReBeL as the opponent;
 - ReBeL (bluffjax/examples/holdem_rebel/train.py) with a tiny budget: run
-  directory, results.jsonl with the self-play game metrics at every
-  evaluation, half/ and full/ value networks with their metadata.
+  directory, results.jsonl with the evaluation (avg_return_vs_<opp>,
+  avg_return_se_vs_<opp>, final/...) and the self-play game metrics at every
+  evaluation, half/value_net_0 and full/value_net_0 value networks with
+  their metadata.
 """
 
 import functools
@@ -431,7 +433,9 @@ def test_eval_against_rebel(name, monkeypatch, tmp_path):
     from bluffjax.examples.run_utils import read_results
 
     mod = _module(name)
-    rebel_path = tiny_rebel_checkpoint(name.split("_")[0], tmp_path / "rebel" / "value_net.msgpack")
+    rebel_path = tiny_rebel_checkpoint(
+        name.split("_")[0], tmp_path / "rebel" / "full" / "value_net_0.msgpack"
+    )
     config = tiny_config(
         name, tmp_path, num_update_steps=1, compare_mode="checkpoint",
         compare_network_type="rebel", compare_with=rebel_path, compare_episodes=3,
@@ -468,8 +472,11 @@ def rebel_config(game_name, save_dir):
 
 
 @pytest.mark.parametrize("game_name", ["hul", "hunl"])
-def test_rebel_run_log_metrics_and_checkpoints(game_name, tmp_path):
-    from bluffjax.examples.holdem_rebel.agent import load_rebel
+def test_rebel_run_log_metrics_and_checkpoints(game_name, monkeypatch, tmp_path):
+    import re
+
+    from bluffjax.examples.holdem_rebel import train as rebel_train
+    from bluffjax.examples.holdem_rebel.agent import heuristic_switch, load_rebel
     from bluffjax.examples.holdem_rebel.cards import NUM_HANDS
     from bluffjax.examples.holdem_rebel.game import PUBLIC_DIM, make_game
     from bluffjax.examples.holdem_rebel.solver import ValueNetwork
@@ -477,9 +484,25 @@ def test_rebel_run_log_metrics_and_checkpoints(game_name, tmp_path):
     from bluffjax.examples.run_utils import checkpoint_path, load_params, read_results
 
     cfg = rebel_config(game_name, tmp_path)
+    assert "max_grad_norm" in cfg and "grad_clip" not in cfg
     game = make_game(game_name, cfg.get("max_raises"))
+    wandb_inits, real_init = [], rebel_train.wandb.init
+    monkeypatch.setattr(
+        rebel_train.wandb, "init", lambda **kw: wandb_inits.append(kw) or real_init(**kw)
+    )
     run_dir = run_training(game, cfg)
     rows = read_results(run_dir)
+    # wandb names as in every other script, seed index 0
+    (kw,) = wandb_inits
+    assert re.fullmatch(rf"{game_name}_\d{{4}}(-\d\d){{2}}_\d\d(-\d\d){{2}}", kw["group"])
+    assert kw["job_type"] == f"{game_name}_rebel_{game_name}"
+    assert kw["name"] == f"{cfg['seed']}_0"
+    opponents = heuristic_switch(game)[1]
+    assert opponents == ["random", "always_call", "always_raise"] + (
+        [] if game.is_limit else ["always_allin"]
+    )
+    eval_keys = {f"avg_return{se}_vs_{o}" for se in ("", "_se") for o in opponents}
+    assert not any(k.startswith("eval/") for r in rows for k in r)
     assert all("samples" in r and r["seed_index"] == 0 for r in rows)
     samples = [r["samples"] for r in rows if "value_loss" in r]
     assert samples == sorted(samples) and samples[-1] >= cfg["num_samples"]
@@ -488,25 +511,37 @@ def test_rebel_run_log_metrics_and_checkpoints(game_name, tmp_path):
     # every eval_every samples and at the end
     assert len(evals) >= 2 and evals[-1]["samples"] == samples[-1]
     for r in evals:
-        assert "eval/random_mean" in r and r["game_eval_seconds"] > 0
+        assert {k for k in r if "_vs_" in k} == eval_keys and r["game_eval_seconds"] > 0
+        assert all(math.isfinite(r[k]) for k in eval_keys)
         for rate in gm.rate_names:
             v = r[f"game/{rate}"]
             assert math.isnan(v) or 0.0 <= v <= 1.0, (rate, v)
         if game_name == "hul":  # 2 deals from both seats, every hand counted
             hands = 2 * cfg["metric_deals"] - r["game_eval_unfinished"]
             assert r["game/n_hands"] == 2 * hands  # credited to both players
-    assert any(k.startswith("final/") for k in rows[-1])
+    # the final evaluation: one record after the last training record
+    assert set(rows[-1]) == {"seed_index", "wall_time", "samples"} | {
+        f"final/{k}" for k in eval_keys
+    }
+    assert rows[-1]["samples"] == samples[-1]
+    assert all(not any(k.startswith("final/") for k in r) for r in rows[:-1])
 
-    # half/ (when the samples first reach num_samples // 2) and full/
+    # half/ (when the samples first reach num_samples // 2) and full/, as
+    # value_net_{i} with seed index i = 0 (one seed per process)
     template = ValueNetwork(cfg["value_hidden_dim"], cfg["value_num_layers"]).init(
         KEY, jnp.zeros((PUBLIC_DIM,)), jnp.zeros((2, NUM_HANDS))
     )
     metas = {}
     for stage in ("half", "full"):
-        path = checkpoint_path(run_dir, stage, "value_net")
+        assert sorted(os.listdir(os.path.join(run_dir, stage))) == [
+            "value_net_0.json", "value_net_0.msgpack"
+        ]
+        path = checkpoint_path(run_dir, stage, "value_net", 0)
+        assert path == os.path.join(run_dir, stage, "value_net_0.msgpack")
         load_params(path, template)
         _, _, metas[stage] = load_rebel(path, solve_chunk=1)
         assert metas[stage]["game"] == game_name
+        assert metas[stage]["seed"] == cfg["seed"]
     first_half = min(s for s in samples if s >= cfg["num_samples"] // 2)
     assert metas["half"]["samples"] == first_half
     assert metas["full"]["samples"] == samples[-1]
@@ -529,7 +564,7 @@ def test_eval_nfsp_reads_the_run_directory(name, monkeypatch, tmp_path):
         mod.Checkpoint(full.avg_train_state.params, full.br_train_state.params),
     )
     rebel_path = tiny_rebel_checkpoint(
-        name.split("_")[0], tmp_path / "rebel" / "full" / "value_net.msgpack"
+        name.split("_")[0], tmp_path / "rebel" / "full" / "value_net_0.msgpack"
     )
     for stage in ("half", "full"):
         eval_nfsp.main(run_dir, rebel_path, 2, 2, stage)

@@ -20,7 +20,7 @@ value_lr: 3e-4
 lr_halve_at: [0.5, 0.75]  # fractions of training at which the lr halves
 batch_size: 512
 train_ratio: 4  # trained examples per generated example
-grad_clip: 5.0
+max_grad_norm: 5.0  # global-norm gradient clipping
 replay_capacity: 131072  # FIFO, about 13.5 kB per example (1.8 GB) on the GPU
 
 # Evaluation: mirrored deals (each deal played from both seats)
@@ -28,7 +28,7 @@ eval_every: 1e6  # samples
 eval_deals: 128  # per opponent at each evaluation
 final_eval_deals: 2048  # per opponent at the end
 eval_batch_deals: 128  # deals played at once (GPU memory)
-compare_with: ""  # also play this ReBeL checkpoint, e.g. ${repo_root:}/checkpoints/HUL/<run>/full/value_net.msgpack (+ value_net.json)
+compare_with: ""  # also play this ReBeL checkpoint, e.g. ${repo_root:}/checkpoints/HUL/<run>/full/value_net_0.msgpack (+ value_net_0.json)
 # Game metrics (logged as game/<name>) of ReBeL playing itself in the env at
 # every evaluation: deals, each played from both seats (whole batches of
 # eval_batch_deals); 0 turns them off. 1024 deals take ~22 s per evaluation
@@ -38,8 +38,8 @@ compare_with: ""  # also play this ReBeL checkpoint, e.g. ${repo_root:}/checkpoi
 metric_deals: 1024
 
 log_every_chunks: 10
-# value network after half and all of the samples, in the run directory
-# (see holdem_rebel/train.py)
+# value network after half and all of the samples, in the run directory:
+# half/value_net_0.msgpack, full/value_net_0.msgpack (see holdem_rebel/train.py)
 save_checkpoints: true
 save_dir: ${repo_root:}/checkpoints/HUL
 

@@ -245,7 +245,8 @@ def test_chance_values_match_enumeration() -> None:
 @pytest.mark.parametrize("name", GAMES)
 def test_agent_ignores_hidden_information(name: str, tmp_path) -> None:
     """Action probabilities and beliefs don't change with the opponent's cards
-    or undealt board cards; checkpoints round-trip."""
+    or undealt board cards; checkpoints round-trip in a run directory's
+    layout ({stage}/value_net_0.msgpack + value_net_0.json, seed index 0)."""
     game = G.make_game(name)
     env = make(game.env_id, num_agents=2)
     player = RebelPlayer(game, hidden_dim=32, num_layers=1, cfr_iters=8, solve_chunk=1)
@@ -253,14 +254,21 @@ def test_agent_ignores_hidden_information(name: str, tmp_path) -> None:
         jax.random.PRNGKey(0), jnp.zeros((G.PUBLIC_DIM,)), jnp.zeros((2, C.NUM_HANDS))
     )
     path = save_checkpoint(
-        os.path.join(tmp_path, f"{name}.msgpack"), params,
+        os.path.join(tmp_path, "full", "value_net_0.msgpack"), params,
         {"game": name, "max_raises": game.max_raises, "value_hidden_dim": 32,
          "value_num_layers": 1, "cfr_iters": 8, "samples": 0, "seed": 0},
     )
-    player, loaded, _ = load_rebel(path, solve_chunk=1)
+    assert sorted(os.listdir(os.path.join(tmp_path, "full"))) == [
+        "value_net_0.json", "value_net_0.msgpack"
+    ]
+    player, loaded, meta = load_rebel(path, solve_chunk=1)
+    assert meta["game"] == name and player.cfr_iters == 8
     assert all(jax.tree.leaves(jax.tree.map(np.array_equal, params, loaded)))
     with pytest.raises(FileNotFoundError):
-        load_rebel(os.path.join(tmp_path, "missing.msgpack"))
+        load_rebel(os.path.join(tmp_path, "half", "value_net_0.msgpack"))
+    os.remove(os.path.join(tmp_path, "full", "value_net_0.json"))
+    with pytest.raises(FileNotFoundError):  # the metadata is required
+        load_rebel(path)
     opp = heuristic_players(game)["always_call"]
     solve, probs, observe = jax.jit(player.solve), jax.jit(player.action_probs), jax.jit(player.observe)
 

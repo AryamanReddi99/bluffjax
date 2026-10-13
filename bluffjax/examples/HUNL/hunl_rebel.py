@@ -13,10 +13,12 @@ bluffjax/examples/holdem_rebel/.
         --config-name config_rebel_opponent
 
 One seed per process. The run writes {save_dir}/{job_type}_{timestamp}/
-with config.yaml, results.jsonl (evaluations and game metrics of ReBeL
-against itself, game/<name>) and the value network after half and all of
-the samples (half/value_net.msgpack, full/value_net.msgpack with their .json
-metadata); see bluffjax/examples/holdem_rebel/train.py.
+with config.yaml, results.jsonl (evaluations avg_return_vs_<opp> and
+avg_return_se_vs_<opp>, game metrics of ReBeL against itself game/<name>)
+and the value network after half and all of the samples
+(half/value_net_0.msgpack, full/value_net_0.msgpack with their .json
+metadata; 0 is the seed index, the seed is config.yaml's); see
+bluffjax/examples/holdem_rebel/train.py.
 """
 
 import hydra

@@ -25,21 +25,31 @@ The value network is trained on a FIFO replay buffer with the Huber loss,
 train_gen_ratio).
 
 Evaluation (every `eval_every` samples and at the end): mirrored matches
-against simple opponents (and a checkpoint), and the game metrics
+(eval_deals deals per opponent in whole batches of eval_batch_deals, each
+deal from both seats) against simple opponents, logged as
+avg_return_vs_<opp> (ReBeL's mean reward per hand, in chips) and
+avg_return_se_vs_<opp> (its standard error over deals), with opp = random,
+always_call, always_raise (and always_allin in No-Limit) and, with
+compare_with, checkpoint (that ReBeL network); and the game metrics
 (bluffjax.metrics.texas_limit_holdem / texas_nolimit_holdem) of ReBeL
 playing itself in the env with test-time search, over `metric_deals` deals
 played from both seats, logged as game/<name>. ReBeL's training data comes
 from its own PBS game with exploration, which isn't play in the env, so
-the metrics are measured on these games instead.
+the metrics are measured on these games instead. After the last sample, the
+final evaluation (`final_eval_deals` deals per opponent) is logged as
+final/avg_return_vs_<opp> and final/avg_return_se_vs_<opp>.
 
 Run directory (bluffjax.examples.run_utils): {save_dir}/{job_type}_{timestamp}/
 holds config.yaml, results.jsonl (everything logged to wandb, with the
 sample count `samples` in every record) and, with save_checkpoints, the
-value network after half and after all of the samples:
-    half/value_net.msgpack  when the sample count first reaches num_samples // 2
-    half/value_net.json     its metadata (game, network size, cfr_iters, samples)
-    full/value_net.msgpack  after num_samples samples
-    full/value_net.json
+value network after half and after all of the samples, named
+{name}_{i} like every other script's checkpoints (run_utils.checkpoint_path),
+with i the seed index, always 0 (one seed per process; the seed itself is
+config.yaml's `seed`, also in the metadata):
+    half/value_net_0.msgpack  when the sample count first reaches num_samples // 2
+    half/value_net_0.json     its metadata (game, network size, cfr_iters, samples, seed)
+    full/value_net_0.msgpack  after num_samples samples
+    full/value_net_0.json
 Each .msgpack holds the flax params of ValueNetwork(value_hidden_dim,
 value_num_layers), mapping (public features (PUBLIC_DIM,), beliefs (2, 1326))
 to both players' per-hand values (2, 1326); load_rebel(path) restores the
@@ -100,6 +110,10 @@ from bluffjax.examples.holdem_rebel.solver import (
 from bluffjax.metrics import make_metrics, prefixed
 from bluffjax.utils.paths import REPO_ROOT
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
+
+# One seed per process: the seed index of the checkpoints ({name}_{i}) and of
+# the wandb run ("{seed}_{i}") is always 0.
+SEED_INDEX = 0
 
 
 class Games(NamedTuple):
@@ -450,13 +464,14 @@ def run_training(game: HoldemGame, cfg: dict) -> str:
     print(f"Run directory: {run_dir}")
     run = wandb.init(
         project=cfg["project"],
-        group=f"{cfg['env_name']}_rebel"
+        group=f"{cfg['env_name']}"
         + datetime.datetime.now().strftime("_%Y-%m-%d_%H-%M-%S"),
         job_type=f"{cfg['job_type']}_{cfg['env_name']}",
-        name=f"{cfg['seed']}_0",
+        name=f"{cfg['seed']}_{SEED_INDEX}",
         config=cfg,
         mode=None if cfg["wandb"] else "disabled",
         dir=str(REPO_ROOT),
+        reinit="create_new",
     )
     try:
         _train(game, cfg, run_dir, ResultsLog(run_dir, [run]))
@@ -484,7 +499,7 @@ def _train(game: HoldemGame, cfg: dict, run_dir: str, log: ResultsLog) -> None:
         {int(f * cfg["train_ratio"] * num_samples / cfg["batch_size"]): 0.5 for f in halvings},
     )
     tx = optax.chain(
-        optax.clip_by_global_norm(cfg["grad_clip"]), optax.adam(learning_rate=lr)
+        optax.clip_by_global_norm(cfg["max_grad_norm"]), optax.adam(learning_rate=lr)
     )
     opt_state = tx.init(params)
     train = make_trainer(net, tx, cfg["batch_size"])
@@ -527,11 +542,12 @@ def _train(game: HoldemGame, cfg: dict, run_dir: str, log: ResultsLog) -> None:
     )
 
     def save(stage: str, params, samples: int) -> str:
-        path = checkpoint_path(run_dir, stage, "value_net")
+        path = checkpoint_path(run_dir, stage, "value_net", SEED_INDEX)
         return save_checkpoint(path, params, checkpoint_meta(game, cfg, samples))
 
     def evaluate(params, rng, num_deals):
-        """Mirrored hands vs each opponent, in batches of eval_batch_deals deals."""
+        """Mirrored hands vs each opponent, in batches of eval_batch_deals deals:
+        avg_return_vs_<opp> and avg_return_se_vs_<opp> (see the module docstring)."""
         out = {}
         opponents = [(name, i) for i, name in enumerate(heuristic_names)]
         if play_checkpoint is not None:
@@ -545,8 +561,8 @@ def _train(game: HoldemGame, cfg: dict, run_dir: str, log: ResultsLog) -> None:
                 else:
                     results.append(jax.device_get(play_heuristic(params, jnp.int32(idx), k)))
             res = summarize(results)
-            out[f"eval/{name}_mean"] = res["mean"]
-            out[f"eval/{name}_se"] = res["se"]
+            out[f"avg_return_vs_{name}"] = res["mean"]
+            out[f"avg_return_se_vs_{name}"] = res["se"]
             print(
                 f"  vs {name:13s}: {res['mean']:+.4f} +- {res['se']:.4f} per hand "
                 f"({res['hands']} hands, re-solves {res['resolves']}, unfinished {res['unfinished']})"
@@ -632,7 +648,7 @@ def _train(game: HoldemGame, cfg: dict, run_dir: str, log: ResultsLog) -> None:
         print(f"final evaluation ({cfg['final_eval_deals']} deals, mirrored):")
         rng, k_eval = jax.random.split(rng)
         final = evaluate(params, k_eval, cfg["final_eval_deals"])
-        log.log({"samples": samples, **{f"final/{k[5:]}": v for k, v in final.items()}})
+        log.log({"samples": samples, **{f"final/{k}": v for k, v in final.items()}})
     print(
         f"total {time.time() - t_start:.0f}s for {samples} samples "
         f"({(time.time() - t_start) / max(samples, 1) * 1e5:.1f}s per 1e5)"
