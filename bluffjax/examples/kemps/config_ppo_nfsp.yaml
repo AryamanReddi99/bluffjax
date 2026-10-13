@@ -1,0 +1,77 @@
+# 1e7 env steps per seed (152 updates of 1024 envs x 64 steps), 5 seeds.
+# Every env step is one decision of each of the num_agents players.
+num_timesteps: 1e7
+num_envs: 1024
+num_steps_per_env_per_update: 64
+num_epochs: 4  # as in the paper's PPO table and the Leduc/Hold'em PPO-NFSP configs
+num_minibatches: 4
+
+# BR (PPO), trained only on decisions made while following the BR
+lr: 2.5e-4  # as in every fixed NFSP config (the paper's PPO table says 3e-5)
+anneal_lr: true  # linear decay to 0 over all gradient steps (false: constant)
+gamma: 1.0  # the payoff is the undiscounted outcome of the hand
+gae_lambda: 0.95
+clip_eps: 0.2
+vf_clip: 0.2
+ent_coef: 0.0  # as in the paper and the Leduc/Hold'em configs
+vf_coef: 1.0
+max_grad_norm: 0.5
+reward_scale: 1.0  # the env pays +1 / -1 per team (two teams) at the end of a hand
+
+# Shared network architecture
+fc_dim_size: 128
+
+# NFSP-specific knobs
+anticipatory_eta: 0.1  # prob. a player follows the BR for a whole hand
+# judgement call: a 1e7-step run makes ~4e6 BR decisions (4 players x 0.1);
+# 1e6 keeps a quarter of them (Leduc uses 1e5, Hold'em 1e6); ~0.8 GB per seed
+sl_reservoir_capacity: 1000000
+sl_batch_size: 256
+# judgement call: 2 SL samples per decision as in NFSP/OpenSpiel (and the
+# Leduc/Hold'em configs, where a decision is an env step): 1024 x 64 x 4
+# decisions per update -> 2048 steps of 256
+sl_num_steps_per_update: 2048
+sl_lr: 3e-4
+
+env_name: kemps
+seed: 0
+num_seeds: 5
+env_kwargs:
+  num_agents: 4  # two teams of two partners sitting opposite each other
+  num_ranks: 13
+  hand_size: 4
+  num_suits: 4
+  comm_dim: 2  # signals per step; each action is (game action, signal)
+  horizon: 200  # hands cut off here are draws (truncations in training)
+
+# comparison: win/loss/draw rates and return of the average and best-response
+# policies in compare_episodes hands, the learner as both partners of one team
+# (alternating over the hands) and the opponent as the other team; draws are
+# real deals and hands cut off at the horizon
+compare: true
+compare_mode: random  # "random" or "checkpoint"
+# checkpoint opponent: a .msgpack file written by save_checkpoints, e.g.
+# ${repo_root:}/checkpoints/kemps/<run>/full/avg_policy_0.msgpack; use
+# actor_critic for PPO-NFSP files, actor for PQN-NFSP avg_policy files and
+# q_network for PQN-NFSP br files
+compare_with: ""
+compare_network_type: actor_critic  # "actor_critic", "q_network", or "actor"
+compare_episodes: 1000
+compare_interval: 10  # updates; also after the last update
+
+# wandb
+project: bluffjax
+job_type: kemps_ppo_nfsp
+wandb: false
+
+# networks after half and all of the updates (see save_checkpoints in
+# parallel_nfsp_common.py)
+save_checkpoints: true
+save_dir: ${repo_root:}/checkpoints/kemps
+
+# Hydra configs and logs go to outputs/ at the repo root
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
