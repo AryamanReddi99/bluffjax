@@ -30,9 +30,44 @@ policy-network steps, as in OpenSpiel's Deep CFR examples.
 Network inputs are OpenSpiel's kuhn_poker information_state_tensor, which is
 perfect recall: each of the 12 infosets has a distinct tensor. Exploitability
 is exact.
+
+Seeds: --num_seeds runs run one after the other in one run directory; seed
+index i uses seed + i.
+
+Evaluation: the average-strategy (policy) network is trained after iteration
+1, every eval_every iterations, after iteration iterations // 2 (the half
+checkpoint) and after the last; each time its exact exploitability and the
+exact Kuhn policy metrics (bluffjax.metrics.kuhn_poker) are logged. Its
+training key depends only on the iteration, so these intermediate networks
+don't change the run.
+
+Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
+(run_utils.make_run_dir, with config.yaml holding the flags) before running.
+Every iteration writes one record per seed to {run_dir}/results.jsonl (with
+seed_index and wall_time), and to the seed's wandb run with --wandb:
+iteration, traversals (the traversals so far, both players) and each player's
+final advantage-network loss; at the evaluations also exploitability,
+policy_loss and the policy metrics of the policy network, game/<name> (names
+and definitions in bluffjax.metrics.kuhn_poker).
+
+Checkpoints (on unless --no-save_checkpoints), for every seed index i:
+    {run_dir}/half/avg_policy_{i}.msgpack  policy network trained after
+                                           iteration iterations // 2
+    {run_dir}/full/avg_policy_{i}.msgpack  policy network trained after the
+                                           last iteration
+both from the same run. Each holds the flax params of MLP(hidden_sizes, 2)
+(hidden_sizes in config.yaml), written with flax.serialization.to_bytes. The
+network maps information_state_tensor(card, history) (11 floats; the rows of
+INFOSET_TENSORS are the 12 infosets in kuhn_exploitability.INFOSETS order) to
+logits over [pass, bet], and Deep CFR's average strategy is softmax(logits);
+policy_array(params, hidden_sizes) gives it as kuhn_exploitability's (12, 2)
+policy array. Nothing else is needed to play it (the advantage networks only
+define the current strategies during training). Restore one with
+run_utils.load_params(path, MLP(hidden_sizes, 2).init(rng, INFOSET_TENSORS[:1])).
 """
 
 import argparse
+import datetime
 import functools
 import itertools
 import json
@@ -45,6 +80,14 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from bluffjax.examples.run_utils import (
+    ResultsLog,
+    half_update_steps,
+    make_run_dir,
+    save_params,
+)
+from bluffjax.metrics import prefixed
+from bluffjax.metrics.kuhn_poker import policy_metrics
 from bluffjax.utils.game_utils.kuhn_exploitability import (
     ACTION_BET,
     ACTION_PASS,
@@ -54,7 +97,9 @@ from bluffjax.utils.game_utils.kuhn_exploitability import (
     get_legal_actions,
     get_returns,
     is_terminal,
+    policy_from_array,
 )
+from bluffjax.utils.paths import REPO_ROOT
 from bluffjax.utils.typing import BoolArray, FloatArray, PRNGKeyArray, PyTree
 
 NUM_ACTIONS = 2  # pass, bet
@@ -174,6 +219,20 @@ class MLP(nn.Module):
             x = nn.LayerNorm()(x)
         init = torch_linear_init(x.shape[-1])
         return nn.Dense(self.output_size, kernel_init=init, bias_init=init)(x)
+
+
+def softmax_table(logits: FloatArray) -> np.ndarray:
+    """softmax over the last axis, in float64."""
+    logits = np.asarray(logits, dtype=np.float64)
+    probs = np.exp(logits - logits.max(axis=-1, keepdims=True))
+    return probs / probs.sum(axis=-1, keepdims=True)
+
+
+def policy_array(params: PyTree, hidden_sizes: Sequence[int]) -> np.ndarray:
+    """(12, 2) float64 average strategy softmax(logits) of a policy network
+    MLP(hidden_sizes, 2) at every infoset, rows in INFOSETS order."""
+    network = MLP(tuple(hidden_sizes), NUM_ACTIONS)
+    return softmax_table(network.apply(params, INFOSET_TENSORS))
 
 
 def advantage_loss(
@@ -360,23 +419,33 @@ class DeepCFRSolver:
         )
         return params, float(loss)
 
+    def policy_array(self, policy_params: PyTree) -> np.ndarray:
+        """The policy network's (12, 2) average strategy, rows in INFOSETS order."""
+        return softmax_table(self._apply(policy_params, INFOSET_TENSORS))
+
     def average_policy(self, policy_params: PyTree) -> Callable[[str], np.ndarray]:
         """Policy network as infoset key -> [p_pass, p_bet], for exploitability."""
-        logits = np.asarray(
-            self._apply(policy_params, INFOSET_TENSORS), dtype=np.float64
-        )
-        probs = np.exp(logits - logits.max(axis=-1, keepdims=True))
-        probs /= probs.sum(axis=-1, keepdims=True)
-        table = dict(zip(INFOSETS, probs))
-        return lambda infoset_key: table[infoset_key]
+        return policy_from_array(self.policy_array(policy_params))
 
 
-def run_deep_cfr(config: argparse.Namespace) -> dict:
-    """Runs Deep CFR, logging the exploitability of the average-strategy
-    network after iteration 1, every `eval_every` iterations and at the end."""
+def run_deep_cfr(
+    config: argparse.Namespace,
+    results_log: ResultsLog | None = None,
+    seed_index: int = 0,
+    run_dir: str | None = None,
+) -> dict:
+    """Runs Deep CFR with config.seed, evaluating the average-strategy network
+    after iteration 1, every `eval_every` iterations, after iteration
+    iterations // 2 and at the end. Every iteration is logged to results_log
+    (if given) as seed index seed_index; with run_dir, the policy networks
+    after iterations // 2 and after the last iteration are saved there as
+    half/ and full/avg_policy_{seed_index}."""
     start = time.time()
     eval_seconds = 0.0
     solver = DeepCFRSolver(config)
+    num_half = half_update_steps(config.iterations)
+    if run_dir is not None and num_half < 1:
+        raise ValueError("the half checkpoint needs at least 2 iterations")
     results = {
         "iterations": [],
         "exploitability": [],
@@ -385,19 +454,42 @@ def run_deep_cfr(config: argparse.Namespace) -> dict:
     }
 
     for it in range(1, config.iterations + 1):
-        results["advantage_loss"].append(solver.run_iteration())
-        if it == 1 or it % config.eval_every == 0 or it == config.iterations:
+        advantage_losses = solver.run_iteration()
+        results["advantage_loss"].append(advantage_losses)
+        record = {
+            "iteration": it,
+            "traversals": it * 2 * config.traversals,
+            "advantage_loss_p0": advantage_losses[0],
+            "advantage_loss_p1": advantage_losses[1],
+        }
+        if (
+            it == 1
+            or it % config.eval_every == 0
+            or it == num_half
+            or it == config.iterations
+        ):
             eval_start = time.time()
             policy_params, loss = solver.learn_policy_network()
             if it == config.iterations:
                 # Training the final policy network is part of the algorithm
                 eval_start = time.time()
-            expl = exploitability(solver.average_policy(policy_params))
+            table = solver.policy_array(policy_params)
+            expl = exploitability(policy_from_array(table))
+            record.update(
+                exploitability=expl,
+                policy_loss=loss,
+                **prefixed("game", policy_metrics(table)),
+            )
             eval_seconds += time.time() - eval_start
             results["iterations"].append(it)
             results["exploitability"].append(expl)
             results["policy_loss"].append(loss)
             print(f"Iteration {it:4d}: exploitability = {expl:.6f}")
+            if run_dir is not None and it in (num_half, config.iterations):
+                stage = "half" if it == num_half else "full"
+                save_params(run_dir, stage, "avg_policy", policy_params, seed_index)
+        if results_log is not None:
+            results_log.log(record, seed_index)
 
     results["final_exploitability"] = results["exploitability"][-1]
     results["runtime_seconds"] = time.time() - start
@@ -410,6 +502,12 @@ def run_deep_cfr(config: argparse.Namespace) -> dict:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deep CFR on Kuhn Poker.")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--num_seeds",
+        type=int,
+        default=5,
+        help="seeds run one after the other; seed index i uses seed + i",
+    )
     parser.add_argument("--iterations", type=int, default=50, help="CFR iterations T")
     parser.add_argument(
         "--traversals",
@@ -428,27 +526,91 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory_capacity", type=int, default=100_000)
     parser.add_argument("--eval_every", type=int, default=5)
     parser.add_argument(
-        "--output", type=str, default=None, help="write results to this JSON file"
+        "--output",
+        type=str,
+        default=None,
+        help="also write every seed's results to this JSON file",
     )
+    parser.add_argument(
+        "--save_checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="save the half and full policy networks",
+    )
+    parser.add_argument("--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "kuhn"))
+    parser.add_argument("--job_type", type=str, default="kuhn_deep_cfr")
+    parser.add_argument("--wandb", action="store_true", help="log to wandb")
+    parser.add_argument("--project", type=str, default="bluffjax")
     return parser.parse_args(argv)
 
 
-def main() -> None:
-    config = parse_args()
-    print("Deep CFR for Kuhn Poker")
-    print("=" * 50)
-    results = run_deep_cfr(config)
-    print("=" * 50)
-    print(f"Final exploitability: {results['final_exploitability']:.6f}")
-    print(
-        f"Runtime: {results['runtime_seconds']:.1f}s "
-        f"({results['eval_seconds']:.1f}s evaluating)"
-    )
-    if config.output:
-        with open(config.output, "w") as f:
-            json.dump(
-                {"game": "kuhn_poker", "config": vars(config), **results}, f, indent=2
+def run(config: argparse.Namespace) -> str:
+    """Runs config.num_seeds seeds one after the other with logging and
+    checkpoints; returns the run directory."""
+    run_config = vars(config).copy()
+    run_config["half_iterations"] = half_update_steps(config.iterations)
+    run_dir = make_run_dir(run_config)
+    wandb_runs = []
+    if config.wandb:
+        import wandb
+
+        group = "kuhn_poker" + datetime.datetime.now().strftime("_%Y-%m-%d_%H-%M-%S")
+        wandb_runs = [
+            wandb.init(
+                project=config.project,
+                group=group,
+                job_type=config.job_type,
+                name=f"{config.seed}_{i}",
+                config=run_config,
+                dir=str(REPO_ROOT),
+                reinit="create_new",
             )
+            for i in range(config.num_seeds)
+        ]
+    try:
+        results_log = ResultsLog(run_dir, wandb_runs)
+        print(f"Run directory: {run_dir}")
+        print("Deep CFR for Kuhn Poker")
+        all_results = []
+        for i in range(config.num_seeds):
+            seed_config = argparse.Namespace(**{**vars(config), "seed": config.seed + i})
+            print("=" * 50)
+            print(f"Seed index {i} (seed {seed_config.seed})")
+            results = run_deep_cfr(
+                seed_config,
+                results_log,
+                i,
+                run_dir if config.save_checkpoints else None,
+            )
+            print(f"Final exploitability: {results['final_exploitability']:.6f}")
+            print(
+                f"Runtime: {results['runtime_seconds']:.1f}s "
+                f"({results['eval_seconds']:.1f}s evaluating)"
+            )
+            all_results.append({"seed": seed_config.seed, **results})
+        print("=" * 50)
+        finals = [r["final_exploitability"] for r in all_results]
+        print(
+            f"Final exploitability: mean {np.mean(finals):.6f} std "
+            f"{np.std(finals):.6f} over {len(finals)} seed(s)"
+        )
+        if config.save_checkpoints:
+            print(f"Saved checkpoints to {run_dir}")
+        if config.output:
+            with open(config.output, "w") as f:
+                json.dump(
+                    {"game": "kuhn_poker", "config": run_config, "seeds": all_results},
+                    f,
+                    indent=2,
+                )
+    finally:
+        for wandb_run in wandb_runs:
+            wandb_run.finish()
+    return run_dir
+
+
+def main() -> None:
+    run(parse_args())
 
 
 if __name__ == "__main__":

@@ -13,9 +13,14 @@ gamma: 1.0
 fc_dim_size: 64
 anneal_lr: True  # linear decay to 0 over all gradient steps
 
-# exact exploitability (of the greedy policy) every eval_interval updates and
-# after the last one
+# exact exploitability and Kuhn policy metrics (game/) of the greedy policy
+# every eval_interval updates and after the last one
 eval_interval: 1
+
+# run directory {save_dir}/{job_type}_{timestamp}/ with config.yaml,
+# results.jsonl and the half/ and full/ checkpoints (see the script docstring)
+save_dir: ${repo_root:}/checkpoints/kuhn
+save_checkpoints: true
 
 # Env / logging
 env_name: kuhn_poker
