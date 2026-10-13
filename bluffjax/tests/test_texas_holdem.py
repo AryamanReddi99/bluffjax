@@ -1,5 +1,7 @@
 """Checks for the Limit and No-Limit Hold'em environments (texas_limit_holdem,
-texas_nolimit_holdem): the standard turn order and whole hands played under it.
+texas_nolimit_holdem): the standard turn order and whole hands played under
+it, and the observation's raise counts per betting round, position and hidden
+cards.
 
 Turn order: heads-up the small blind is the button and acts first preflop, the
 big blind acts first on the flop, turn and river. With 3 or more players the
@@ -220,3 +222,191 @@ def test_heads_up_hand(env_id: str, script, sb_hand: str, reward_sb: float) -> N
         want = np.zeros(2)
         want[sb], want[bb] = reward_sb, -reward_sb
         np.testing.assert_array_equal(reward, want)
+
+
+# The observation's betting history and position, No-Limit as in Limit: the
+# raise counts of the 4 rounds (5 values each), in No-Limit features 54-73
+# after the two chip counts, then the position from the small blind (the
+# last num_agents features, in both games).
+def nl_raise_block(obs) -> np.ndarray:
+    return np.asarray(obs)[54:74].reshape(4, 5)
+
+
+def position_block(env, obs) -> np.ndarray:
+    return np.asarray(obs)[env.obs_dim - env.num_agents :]
+
+
+def one_hot(k: int, size: int) -> np.ndarray:
+    return np.eye(size, dtype=np.float32)[k]
+
+
+def test_nolimit_observation_layout() -> None:
+    for n in (2, 3, 6):
+        env = make(NLHE, num_agents=n)
+        assert env.obs_dim == 74 + n == env.observation_space().n
+
+
+# NLHE_HAND's bets and raises per round after every action.
+NLHE_HAND_RAISES = [
+    (0, 0, 0, 0),
+    (0, 0, 0, 0),
+    (0, 1, 0, 0),  # the BB bets the flop
+    (0, 2, 0, 0),  # the SB raises
+    (0, 2, 0, 0),
+    (0, 2, 0, 0),
+    (0, 2, 0, 0),
+    (0, 2, 0, 1),  # all in on the river
+    (0, 2, 0, 1),
+]
+
+
+def test_nolimit_raise_counts_of_every_round() -> None:
+    """Half-pot, pot and all-in raises are counted in their betting round
+    (calls, checks and the blinds aren't), and the observation shows the
+    counts of every round, with the two chip counts still at 52 and 53."""
+    env = make(NLHE, num_agents=2)
+    for sb in (0, 1):
+        state = set_cards(reset_with_sb(env, sb), [BEST, WORSE], BOARD)
+        obs = env.obs_from_state(state)
+        np.testing.assert_array_equal(nl_raise_block(obs), [one_hot(0, 5)] * 4)
+        for t, ((_, action, chips, _), counts) in enumerate(zip(NLHE_HAND, NLHE_HAND_RAISES)):
+            state, _, done = act(env, state, action)
+            np.testing.assert_array_equal(np.asarray(state.raise_nums), counts, str(t))
+            obs = np.asarray(env.obs_from_state(state))
+            np.testing.assert_array_equal(
+                nl_raise_block(obs), [one_hot(c, 5) for c in counts], str(t)
+            )
+            p = int(state.current_player_idx)
+            assert obs[52] == float(state.chips_in[p]) and obs[53] == max(chips), t
+        assert done
+
+
+def test_nolimit_raise_counts_of_four_or_more_share_the_last_value() -> None:
+    """No-Limit has no raise cap: heads-up with 100-chip stacks ten raises
+    fit in the preflop round (the pot, eight half-pot raises and an all-in).
+    The observation shows 4 for 4 raises or more; the state keeps the count."""
+    env = make(NLHE, num_agents=2)
+    for sb in (0, 1):
+        bb = 1 - sb
+        state = reset_with_sb(env, sb)
+        raises = [(sb, POT)] + [(bb, HALF), (sb, HALF)] * 4 + [(bb, ALLIN)]
+        for k, (who, action) in enumerate(raises, start=1):
+            assert int(state.current_player_idx) == who
+            state, _, done = act(env, state, action)
+            assert not done and int(state.stage) == 0
+            np.testing.assert_array_equal(np.asarray(state.raise_nums), [k, 0, 0, 0])
+            obs = env.obs_from_state(state)
+            np.testing.assert_array_equal(
+                nl_raise_block(obs), [one_hot(min(k, 4), 5)] + [one_hot(0, 5)] * 3
+            )
+        # the SB can't raise any more: it calls all in and the hand is over
+        assert not np.asarray(env.get_avail_actions(state))[[HALF, POT, ALLIN]].any()
+        state, _, done = act(env, state, NL_CALL)
+        assert done
+        np.testing.assert_array_equal(np.asarray(state.raise_nums), [10, 0, 0, 0])
+
+
+@pytest.mark.parametrize("env_id", [LHE, NLHE])
+@pytest.mark.parametrize("num_agents", [2, 3, 6])
+def test_observation_shows_position_from_the_small_blind(env_id: str, num_agents: int) -> None:
+    """At every decision of a checked-down hand, from every small-blind seat,
+    the observation's last num_agents features are the one-hot of the acting
+    player's seat counted from the small blind (0 = SB, 1 = BB, ...)."""
+    env = make(env_id, num_agents=num_agents)
+    for sb in range(num_agents):
+        state = reset_with_sb(env, sb)
+        seen = set()
+        done = False
+        while not done:
+            p = int(state.current_player_idx)
+            position = (p - sb) % num_agents
+            np.testing.assert_array_equal(
+                position_block(env, env.obs_from_state(state)), one_hot(position, num_agents)
+            )
+            seen.add(position)
+            state, _, done = act(env, state, passive_action(env_id, env, state))
+        assert seen == set(range(num_agents))
+
+
+@pytest.mark.parametrize("num_agents", [2, 3])
+def test_nolimit_first_to_act_and_facing_a_check_differ(num_agents: int) -> None:
+    """On the flop after a checked-down preflop, the first player to act and
+    the next one facing its check (heads-up: the BB, then the SB; with 3
+    players: the SB, then the BB), holding the same cards, used to see the same
+    observation (cards, chips); the position tells them apart."""
+    env = make(NLHE, num_agents=num_agents)
+    sb = 0
+    first_seat = 1 if num_agents == 2 else sb  # first to act on the flop
+    second_seat = (first_seat + 1) % num_agents
+    holes = ["Ah Kh", "7c 2d", "Qs Qd"][:num_agents]
+    swapped = list(holes)
+    swapped[first_seat], swapped[second_seat] = holes[second_seat], holes[first_seat]
+
+    def to_flop(holes):
+        state = set_cards(reset_with_sb(env, sb), holes, BOARD)
+        while int(state.stage) == 0:
+            state, _, _ = act(env, state, NL_CALL)
+        return state
+
+    first = to_flop(holes)
+    assert int(first.current_player_idx) == first_seat
+    facing, _, _ = act(env, to_flop(swapped), NL_CALL)  # the first player checks
+    assert int(facing.current_player_idx) == second_seat and int(facing.stage) == 1
+    a = np.asarray(env.obs_from_state(first))
+    b = np.asarray(env.obs_from_state(facing))
+    np.testing.assert_array_equal(a[:74], b[:74])  # cards, chips, raise counts
+    assert a[:52].sum() == 5 and a[52] == a[53] == 2
+    np.testing.assert_array_equal(position_block(env, a), one_hot((first_seat - sb) % num_agents, num_agents))
+    np.testing.assert_array_equal(position_block(env, b), one_hot((second_seat - sb) % num_agents, num_agents))
+    assert not np.array_equal(a, b)
+
+
+@pytest.mark.parametrize("env_id", [LHE, NLHE])
+@pytest.mark.parametrize("num_agents", [2, 3, 6])
+def test_observation_hides_other_hands_and_the_undealt_board(env_id: str, num_agents: int) -> None:
+    """In random hands, changing the other players' hole cards and the board
+    cards not dealt yet doesn't change the observation."""
+    env = make(env_id, num_agents=num_agents)
+    n = num_agents
+
+    def rollout(key):
+        def body(state, k):
+            k_act, k_passive, k_step, k_reset = jax.random.split(k, 4)
+            mask = env.get_avail_actions(state)
+            # random legal actions, but mostly checks and calls so that hands
+            # reach the river
+            a = jax.random.categorical(k_act, jnp.where(mask, 0.0, -jnp.inf))
+            passive = jnp.where(mask[0], 0, 3)  # call (No-Limit: check/call), else check
+            a = jnp.where(jax.random.uniform(k_passive) < 0.7, passive, a)
+            nxt, _, _, _, done, _ = env.step_env(k_step, state, a)
+            fresh, _ = env.reset(k_reset)
+            nxt = jax.tree_util.tree_map(lambda f, s: jnp.where(done, f, s), fresh, nxt)
+            return nxt, state
+
+        state, _ = env.reset(key)
+        return jax.lax.scan(body, state, jax.random.split(key, 40))[1]
+
+    def hide(s, key):
+        p, stage = s.current_player_idx, s.stage
+        board = jnp.concatenate([s.flop_cards, jnp.stack([s.turn_card, s.river_card])])
+        dealt = jnp.array([1, 1, 1, 2, 3]) <= stage
+        seen = jnp.zeros(52, bool).at[s.agent_cards[p]].set(True)
+        seen = seen.at[jnp.where(dealt, board, 52)].set(True, mode="drop")
+        # the cards the player hasn't seen, in random order
+        unseen = jax.random.permutation(key, jnp.argsort(seen)[: 52 - 7])
+        holes = unseen[: 2 * n].reshape(n, 2)
+        holes = jnp.where((jnp.arange(n) == p)[:, None], s.agent_cards, holes)
+        new_board = jnp.where(dealt, board, unseen[2 * n : 2 * n + 5])
+        changed = s.replace(
+            agent_cards=holes.astype(s.agent_cards.dtype),
+            flop_cards=new_board[:3].astype(s.flop_cards.dtype),
+            turn_card=new_board[3].astype(s.turn_card.dtype),
+            river_card=new_board[4].astype(s.river_card.dtype),
+        )
+        return (env.obs_from_state(changed) == env.obs_from_state(s)).all()
+
+    states = jax.jit(jax.vmap(rollout))(jax.random.split(jax.random.PRNGKey(n), 64))
+    flat = jax.tree_util.tree_map(lambda x: x.reshape((-1,) + x.shape[2:]), states)
+    keys = jax.random.split(jax.random.PRNGKey(7), flat.stage.shape[0])
+    ok = np.asarray(jax.jit(jax.vmap(hide))(flat, keys))
+    assert ok.all() and (np.asarray(flat.stage) == 3).any()

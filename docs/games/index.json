@@ -516,6 +516,13 @@
     "shape": []
    },
    {
+    "name": "raise_nums",
+    "dtype": "int32",
+    "shape": [
+     2
+    ]
+   },
+   {
     "name": "folded",
     "dtype": "bool",
     "shape": [
@@ -584,9 +591,9 @@
    }
   ],
   "bytes": {
-   "reset": 47126,
-   "step": 117903,
-   "avail": 10494
+   "reset": 49375,
+   "step": 123545,
+   "avail": 10621
   }
  },
  "seven_card_stud": {
@@ -851,6 +858,13 @@
     "shape": []
    },
    {
+    "name": "raise_nums",
+    "dtype": "int32",
+    "shape": [
+     4
+    ]
+   },
+   {
     "name": "folded",
     "dtype": "bool",
     "shape": [
@@ -888,9 +902,9 @@
    }
   ],
   "bytes": {
-   "reset": 46372,
-   "step": 106013,
-   "avail": 9605
+   "reset": 49600,
+   "step": 110512,
+   "avail": 9732
   }
  },
  "werewolf": {

@@ -1053,7 +1053,7 @@ def save_checkpoints(
     load_params(path, template), where template = network.init(rng, obs).
     Both networks are chip_scaled(ActorCriticDiscreteMLP(action_dim=37,
     hidden_dim=fc_dim_size), env) (parameters under "net"), mapping the acting player's observation
-    (env.obs_from_state(state), env.obs_dim = 57 + 6 * num_agents floats) to
+    (env.obs_from_state(state), env.obs_dim = 67 + 7 * num_agents floats) to
     (action logits, value in chips); the value head of the average policy is
     unused. Mask illegal actions (env.get_avail_actions(state)) before the
     softmax. Load either one as an evaluation baseline with

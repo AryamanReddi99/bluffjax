@@ -1011,7 +1011,7 @@ def save_checkpoints(
     a seed axis, written with flax.serialization.to_bytes; restore one with
     load_params(path, template), where template = network.init(rng, obs). The
     networks map the acting player's observation (env.obs_from_state(state),
-    env.obs_dim = 57 + 6 * num_agents floats) to:
+    env.obs_dim = 67 + 7 * num_agents floats) to:
         avg_policy (NFSP's output strategy): chip_scaled(ActorDiscreteMLP(
             action_dim=37, hidden_dim=fc_dim_size), env) -> action logits; load it as an
             evaluation baseline with compare_network_type=actor.
