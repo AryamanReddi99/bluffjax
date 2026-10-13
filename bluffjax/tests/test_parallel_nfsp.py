@@ -13,9 +13,13 @@ scripts):
   BR decision in the reservoir, PPO on BR decisions with a known outcome and
   the Q-network on all of them with the trace cut at average-policy
   decisions, truncation flags, evaluation schedule;
+- the game metrics in those runs: game/ and game_br/ split by the policy
+  each agent follows, the Goofspiel bid distributions passed to the metrics
+  are the ones the bids are sampled from (the PQN BR's epsilon-greedy one),
+  results.jsonl equal to what wandb gets;
 - the half-budget checkpoint taken after exactly half the updates with the
   schedules of the whole run, the checkpoint layout, save / strict load round
-  trip;
+  trip; main() end to end (run directory, results.jsonl, checkpoints);
 - the evaluation's seat rotation and win / loss / draw accounting.
 """
 
