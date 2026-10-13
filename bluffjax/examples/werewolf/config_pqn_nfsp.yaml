@@ -32,9 +32,10 @@ env_kwargs:
   num_werewolves: 2
   horizon: 200
 
-# comparison: win rate of the average and (greedy) best-response policies,
-# overall and by the learner's team, in compare_steps games with the learner
-# in seat i % num_agents of game i and the opponent in all the other seats
+# comparison: the average and (greedy) best-response policies each play
+# compare_episodes complete games with the learner in one seat (rotating over
+# the games) and the opponent in all the other seats; results overall and by
+# the learner's team
 compare: true
 compare_mode: random  # "random" or "checkpoint"
 # checkpoint opponent: a .msgpack file written by save_checkpoints of

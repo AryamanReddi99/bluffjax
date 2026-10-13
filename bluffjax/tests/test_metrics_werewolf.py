@@ -559,7 +559,7 @@ def test_training_run_logs_metrics_and_checkpoints(name, tmp_path, monkeypatch):
         ),
         networks=_networks,
         opponent_types=("actor_critic", "actor_critic") if ppo else ("actor", "q_network"),
-        overrides={"compare_episodes" if ppo else "compare_steps": 4},
+        overrides={"compare_episodes": 4},
         short_env_kwargs={},  # games end within ~40 steps
     )
     for r in records:

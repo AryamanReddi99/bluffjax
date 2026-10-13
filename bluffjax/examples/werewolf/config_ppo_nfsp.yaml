@@ -33,9 +33,9 @@ env_kwargs:
   num_werewolves: 2
   horizon: 200
 
-# comparison: win rate of the average and best-response policies, overall and
-# by the learner's team, in compare_episodes games with the learner in seat
-# i % num_agents of game i and the opponent in all the other seats
+# comparison: the average and best-response policies each play compare_episodes
+# complete games with the learner in one seat (rotating over the games) and
+# the opponent in all the other seats; results overall and by the learner's team
 compare: true
 compare_mode: random  # "random" or "checkpoint"
 # checkpoint opponent: a .msgpack file written by save_checkpoints of
@@ -43,7 +43,7 @@ compare_mode: random  # "random" or "checkpoint"
 # br_<i>, actor for avg_policy_<i>), e.g. <run_dir>/full/avg_policy_0.msgpack
 compare_with: ""
 compare_network_type: actor_critic  # "actor_critic", "q_network", or "actor"
-compare_episodes: 10
+compare_episodes: 10  # complete games against random, for each policy
 compare_interval: 1  # updates between evaluations (and after the last)
 
 # wandb

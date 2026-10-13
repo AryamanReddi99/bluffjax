@@ -43,7 +43,7 @@ compare_mode: random  # "random" or "checkpoint"
 compare_with: null
 compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
 compare_episodes: 10  # complete games against random, for each policy
-compare_interval: 1
+compare_interval: 1  # updates between evaluations (and after the last)
 
 # wandb
 project: bluffjax

@@ -38,7 +38,7 @@ compare: true
 compare_mode: random  # "random" or "checkpoint"
 compare_with: ""
 compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
-compare_episodes: 10
+compare_episodes: 10  # complete games against random, for each policy
 compare_interval: 1  # updates between evaluations (and after the last)
 
 # wandb

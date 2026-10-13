@@ -23,10 +23,14 @@ act).
 - Average policy: every BR decision (obs, action) is added to a reservoir
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
-- Evaluation (compare): compare_steps deals, each played once with the
-  learner in every seat and the opponent (random, or a checkpoint) in all
-  other seats, every compare_interval updates and after the last update. The
-  BR plays greedily.
+- Evaluation (compare): every compare_interval updates and after the last
+  one, the average policy (sampled) and the greedy BR each play
+  compare_episodes complete hands against the opponent (uniform random legal
+  actions, or a checkpoint) in every other seat, with the learner's seat
+  rotating over the hands from a random seat (see play_eval_games). Logged
+  per policy: win, loss and draw rates (net big bets positive, negative,
+  zero), the win rate of the decided hands, big bets per hand and hand
+  length, as {stat}_{avg|br}_vs_{random|baseline}.
 
 Units: the env pays big bets per hand; Q-values and logged returns use them.
 
@@ -281,6 +285,122 @@ def reservoir_append(
     )
 
 
+# =============================================================================
+# Evaluation against a baseline
+# =============================================================================
+
+# act(params, obs, action_mask, rng) -> action, for one observation
+Policy = Callable[[Any, FloatArray, BoolArray, PRNGKeyArray], IntArray]
+
+
+class EvalResult(NamedTuple):
+    """Per hand, from the learner's point of view."""
+
+    win: FloatArray  # the learner won big bets (its return is positive)
+    loss: FloatArray  # the learner lost big bets
+    draw: FloatArray  # neither (e.g. a split pot that returned its stake)
+    ret: FloatArray  # the learner's net big bets of the hand
+    length: FloatArray  # env steps
+    seat: IntArray  # the learner's seat
+
+
+def play_eval_games(
+    env: Any,
+    learner: Policy,
+    learner_params: Any,
+    baseline: Policy,
+    baseline_params: Any,
+    num_games: int,
+    rng: PRNGKeyArray,
+) -> EvalResult:
+    """Plays num_games complete hands in parallel, the learner in one seat and
+    the baseline in every other seat.
+
+    The learner's seat rotates over the hands, starting from a random seat
+    (hand g: seat (offset + g) % num_agents), so every seat is used equally
+    up to one hand (and the cards decide the bring-in, so no seat index is
+    favoured). Every hand is played with env.step_env (no auto-reset) until
+    it is over. The env pays the result of a hand when it ends, so the
+    learner's return is its net big bets: a win if positive, a loss if
+    negative and a draw if zero.
+    """
+    num_agents = env.num_agents
+    rng_seat, rng_games = jax.random.split(rng)
+    offset = jax.random.randint(rng_seat, (), 0, num_agents)
+    seats = (offset + jnp.arange(num_games)) % num_agents
+
+    def one_hand(rng_hand: PRNGKeyArray, seat: IntArray):
+        rng_reset, rng_play = jax.random.split(rng_hand)
+        state, obs = env.reset(rng_reset)
+
+        def body(carry):
+            state, obs, _, ret, length, rng_s = carry
+            rng_s, rng_learner, rng_baseline, rng_step = jax.random.split(rng_s, 4)
+            action_mask = env.get_avail_actions(state)
+            action = jnp.where(
+                state.current_player_idx == seat,
+                learner(learner_params, obs, action_mask, rng_learner),
+                baseline(baseline_params, obs, action_mask, rng_baseline),
+            )
+            state, obs, reward, _, done, _ = env.step_env(rng_step, state, action)
+            return state, obs, done, ret + reward[seat], length + 1, rng_s
+
+        init = (state, obs, jnp.bool_(False), jnp.float32(0.0), jnp.int32(0), rng_play)
+        _, _, _, ret, length, _ = lax.while_loop(lambda c: ~c[2], body, init)
+        return ret, length
+
+    ret, length = jax.vmap(one_hand)(jax.random.split(rng_games, num_games), seats)
+    return EvalResult(
+        win=(ret > 0).astype(jnp.float32),
+        loss=(ret < 0).astype(jnp.float32),
+        draw=(ret == 0).astype(jnp.float32),
+        ret=ret,
+        length=length.astype(jnp.float32),
+        seat=seats,
+    )
+
+
+def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
+    """Means over the evaluation hands; win_rate_decided excludes draws."""
+    decided = result.win.sum() + result.loss.sum()
+    return {
+        f"win_rate_{name}": result.win.mean(),
+        f"loss_rate_{name}": result.loss.mean(),
+        f"draw_rate_{name}": result.draw.mean(),
+        f"win_rate_decided_{name}": result.win.sum() / jnp.maximum(decided, 1.0),
+        f"avg_return_{name}": result.ret.mean(),
+        f"avg_episode_length_{name}": result.length.mean(),
+    }
+
+
+def format_eval(evals: dict[str, float]) -> str:
+    """One line for the policies evaluated, from eval_metrics' metrics."""
+    names = sorted(
+        k[len("win_rate_"):]
+        for k in evals
+        if k.startswith("win_rate_") and not k.startswith("win_rate_decided_")
+    )
+    return "; ".join(
+        f"{name} W/L/D {evals[f'win_rate_{name}']:.3f}/"
+        f"{evals[f'loss_rate_{name}']:.3f}/{evals[f'draw_rate_{name}']:.3f} "
+        f"(win rate of decided hands {evals[f'win_rate_decided_{name}']:.3f}), "
+        f"big bets per hand {evals[f'avg_return_{name}']:+.3f}, "
+        f"length {evals[f'avg_episode_length_{name}']:.1f}"
+        for name in names
+    )
+
+
+def print_eval_summary() -> None:
+    """The last evaluation of every seed and the mean over seeds."""
+    finals = {seed: evals[-1][1] for seed, evals in sorted(EVALUATIONS.items())}
+    for seed, evals in finals.items():
+        print(f"final evaluation seed {seed}: {format_eval(evals)}")
+    if finals:
+        keys = next(iter(finals.values())).keys()
+        mean = {k: float(np.mean([e[k] for e in finals.values()])) for k in keys}
+        print(f"final evaluation, mean of {len(finals)} seed(s): {format_eval(mean)}")
+
+
 def make_train(config: dict) -> Callable[..., RunnerState]:
     env = make("seven_card_stud", **config["env_kwargs"])
     num_agents = env.num_agents
@@ -370,23 +490,23 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         return config["start_e"] + frac * (config["end_e"] - config["start_e"])
 
     def logging_callback(seed_val, metric_dict, evaluated) -> None:
-        """Logs the metrics; the evaluation ones only when evaluated."""
+        """Logs the metrics; the evaluation ones (keys with "_vs_") only when
+        an evaluation ran."""
         seed_i = int(seed_val)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
+        eval_keys = [k for k in metrics if "_vs_" in k]
         if bool(evaluated):
-            eval_metrics = {k: float(v) for k, v in metrics.items() if "_vs_" in k}
             env_steps = int(metrics["env_steps"])
-            EVALUATIONS.setdefault(seed_i, []).append((env_steps, eval_metrics))
+            evals = {k: float(metrics[k]) for k in eval_keys}
+            EVALUATIONS.setdefault(seed_i, []).append((env_steps, evals))
             print(
                 f"seed {seed_i} update {int(metrics['update_step']) + 1}/"
-                f"{last_update + 1} ({env_steps} env steps) vs {opponent}: "
-                f"average policy {eval_metrics[f'avg_return_avg_vs_{opponent}']:+.3f}, "
-                f"BR {eval_metrics[f'avg_return_br_vs_{opponent}']:+.3f} "
-                "big bets per hand",
+                f"{last_update + 1} ({env_steps} env steps): {format_eval(evals)}",
                 flush=True,
             )
         else:
-            metrics = {k: v for k, v in metrics.items() if "_vs_" not in k}
+            for k in eval_keys:
+                del metrics[k]
         RESULTS_LOG.log(metrics, seed_i)
 
     def init_sl_buffer(obs_dim: int) -> SLBufferState:
@@ -412,69 +532,28 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             action=buffer.action[indices],
         )
 
-    def play_hand(
-        rng: PRNGKeyArray,
-        learner_seat: IntArray,
-        learner_fn: Callable,
-        learner_params: Any,
-        opponent_params: Any,
-    ) -> tuple[FloatArray, IntArray]:
-        """One hand with the learner in learner_seat and the opponent in all
-        other seats; returns the learner's payoff and the hand length."""
-        rng_deal, rng = jax.random.split(rng)
-        state, obs = env.reset(rng_deal)
-
-        def body(carry):
-            state, obs, payoff, length, _, rng = carry
-            rng, rng_learner, rng_opponent, rng_step = jax.random.split(rng, 4)
-            action_mask = env.get_avail_actions(state)
-            action = jnp.where(
-                state.current_player_idx == learner_seat,
-                learner_fn(learner_params, obs, action_mask, rng_learner),
-                baseline_fn(opponent_params, obs, action_mask, rng_opponent),
-            )
-            state, obs, reward, _, done, _ = env.step_env(rng_step, state, action)
-            return state, obs, payoff + reward[learner_seat], length + 1, done, rng
-
-        carry = (state, obs, jnp.float32(0.0), jnp.int32(0), jnp.bool_(False), rng)
-        _, _, payoff, length, _, _ = lax.while_loop(lambda c: ~c[4], body, carry)
-        return payoff, length
-
     def run_compare_eval(
         rng: PRNGKeyArray, avg_params: Any, br_params: Any
     ) -> dict[str, FloatArray]:
-        """Big bets per hand and win rate of the average policy (actor) and the
-        BR (greedy Q).
-
-        compare_steps deals; each is played num_agents times with the learner
-        in every seat (the same cards per seat), so every seat counts equally.
-        """
-        opponent_params = avg_params if baseline_params is None else baseline_params
-        deal_keys = jax.random.split(rng, config["compare_steps"])
-        seats = jnp.arange(num_agents)
-
-        def play_all(learner_fn, learner_params):
-            # (deals, seats): the same deal key with the learner in each seat
-            return jax.vmap(
-                lambda key: jax.vmap(
-                    lambda seat: play_hand(
-                        key, seat, learner_fn, learner_params, opponent_params
-                    )
-                )(seats)
-            )(deal_keys)
-
-        avg_payoff, avg_length = play_all(sample_actor(avg_network), avg_params)
-        br_payoff, br_length = play_all(sample_greedy(br_network), br_params)
-        return {
-            f"avg_return_avg_vs_{opponent}": avg_payoff.mean(),
-            f"avg_return_br_vs_{opponent}": br_payoff.mean(),
-            f"win_rate_avg_vs_{opponent}": (avg_payoff > 0).mean(),
-            f"win_rate_br_vs_{opponent}": (br_payoff > 0).mean(),
-            f"avg_eval_episode_length_vs_{opponent}": (
-                avg_length.mean() + br_length.mean()
+        """Evaluation metrics of the average policy (actor) and the BR
+        (greedy Q)."""
+        rng_avg, rng_br = jax.random.split(rng)
+        metrics = {}
+        for name, act, params, rng_eval in (
+            ("avg", sample_actor(avg_network), avg_params, rng_avg),
+            ("br", sample_greedy(br_network), br_params, rng_br),
+        ):
+            result = play_eval_games(
+                env,
+                act,
+                params,
+                baseline_fn,
+                baseline_params,
+                config["compare_episodes"],
+                rng_eval,
             )
-            / 2,
-        }
+            metrics.update(eval_metrics(f"{name}_vs_{opponent}", result))
+        return metrics
 
     def train(
         rng: PRNGKeyArray, seed: int, num_updates: int | None = None
@@ -903,19 +982,6 @@ def save_checkpoints(
     return run_dir
 
 
-def print_evaluation_summary() -> None:
-    """Final evaluation of every seed, and the mean over seeds."""
-    if not EVALUATIONS:
-        return
-    for name in EVALUATIONS[min(EVALUATIONS)][-1][1]:
-        finals = [EVALUATIONS[s][-1][1][name] for s in sorted(EVALUATIONS)]
-        values = " ".join(f"{v:+.4f}" for v in finals)
-        print(
-            f"final {name}: mean {np.mean(finals):+.4f} std {np.std(finals):.4f} "
-            f"over {len(finals)} seed(s): {values}"
-        )
-
-
 @hydra.main(version_base=None, config_path="./", config_name="config_pqn_nfsp")
 def main(config: dict) -> None:
     global WANDB_RUNS, RESULTS_LOG
@@ -978,7 +1044,7 @@ def main(config: dict) -> None:
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "
             f"{run_time:.1f} s (all seeds in parallel)"
         )
-        print_evaluation_summary()
+        print_eval_summary()
         if config["save_checkpoints"]:
             save_checkpoints(
                 run_dir,
