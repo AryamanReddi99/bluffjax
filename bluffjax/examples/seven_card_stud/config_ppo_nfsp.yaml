@@ -10,7 +10,7 @@ anneal_lr: true  # linear decay to 0 over all gradient steps
 gamma: 0.99
 gae_lambda: 0.95
 clip_eps: 0.2
-vf_clip: 0.2
+vf_clip: 0.2  # 0.2 x the std of a game's return under random play (reward units)
 ent_coef: 0.0
 vf_coef: 1.0
 max_grad_norm: 0.5

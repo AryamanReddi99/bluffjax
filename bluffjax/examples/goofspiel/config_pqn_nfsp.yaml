@@ -13,8 +13,8 @@ anneal_lr: true  # linear decay to 0 over all gradient steps (false: constant)
 # epsilon of the epsilon-greedy BR, linear from start_e to end_e over the
 # first exploration_fraction of the run (the same schedule in every game)
 start_e: 1.0
-end_e: 0.05
-exploration_fraction: 0.2  # epsilon decays linearly over this share of the run
+end_e: 0.005
+exploration_fraction: 0.1  # epsilon decays linearly over this share of the run
 q_lambda: 0.9
 max_grad_norm: 0.5
 # judgement call: the env pays prize values (1-13 per round, a game's return
