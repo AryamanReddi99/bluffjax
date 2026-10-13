@@ -24,7 +24,10 @@ Order of play
   no seat index is favoured.
 
 Betting: limit, bets of small_bet on 3rd and 4th street and big_bet after,
-at most allowed_raise_num raises per street. Rewards are net chips divided by
+at most allowed_raise_num raises per street. The bring-in is an incomplete
+bet: on 3rd street the first raise completes it to one small bet above the
+ante (it costs the player after the bring-in small_bet, not
+bring_in + small_bet), and each raise after that adds a small bet. Rewards are net chips divided by
 big_bet (big bets).
 
 Observation (for the player to act; seat j is the player j places clockwise
@@ -286,7 +289,17 @@ class SevenCardStud(AECEnv):
             return new_chips_in, state.raise_nums, state.not_raise_num + 1, state.folded
 
         def process_raise():
-            diff = max_chips - player_chips + raise_amount
+            # While only the bring-in has been posted, a raise completes it
+            # to one small bet; otherwise it adds a bet to the current one.
+            completes_bring_in = (state.stage == 0) & (
+                max_chips < self.ante + self.small_bet
+            )
+            raise_to = jnp.where(
+                completes_bring_in,
+                self.ante + self.small_bet,
+                max_chips + raise_amount,
+            )
+            diff = raise_to - player_chips
             new_chips_in = state.chips_in.at[current_player].add(diff)
             new_raise_nums = state.raise_nums.at[state.stage].set(
                 current_round_raises + 1

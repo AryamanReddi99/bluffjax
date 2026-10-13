@@ -154,7 +154,10 @@ class RefStud:
             self.chips[c] = top
             self.not_raised += 1
         elif action == 1:
-            self.chips[c] = top + (2 if self.stage >= 2 else 1)
+            if self.stage == 0 and top < 1.5:  # complete the bring-in to 1 small bet
+                self.chips[c] = 1.5
+            else:
+                self.chips[c] = top + (2 if self.stage >= 2 else 1)
             self.raises[self.stage] += 1
             self.not_raised = 1
         elif action == 2:
@@ -637,6 +640,51 @@ def test_player_count_limits():
     env = make("seven_card_stud", num_agents=16)
     state, obs = env.reset(jax.random.PRNGKey(0))
     assert obs.shape == (env.obs_dim,)
+
+
+CALL, RAISE, FOLD, CHECK = 0, 1, 2, 3
+
+
+def _play(env, state, actions):
+    for a in actions:
+        state, *_ = env.step_env(jax.random.PRNGKey(0), state, jnp.int32(a))
+    return state
+
+
+def test_first_raise_on_third_street_completes_the_bring_in():
+    """The bring-in (1/2) is an incomplete bet: the first raise on 3rd street
+    makes the bet one small bet above the ante (1/2 + 1 chips in), later raises
+    add a small bet each up to four raises, and 4th street is unaffected."""
+    env = make("seven_card_stud", num_agents=3)
+    start, _ = env.reset(jax.random.PRNGKey(0))
+    b = int(start.bring_in_idx)
+    p1, p2 = (b + 1) % 3, (b + 2) % 3
+    assert int(start.current_player_idx) == p1
+    np.testing.assert_array_equal(start.chips_in, np.full(3, 0.5) + 0.5 * (np.arange(3) == b))
+
+    # the player after the bring-in completes for 1 chip, re-raises add 1 each
+    state = _play(env, start, [RAISE])
+    assert float(state.chips_in[p1]) == 1.5 and int(state.raise_nums[0]) == 1
+    state = _play(env, state, [RAISE])
+    assert float(state.chips_in[p2]) == 2.5
+    state = _play(env, state, [RAISE, RAISE])  # bring-in, then p1: the cap
+    assert float(state.chips_in[b]) == 3.5 and float(state.chips_in[p1]) == 4.5
+    assert int(state.raise_nums[0]) == 4
+    assert not bool(env.get_avail_actions(state)[RAISE])
+
+    # everyone calls the bring-in, and the bring-in completes for 1/2
+    state = _play(env, start, [CALL, CALL])
+    np.testing.assert_array_equal(state.chips_in, np.ones(3))
+    state = _play(env, state, [RAISE])
+    assert float(state.chips_in[b]) == 1.5 and int(state.raise_nums[0]) == 1
+
+    # 4th street: a raise adds a full small bet to the current bet
+    state = _play(env, state, [CALL, CALL])
+    assert int(state.stage) == 1
+    np.testing.assert_array_equal(state.chips_in, np.full(3, 1.5))
+    first = int(state.current_player_idx)
+    state = _play(env, state, [RAISE])
+    assert float(state.chips_in[first]) == 2.5
 
 
 # ---------------------------------------------------------------- NFSP scripts

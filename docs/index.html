@@ -680,7 +680,7 @@
   GAMES.seven_card_stud = {
     title: "7-Card Stud", who: "You vs 1 bot · limit", blurb: "Seven cards each, four of them face up. No community cards.",
     art: () => back() + back() + card52(25) + card52(38),
-    rules: `<p>Ante ½. The lowest door card (suits break ties) posts a ½ bring-in. Cards 3 to 6 are dealt face up, the 7th face down; from 4th street on, the best hand showing acts first. Best five of seven wins.</p><p>Bets are 1 on 3rd and 4th street and 2 after that, up to four raises a street. Winnings are counted in big bets (2 chips).</p>`,
+    rules: `<p>Ante ½. The lowest door card (suits break ties) posts a ½ bring-in. Cards 3 to 6 are dealt face up, the 7th face down; from 4th street on, the best hand showing acts first. Best five of seven wins.</p><p>Bets are 1 on 3rd and 4th street and 2 after that, up to four raises a street; on 3rd street the first raise completes the bring-in to 1. Winnings are counted in big bets (2 chips).</p>`,
     labels(S) { return LIMIT_LABELS(S.stage[0] >= 2 ? 2 : 1); },
     render(S, ctx) {
       const reveal = ctx.reveal && showdown(S, ctx);
