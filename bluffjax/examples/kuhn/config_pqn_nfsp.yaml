@@ -1,8 +1,8 @@
 num_timesteps: 1e7
 num_envs: 1024
 num_steps_per_env_per_update: 64
-num_epochs: 2
-num_minibatches: 2
+num_epochs: 4
+num_minibatches: 4
 
 # PQN BR params
 lr: 2.5e-4
@@ -22,7 +22,7 @@ fc_dim_size: 64
 anticipatory_eta: 0.1
 sl_reservoir_capacity: 100000
 sl_batch_size: 256
-sl_num_steps_per_update: 4
+sl_num_steps_per_update: 512  # 2 SL samples per env step, as in NFSP/OpenSpiel
 sl_lr: 3e-4
 
 # exact exploitability and Kuhn policy metrics (game/, game_br/) of the

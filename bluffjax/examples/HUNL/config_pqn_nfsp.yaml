@@ -2,8 +2,8 @@
 num_timesteps: 1e7
 num_envs: 1024
 num_steps_per_env_per_update: 64
-num_epochs: 2
-num_minibatches: 2
+num_epochs: 4
+num_minibatches: 4
 
 # PQN BR params (Q-network trained on all decisions, see the script docstring)
 lr: 2.5e-4
