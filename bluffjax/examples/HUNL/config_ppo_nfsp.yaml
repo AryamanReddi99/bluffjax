@@ -38,7 +38,11 @@ env_kwargs:
 save_checkpoints: true
 save_dir: ${repo_root:}/checkpoints/HUNL
 
-# comparison: chips per hand of the average and best-response policies
+# evaluation: the average and best-response policies each play
+# compare_episodes complete hands against the opponent (each deal from both
+# seats), logging avg_return_ (chips per hand), win_rate_, loss_rate_,
+# draw_rate_, win_rate_decided_ and avg_episode_length_ of
+# {avg,br}_vs_{random,baseline} (see run_compare_eval in the script)
 compare: true
 compare_mode: random  # "random" or "checkpoint"
 # ReBeL opponent, from hunl_rebel.py --config-name config_rebel_opponent, e.g.
@@ -47,7 +51,10 @@ compare_mode: random  # "random" or "checkpoint"
 # ${repo_root:}/checkpoints/HUNL/<run>/full/avg_policy_0.msgpack)
 compare_with: ""
 compare_network_type: rebel  # "rebel" (searches at test time) or "actor_critic"
-compare_episodes: 10  # complete games against random, for each policy
+# ReBeL's search is expensive: one evaluation (compare_episodes 10, 2 seeds,
+# 64 CFR iterations, RTX 3080) takes ~1.1 s, ~28 min of a 1525-update run
+# with compare_interval 1 (against random: ~5 ms per evaluation)
+compare_episodes: 10  # complete games (hands) for each policy, each deal from both seats
 compare_cfr_iters: null  # ReBeL CFR iterations per subgame when acting; null = as trained
 compare_solve_chunk: 16  # ReBeL subgames solved at once per seed (GPU memory)
 compare_interval: 1  # updates between evaluations (and after the last)

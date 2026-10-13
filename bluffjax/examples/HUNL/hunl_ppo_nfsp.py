@@ -16,6 +16,16 @@ average-policy network.
 - Average policy: every BR decision (obs, action) is added to a reservoir
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
+- Evaluation (compare): the average policy and the BR (both sampling from
+  their masked logits) each play compare_episodes complete hands against the
+  opponent, every compare_interval updates and after the last update. The
+  opponent plays uniformly random legal actions (compare_mode random) or a
+  checkpoint (compare_mode checkpoint): a ReBeL value network searching at
+  test time (compare_network_type rebel) or a PPO-NFSP network
+  (actor_critic). Hands come in mirrored pairs (holdem_rebel.agent.
+  play_hands): hands 2k and 2k + 1 are one deal with the learner in each
+  seat, so every deal is played from both seats (with an odd count the last
+  deal once). See run_compare_eval for the logged metrics.
 
 Units: the env pays raw chips per hand (stacks 100, blinds 1/2). Training uses
 reward * reward_scale, and logged returns are in chips per hand. The two chip
@@ -77,20 +87,19 @@ from bluffjax.networks.mlp import ActorCriticDiscreteMLP
 from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
-# ReBeL evaluation opponent
-from bluffjax.examples.holdem_rebel.agent import PolicyPlayer, load_rebel, play_match
+# evaluation hands and opponents (ReBeL), and the evaluation metric names
+from bluffjax.examples.holdem_rebel.agent import PolicyPlayer, load_rebel, play_hands
 from bluffjax.examples.holdem_rebel.game import make_game
+from bluffjax.examples.parallel_nfsp_common import EvalResult, eval_metrics
 
 WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
 RESULTS_LOG: ResultsLog | None = None  # results.jsonl and wandb, set in main()
-# evaluation metrics, logged only in the updates that evaluate
-EVAL_KEYS = (
-    "avg_chips_avg_vs_random",
-    "avg_chips_br_vs_random",
-    "avg_chips_avg_vs_baseline",
-    "avg_chips_br_vs_baseline",
-    "avg_eval_episode_length",
-)
+
+
+def is_eval_metric(name: str) -> bool:
+    """The evaluation metrics (see run_compare_eval), logged only in the
+    updates that evaluate."""
+    return "_vs_" in name or name == "eval_unfinished_hands"
 
 
 class Transition(NamedTuple):
@@ -448,27 +457,47 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     else:
         baseline_player = policy_player(sample_masked_action)
 
-    def run_compare_eval(
-        rng: PRNGKeyArray,
-        avg_params: Any,
-        br_params: Any,
-        checkpoint_params: Any,
-    ) -> tuple[PRNGKeyArray, FloatArray, FloatArray, FloatArray]:
-        """Chips per hand of the average and best-response policies.
+    opponent = "random" if compare_against_random else "baseline"
 
-        compare_steps deals, each played twice with the seats swapped.
+    def run_compare_eval(
+        rng: PRNGKeyArray, avg_params: Any, br_params: Any
+    ) -> dict[str, FloatArray]:
+        """Evaluation of the average policy (p = avg) and the BR (p = br).
+
+        Each plays exactly compare_episodes complete hands against the
+        opponent (o = random or baseline), in mirrored pairs (play_hands).
+        Per policy, with the learner's result r of a hand in chips:
+            avg_return_{p}_vs_{o}         mean r per hand
+            win_rate_{p}_vs_{o}           share of hands with r > 0
+            loss_rate_{p}_vs_{o}          r < 0
+            draw_rate_{p}_vs_{o}          r = 0 (a split pot)
+            win_rate_decided_{p}_vs_{o}   wins / (wins + losses)
+            avg_episode_length_{p}_vs_{o} actions (env steps) per hand
+        and eval_unfinished_hands, the hands of both policies stopped at the
+        ReBeL opponent's solve limit (0 for opponents without search; such
+        a hand would count as a draw).
         """
-        rng, rng_avg, rng_br = jax.random.split(rng, 3)
-        avg = play_match(
-            env, game, train_player, avg_params, baseline_player,
-            checkpoint_params, config["compare_steps"], rng_avg,
-        )
-        br = play_match(
-            env, game, train_player, br_params, baseline_player,
-            checkpoint_params, config["compare_steps"], rng_br,
-        )
-        avg_eval_len = (avg.hand_length.mean() + br.hand_length.mean()) / 2
-        return rng, avg.rewards.mean(), br.rewards.mean(), avg_eval_len
+        metrics = {}
+        unfinished = jnp.int32(0)
+        for name, params, rng_eval in zip(
+            ("avg", "br"), (avg_params, br_params), jax.random.split(rng)
+        ):
+            hands = play_hands(
+                env, game, train_player, params, baseline_player,
+                baseline_params, config["compare_episodes"], rng_eval,
+            )
+            r = hands.rewards
+            result = EvalResult(
+                win=(r > 0).astype(jnp.float32),
+                loss=(r < 0).astype(jnp.float32),
+                draw=(r == 0).astype(jnp.float32),
+                ret=r,
+                length=hands.hand_length,
+            )
+            metrics.update(eval_metrics(f"{name}_vs_{opponent}", result))
+            unfinished += jnp.sum(~hands.finished)
+        metrics["eval_unfinished_hands"] = unfinished
+        return metrics
 
     def train(
         rng: PRNGKeyArray, seed: int, num_updates: int | None = None
@@ -908,44 +937,31 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             )
             ep_length_avg = masked_timesteps.sum() / done_count
 
+            # Evaluation every compare_interval updates and after the last;
+            # its results are logged only then (see logging_callback). It
+            # uses its own key, so it doesn't change training.
             should_compare = compare_enabled & (
-                runner_state.update_step % config["compare_interval"] == 0
+                (runner_state.update_step % config["compare_interval"] == 0)
+                | (runner_state.update_step == config["num_update_steps"] - 1)
             )
+            eval_results = {}
+            if compare_enabled:
 
-            def do_compare(carry_rng):
-                checkpoint_params = baseline_params
-                if compare_against_random:
-                    checkpoint_params = avg_train_state.params
-                return run_compare_eval(
-                    carry_rng,
-                    avg_train_state.params,
-                    br_train_state.params,
-                    checkpoint_params,
+                def do_compare(rng_eval):
+                    return run_compare_eval(
+                        rng_eval, avg_train_state.params, br_train_state.params
+                    )
+
+                def skip_compare(rng_eval):
+                    return jax.tree_util.tree_map(
+                        lambda x: jnp.zeros(x.shape, x.dtype),
+                        jax.eval_shape(do_compare, rng_eval),
+                    )
+
+                eval_results = lax.cond(
+                    should_compare, do_compare, skip_compare, rng_compare
                 )
 
-            def skip_compare(carry_rng):
-                return (
-                    carry_rng,
-                    jnp.array(0.0, dtype=jnp.float32),
-                    jnp.array(0.0, dtype=jnp.float32),
-                    jnp.array(0.0, dtype=jnp.float32),
-                )
-
-            (
-                rng_compare,
-                avg_chips_avg_vs_baseline,
-                avg_chips_br_vs_baseline,
-                avg_eval_episode_length,
-            ) = lax.cond(
-                should_compare,
-                do_compare,
-                skip_compare,
-                rng_compare,
-            )
-
-            # Evaluation results, logged only when should_compare (see
-            # logging_callback); the opponent is random play or the baseline.
-            opponent = "random" if compare_against_random else "baseline"
             metric = {
                 "returns_avg_agent_one": returns_avg_agent_one,
                 "returns_avg_agent_two": returns_avg_agent_two,
@@ -955,10 +971,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "sl_buffer_seen": sl_buffer.seen.astype(jnp.float32),
                 "update_step": runner_state.update_step,
                 "evaluated": should_compare,
-                f"avg_chips_avg_vs_{opponent}": avg_chips_avg_vs_baseline,
-                f"avg_chips_br_vs_{opponent}": avg_chips_br_vs_baseline,
-                "avg_eval_episode_length": avg_eval_episode_length,
             }
+            metric.update(eval_results)
             metric.update(ppo_loss_info)
             metric.update(sl_loss_info)
 
@@ -1020,7 +1034,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 sl_buffer=sl_buffer,
                 half=half,
                 update_step=runner_state.update_step + 1,
-                rng=rng_compare,
+                rng=rng,
             )
             return runner_state, None
 
@@ -1079,8 +1093,7 @@ def logging_callback(float_names, int_names, bool_names, seed_val, packed) -> No
     for k in bool_names:
         metrics[k] = bool(metrics[k])
     if not metrics["evaluated"]:
-        for k in EVAL_KEYS:
-            metrics.pop(k, None)
+        metrics = {k: v for k, v in metrics.items() if not is_eval_metric(k)}
     RESULTS_LOG.log(metrics, int(seed_val))
 
 

@@ -14,7 +14,9 @@ contains it, and continues from there.
 play_match runs a batch of hands between two players with every deal played
 twice, once from each seat (duplicate poker), so luck of the cards largely
 cancels in the paired results. It can also count the game metrics
-(bluffjax.metrics) of each side.
+(bluffjax.metrics) of each side. play_hands plays an exact number of hands
+the same way (consecutive hands are one deal from both seats), as the NFSP
+scripts' in-training evaluation does.
 """
 
 import json
@@ -298,6 +300,17 @@ class MatchResult(NamedTuple):
     counts_b: Counts | None = None
 
 
+class HandsResult(NamedTuple):
+    """play_hands: one entry per hand, from player A's point of view."""
+
+    rewards: FloatArray  # (num_hands,) player A's reward
+    hand_length: FloatArray  # (num_hands,) actions (env steps) in the hand
+    seat_a: IntArray  # (num_hands,) player A's seat
+    deal: IntArray  # (num_hands,) deal index; hands 2k and 2k + 1 share deal k
+    finished: BoolArray  # (num_hands,) the hand ended (False only at the solve limit)
+    resolves: IntArray  # opponent actions outside a ReBeL player's subgame
+
+
 def play_match(
     env,
     game: HoldemGame,
@@ -322,10 +335,84 @@ def play_match(
     """
     rng_deal, rng_play = jax.random.split(rng)
     keys = jax.random.split(rng_deal, n_deals)
-    keys = jnp.concatenate([keys, keys])
-    env_states, _ = jax.vmap(env.reset)(keys)
-    n = 2 * n_deals
     seat_a = jnp.concatenate([jnp.zeros(n_deals, jnp.int32), jnp.ones(n_deals, jnp.int32)])
+    out = _play_hands(
+        env, game, player_a, params_a, player_b, params_b,
+        jnp.concatenate([keys, keys]), seat_a, rng_play, max_solves, metrics,
+    )
+    return MatchResult(
+        rewards=out.rewards.reshape(2, n_deals).T,
+        hand_length=out.length.reshape(2, n_deals).T,
+        unfinished=jnp.sum(~out.done),
+        resolves=out.resolves,
+        counts_a=None if metrics is None else out.counts_a,
+        counts_b=None if metrics is None else out.counts_b,
+    )
+
+
+def play_hands(
+    env,
+    game: HoldemGame,
+    player_a: Player,
+    params_a,
+    player_b: Player,
+    params_b,
+    num_hands: int,
+    rng: PRNGKeyArray,
+    max_solves: int = 64,
+) -> HandsResult:
+    """Play exactly num_hands complete hands, every deal from both seats; jittable.
+
+    Hands 2k and 2k + 1 are deal k (the same cards and blinds) with player A
+    in seat (offset + h) % 2 of hand h, from a random offset: each deal is
+    played once from each seat (duplicate poker), and with an odd num_hands
+    the last deal is played once, from seat offset. Every hand is played to
+    its end with env.step_env (no auto-reset, no step budget).
+
+    max_solves bounds the solve rounds (all hands advance together; a hand
+    needs one round per betting round it reaches, plus one per opponent
+    action outside a ReBeL player's subgame). Players without search
+    (PolicyPlayer) need at most 4 rounds, so all their hands finish;
+    `finished` is False only for a hand stopped at the limit.
+    """
+    rng_deal, rng_seat, rng_play = jax.random.split(rng, 3)
+    hand = jnp.arange(num_hands)
+    deal_keys = jax.random.split(rng_deal, (num_hands + 1) // 2)
+    offset = jax.random.randint(rng_seat, (), 0, 2)
+    seat_a = ((offset + hand) % 2).astype(jnp.int32)
+    out = _play_hands(
+        env, game, player_a, params_a, player_b, params_b,
+        deal_keys[hand // 2], seat_a, rng_play, max_solves, None,
+    )
+    return HandsResult(
+        rewards=out.rewards,
+        hand_length=out.length,
+        seat_a=seat_a,
+        deal=hand // 2,
+        finished=out.done,
+        resolves=out.resolves,
+    )
+
+
+def _play_hands(
+    env,
+    game: HoldemGame,
+    player_a: Player,
+    params_a,
+    player_b: Player,
+    params_b,
+    keys: PRNGKeyArray,
+    seat_a: IntArray,
+    rng_play: PRNGKeyArray,
+    max_solves: int,
+    metrics: GameMetrics | None,
+):
+    """Plays hand i from env.reset(keys[i]) with player A in seat seat_a[i]
+    (B in the other) until every hand is over or max_solves solve rounds
+    have run. Returns the final loop carry (rewards, length, done, resolves,
+    counts_a, counts_b per hand or summed, see play_match)."""
+    env_states, _ = jax.vmap(env.reset)(keys)
+    n = seat_a.shape[0]
     seat_b = 1 - seat_a
     views_of = lambda s, seat: jax.vmap(lambda e, k: public_view(game, e, k))(s, seat)  # noqa: E731
     step_env = jax.vmap(env.step_env)
@@ -336,7 +423,9 @@ def play_match(
             lambda x: jnp.broadcast_to(x, (n,) + x.shape), metrics.init_carry()
         )
         actions0 = jnp.zeros(n, jnp.int32)
-        step_shape = jax.eval_shape(step_env, jax.random.split(rng, n), env_states, actions0)
+        step_shape = jax.eval_shape(
+            step_env, jax.random.split(rng_play, n), env_states, actions0
+        )
         counts_shape = jax.eval_shape(
             jax.vmap(metrics.step), metric_carry, env_states, actions0, env_states,
             step_shape[2], step_shape[4], step_shape[5],
@@ -449,15 +538,7 @@ def play_match(
         counts_a=zero_counts,
         counts_b=zero_counts,
     )
-    out = lax.while_loop(outer_cond, outer_body, init)
-    return MatchResult(
-        rewards=out.rewards.reshape(2, n_deals).T,
-        hand_length=out.length.reshape(2, n_deals).T,
-        unfinished=jnp.sum(~out.done),
-        resolves=out.resolves,
-        counts_a=None if metrics is None else out.counts_a,
-        counts_b=None if metrics is None else out.counts_b,
-    )
+    return lax.while_loop(outer_cond, outer_body, init)
 
 
 def summarize(results: list[MatchResult]) -> dict[str, float]:
