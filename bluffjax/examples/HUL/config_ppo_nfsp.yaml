@@ -16,7 +16,6 @@ vf_clip: 0.9  # 0.2 x the std of a game's return under random play (reward units
 ent_coef: 0.0
 vf_coef: 1.0
 max_grad_norm: 0.5
-reward_scale: 1.0
 
 # Shared network architecture
 fc_dim_size: 128
@@ -40,7 +39,7 @@ save_dir: ${repo_root:}/checkpoints/HUL
 
 # evaluation: the average and best-response policies each play
 # compare_episodes complete hands against the opponent (each deal from both
-# seats), logging avg_return_ (BB per hand), win_rate_, loss_rate_,
+# seats), logging avg_return_ (chips per hand), win_rate_, loss_rate_,
 # draw_rate_, win_rate_decided_ and avg_episode_length_ of
 # {avg,br}_vs_{random,baseline} (see run_compare_eval in the script)
 compare: true

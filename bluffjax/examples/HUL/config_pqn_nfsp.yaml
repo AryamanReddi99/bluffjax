@@ -14,7 +14,6 @@ end_e: 0.005
 exploration_fraction: 0.1  # epsilon decays linearly over this share of the run
 q_lambda: 0.9
 max_grad_norm: 0.5
-reward_scale: 1.0
 
 # Shared
 gamma: 0.99
@@ -39,7 +38,7 @@ save_dir: ${repo_root:}/checkpoints/HUL
 
 # evaluation: the average and best-response policies each play
 # compare_episodes complete hands against the opponent (each deal from both
-# seats), logging avg_return_ (BB per hand), win_rate_, loss_rate_,
+# seats), logging avg_return_ (chips per hand), win_rate_, loss_rate_,
 # draw_rate_, win_rate_decided_ and avg_episode_length_ of
 # {avg,br}_vs_{random,baseline} (see run_compare_eval in the script)
 compare: true

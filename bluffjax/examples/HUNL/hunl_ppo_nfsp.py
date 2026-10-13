@@ -27,8 +27,8 @@ average-policy network.
   seat, so every deal is played from both seats (with an odd count the last
   deal once). See run_compare_eval for the logged metrics.
 
-Units: the env pays raw chips per hand (stacks 100, blinds 1/2). Training uses
-reward * reward_scale, and logged returns are in chips per hand. The two chip
+Units: the env pays raw chips per hand (stacks 100, blinds 1/2); training and
+the logged returns use chips per hand. The two chip
 counts in the observation (raw chips, up to the 100-chip stack) are divided by
 the starting stack inside the networks (ChipScaledInput); the env and the
 observations stored in the reservoir stay in raw chips.
@@ -655,7 +655,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             last_player_idx = last_state.current_player_idx
             advantages, targets, valid = per_player_gae(
                 transitions.value,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 transitions.done,
                 transitions.player_idx,
                 last_val,
@@ -1120,7 +1120,7 @@ def save_checkpoints(
     ChipScaledInput(ActorCriticDiscreteMLP(action_dim, fc_dim_size), 52, 100)
     mapping a raw env observation (env.obs_from_state(state), env.obs_dim
     floats, for the player to act) to (action logits over the env's 5
-    actions, value in units of reward_scale * env reward); the value head of
+    actions, value in chips); the value head of
     the average policy is unused. Restore with run_utils.load_params(path,
     template), template = network.init(rng, obs), and mask illegal actions
     (env.get_avail_actions(state)) before the softmax. As an evaluation

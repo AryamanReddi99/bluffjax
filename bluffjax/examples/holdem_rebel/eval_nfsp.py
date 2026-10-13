@@ -82,7 +82,7 @@ def main(run_dir: str, rebel_path: str, n_deals: int, batch: int, stage: str = "
     summary = {
         "run_dir": run_dir, "stage": stage, "rebel_checkpoint": rebel_path,
         "rebel_samples": meta.get("samples"),
-        "game": game_name, "algo": algo, "units": "BB per hand" if game_name == "hul" else "chips per hand",
+        "game": game_name, "algo": algo, "units": "chips per hand",
         "deals_per_seed": n_deals, "mean_over_seeds": float(means.mean()),
         "se_over_seeds": float(means.std(ddof=1) / np.sqrt(len(means))) if len(means) > 1 else float("nan"),
         "per_seed": per_seed,

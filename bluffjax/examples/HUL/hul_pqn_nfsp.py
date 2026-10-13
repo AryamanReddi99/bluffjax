@@ -33,9 +33,8 @@ the small blind).
   seat, so every deal is played from both seats (with an odd count the last
   deal once). See run_compare_eval for the logged metrics.
 
-Units: the env pays big blinds (BB) per hand. Training uses
-reward * reward_scale (so Q-values are in scaled units), and logged returns
-are in BB per hand.
+Units: the env pays net chips per hand (blinds 1/2), as in No-Limit Hold'em;
+training (Q-values) and the logged returns use chips per hand.
 
 Game metrics (bluffjax.metrics.texas_limit_holdem: VPIP and PFR by position,
 bluff rate and success by street, correct folds, showdowns) are counted in
@@ -484,7 +483,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
         Each plays exactly compare_episodes complete hands against the
         opponent (o = random or baseline), in mirrored pairs (play_hands).
-        Per policy, with the learner's result r of a hand in BB:
+        Per policy, with the learner's result r of a hand in chips:
             avg_return_{p}_vs_{o}         mean r per hand
             win_rate_{p}_vs_{o}           share of hands with r > 0
             loss_rate_{p}_vs_{o}          r < 0
@@ -728,7 +727,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             # trains the Q-network; the trace is cut at average-policy decisions.
             targets, valid = per_player_q_lambda_targets(
                 transitions.q_max,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 transitions.done,
                 transitions.player_idx,
                 config["q_lambda"] * transitions.is_br.astype(jnp.float32),
@@ -973,7 +972,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             metric.update(pqn_loss_info)
             metric.update(sl_loss_info)
 
-            # Self-play payoffs per finished hand in env units (BB), split by
+            # Self-play payoffs per finished hand in env units (chips), split by
             # the policy the player followed in that hand. Against the mixed
             # opponent the BR should win (the average policy then loses).
             hand_end = transitions.done[..., None]
@@ -1122,7 +1121,7 @@ def save_checkpoints(
     (env.obs_from_state(state), env.obs_dim floats, for the player to act) to
     action logits over the env's 4 actions; the BR is
     QNetworkDiscreteMLP(action_dim, fc_dim_size) mapping it to Q-values in
-    units of reward_scale * env reward (its policy is the argmax over legal
+    chips (its policy is the argmax over legal
     actions). Restore with run_utils.load_params(path, template), template =
     network.init(rng, obs), and mask illegal actions
     (env.get_avail_actions(state)).

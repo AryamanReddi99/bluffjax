@@ -32,9 +32,8 @@ and one average-policy network.
   seat, so every deal is played from both seats (with an odd count the last
   deal once). See run_compare_eval for the logged metrics.
 
-Units: the env pays raw chips per hand (stacks 100, blinds 1/2). Training uses
-reward * reward_scale (so Q-values are in scaled units), and logged returns
-are in chips per hand. The two chip counts in the observation (raw chips, up
+Units: the env pays raw chips per hand (stacks 100, blinds 1/2). Training (Q-values)
+and the logged returns use chips per hand. The two chip counts in the observation (raw chips, up
 to the 100-chip stack) are divided by the starting stack inside the networks
 (ChipScaledInput); the env and the observations stored in the reservoir stay
 in raw chips.
@@ -767,7 +766,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             # trains the Q-network; the trace is cut at average-policy decisions.
             targets, valid = per_player_q_lambda_targets(
                 transitions.q_max,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 transitions.done,
                 transitions.player_idx,
                 config["q_lambda"] * transitions.is_br.astype(jnp.float32),
@@ -1161,8 +1160,7 @@ def save_checkpoints(
     mapping a raw env observation (env.obs_from_state(state), env.obs_dim
     floats, for the player to act) to action logits over the env's 5
     actions; the BR is ChipScaledInput(QNetworkDiscreteMLP(action_dim,
-    fc_dim_size), 52, 100) mapping it to Q-values in units of reward_scale *
-    env reward (its policy is the argmax over legal actions). Restore with
+    fc_dim_size), 52, 100) mapping it to Q-values in chips (its policy is the argmax over legal actions). Restore with
     run_utils.load_params(path, template), template = network.init(rng,
     obs), and mask illegal actions (env.get_avail_actions(state)).
     The files aren't evaluation opponents of these scripts (compare_network_type
