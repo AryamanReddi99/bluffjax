@@ -9,7 +9,8 @@
   the samples one at a time with the same random draws.
 - In a short NFSP training run each player keeps its BR / average-policy draw
   for the whole hand (also across updates), every BR decision goes to the
-  reservoir, PPO trains on BR decisions and PQN on all of them.
+  reservoir, PPO trains on BR decisions and PQN on all of them; the exact
+  and the sampled evaluations are logged at their intervals.
 - The network-to-policy helpers of kuhn_exploitability: rows follow the env's
   observations for both start players, the Q-network policy is greedy, and the
   exploitability of known policies is unchanged.
@@ -417,6 +418,7 @@ def _nfsp_config(**extra):
         max_grad_norm=0.5, fc_dim_size=16, anticipatory_eta=0.3,
         sl_reservoir_capacity=500, sl_batch_size=32, sl_num_steps_per_update=2,
         sl_lr=3e-4, eval_interval=2, env_kwargs={}, num_update_steps=4,
+        compare=True, compare_episodes=4, compare_interval=3,
     )
     config.update(extra)
     config["num_gradient_steps"] = 4 * config["num_epochs"] * config["num_minibatches"]
@@ -502,8 +504,12 @@ def test_nfsp_mixing_per_hand(monkeypatch, tmp_path, name: str) -> None:
             )
         has_expl = "exploitability_avg_policy" in row
         assert has_expl == (u % 2 == 0 or u == 3)
+        assert ("value_avg_vs_random" in row) == ("value_br_vs_random" in row) == has_expl
         if has_expl:
             assert 0.0 <= row["exploitability_avg_policy"] < 1.0
+        # against random: compare_interval 3 and the last update
+        sampled = [k for k in row if k.endswith("_vs_random") and "value_" not in k]
+        assert len(sampled) == (12 if u in (0, 3) else 0)  # 6 metrics x 2 policies
 
 
 # ------------------------------------------------------- policy helpers

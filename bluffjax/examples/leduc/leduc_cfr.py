@@ -10,11 +10,13 @@ to its average strategy.
 
 Logs, after iteration 1, every --log_every iterations, after half of the
 iterations and after the last one: the exact exploitability of the average
-strategy and its exact behaviour metrics in self-play as game/<name>
-(bluffjax.metrics.leduc_holdem: bluff rate and success, correct-fold rate,
-round-2 raise rates with and without a pair; definitions there). Each record
-has the iteration count. CFR is deterministic, so a run is one solve (seed
-index 0, one wandb run).
+strategy, its exact expected return per hand against uniformly random legal
+play averaged over both seats as value_vs_random
+(leduc_exploitability.value_vs_random) and its exact behaviour metrics in
+self-play as game/<name> (bluffjax.metrics.leduc_holdem: bluff rate and
+success, correct-fold rate, round-2 raise rates with and without a pair;
+definitions there). Each record has the iteration count. CFR is deterministic,
+so a run is one solve (seed index 0, one wandb run).
 
 Run directory ({save_dir}/{job_type}_{timestamp}/, made when the run starts;
 see bluffjax.examples.run_utils):
@@ -282,12 +284,20 @@ def run_cfr(
         if it == 1 or it % log_every == 0 or it == num_half or it == iterations:
             policy = solver.average_policy_array()
             expl = leduc.exploitability_from_policy_array(policy, leduc._KEY_TO_IDX)
-            metrics = {"iteration": it, "exploitability": expl}
+            value = leduc.value_vs_random_from_policy_array(
+                policy, leduc._KEY_TO_IDX
+            )
+            metrics = {
+                "iteration": it,
+                "exploitability": expl,
+                "value_vs_random": value,
+            }
             metrics.update(log_metrics("game", policy))
             if results_log is not None:
                 results_log.log(metrics, 0)
             print(
                 f"iter={it:6d} exploitability={expl:.6f} "
+                f"value_vs_random={value:+.6f} "
                 f"bluff_rate={metrics['game/bluff_rate']:.4f} "
                 f"correct_fold_rate={metrics['game/correct_fold_rate']:.4f}",
                 flush=True,

@@ -36,9 +36,11 @@ the paper lists as optional. An action that a player's policy never takes
 with any card in their range leaves that player's range unchanged.
 
 Evaluation: before training, every log_interval updates and after the last
-update, the exact exploitability of the test-time policy and its exact Kuhn
-policy metrics (bluffjax.metrics.kuhn_poker; policy_array converts the
-policy to kuhn_exploitability's (12, 2) table).
+update, the exact exploitability of the test-time policy, its exact expected
+return per hand against uniformly random play averaged over both seats
+(kuhn_exploitability.value_vs_random) and its exact Kuhn policy metrics
+(bluffjax.metrics.kuhn_poker; policy_array converts the policy to
+kuhn_exploitability's (12, 2) table).
 
 Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
 (run_utils.make_run_dir, with config.yaml) before training. Every evaluation
@@ -46,11 +48,12 @@ writes one record per seed to {run_dir}/results.jsonl (with seed_index and
 wall_time) and to the seed's wandb run: num_subgames (the subgames solved in
 self play so far, the sample counter), update_step, replay_size,
 root_value_p0, the mean value_loss (left out before training) and the
-games_finished of the updates since the last evaluation, exploitability and
-the policy metrics of the test-time policy, game/<name> (names and
-definitions in bluffjax.metrics.kuhn_poker). After training, {run_dir}/curves.json holds the
-config, the training time and every seed's num_subgames, exploitability,
-value_loss (null before training) and root_value_p0 at the evaluations.
+games_finished of the updates since the last evaluation, exploitability,
+value_vs_random and the policy metrics of the test-time policy, game/<name>
+(names and definitions in bluffjax.metrics.kuhn_poker). After training,
+{run_dir}/curves.json holds the config, the training time and every seed's
+num_subgames, exploitability, value_vs_random, value_loss (null before
+training) and root_value_p0 at the evaluations.
 
 Checkpoints (save_checkpoints), for every seed i = 0..num_seeds-1 (the wandb
 run "{seed}_{i}"):
@@ -102,6 +105,7 @@ from bluffjax.utils.game_utils.kuhn_exploitability import (
     get_current_player,
     get_returns,
     is_terminal,
+    value_vs_random_from_policy_array,
 )
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
@@ -634,6 +638,13 @@ def policy_exploitability(policy: np.ndarray) -> float:
     return float(exploitability_from_policy_array(policy_array(policy)))
 
 
+def policy_value_vs_random(policy: np.ndarray) -> float:
+    """Exact expected return per hand against uniformly random play, averaged
+    over both seats (kuhn_exploitability.value_vs_random), of a (9, 3, 2)
+    policy over (public node, card)."""
+    return float(value_vs_random_from_policy_array(policy_array(policy)))
+
+
 # =============================================================================
 # Training loop
 # =============================================================================
@@ -813,6 +824,9 @@ def make_train(
                 log_dict["exploitability"] = float(
                     exploitability_from_policy_array(table)
                 )
+                log_dict["value_vs_random"] = float(
+                    value_vs_random_from_policy_array(table)
+                )
                 log_dict.update(prefixed("game", policy_metrics(table)))
                 RESULTS_LOG.log(log_dict, int(exp_id))
 
@@ -925,6 +939,10 @@ def run(config: dict) -> str:
                         policy_exploitability(p)
                         for p in np.asarray(metrics["policy"][i])
                     ],
+                    "value_vs_random": [
+                        policy_value_vs_random(p)
+                        for p in np.asarray(metrics["policy"][i])
+                    ],
                     "value_loss": [
                         None if np.isnan(v) else float(v) for v in value_loss
                     ],
@@ -932,7 +950,9 @@ def run(config: dict) -> str:
                 }
             )
             print(
-                f"Seed {i}: final exploitability {curves[i]['exploitability'][-1]:.5f}"
+                f"Seed {i}: final exploitability "
+                f"{curves[i]['exploitability'][-1]:.5f}, value vs random "
+                f"{curves[i]['value_vs_random'][-1]:+.5f}"
             )
         curves_path = os.path.join(run_dir, "curves.json")
         with open(curves_path, "w") as f:

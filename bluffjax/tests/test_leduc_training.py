@@ -4,10 +4,13 @@ main() (Hydra or argparse, exactly as from the command line).
 
 For every script:
 - results.jsonl has one record per update (iteration) and seed, with the
-  sample counter, and the exploitability and game/ metrics (game_br/ for
-  NFSP) exactly at the evaluation points; the logged game metrics are those
-  of the networks (tables) saved in the checkpoints, recomputed from the
-  loaded files, so they are metrics of the right policy.
+  sample counter, and the exploitability, value against random and game/
+  metrics (game_br/ for NFSP) exactly at the evaluation points; the logged
+  game metrics, exploitability and value against random are those of the
+  networks (tables) saved in the checkpoints, recomputed from the loaded
+  files, so they are metrics of the right policy. The RL scripts also log
+  the evaluation against random of every policy, over exactly
+  compare_episodes complete hands, in every record (compare_interval 1).
 - half/ and full/ hold the documented files, which load strictly into the
   script's networks; the half checkpoint is the state after exactly
   half_update_steps(budget) updates of the same run (a run stopped there
@@ -47,6 +50,16 @@ from bluffjax.utils.paths import register_resolvers
 U = 6  # updates; half after 3
 EVAL_UPDATES = {0, 2, 4, 5}  # eval_interval 2 and the last update
 HIDDEN = 16
+COMPARE_EPISODES = 6
+EVAL_PREFIXES = (
+    "win_rate_", "loss_rate_", "draw_rate_", "win_rate_decided_", "avg_return_",
+    "avg_episode_length_",
+)
+# checkpoint name -> name of its evaluation against random (and value_<name>)
+VS_RANDOM = {
+    "avg_policy": "avg_vs_random", "br": "br_vs_random", "policy": "vs_random",
+    "q_network": "vs_random",
+}
 
 
 def _greedy(apply):
@@ -94,11 +107,15 @@ def _run_hydra_main(mod, monkeypatch, tmp_path, name):
         "wandb=False", "num_seeds=2", f"num_timesteps={U * steps}", "num_envs=8",
         "num_steps_per_env_per_update=8", "num_epochs=1", "num_minibatches=2",
         f"fc_dim_size={HIDDEN}", "eval_interval=2", f"save_dir={tmp_path}/runs",
-        f"hydra.run.dir={tmp_path}/hydra",
+        f"hydra.run.dir={tmp_path}/hydra", "save_checkpoints=true", "seed=0",
+        # large enough that every update moves the networks
+        "lr=1e-3", "anneal_lr=true",
+        "compare=true", f"compare_episodes={COMPARE_EPISODES}", "compare_interval=1",
     ]
     if "nfsp" in name:
         overrides += [
             "sl_reservoir_capacity=64", "sl_batch_size=8", "sl_num_steps_per_update=2",
+            "sl_lr=1e-3", "anticipatory_eta=0.1",
         ]
     monkeypatch.setattr(sys, "argv", [f"{name}.py", *overrides])
     mod.main()
@@ -145,14 +162,32 @@ def test_rl_script_run(monkeypatch, tmp_path, name):
         rows = [r for r in records if r["seed_index"] == i]
         assert [r["update_step"] for r in rows] == list(range(U))
         assert [r["env_steps"] for r in rows] == [64 * (u + 1) for u in range(U)]
+        names = {VS_RANDOM[n] for n in nets}
         for u, row in enumerate(rows):
             game_keys = {k for k in row if k.split("/")[0] in ("game", "game_br")}
+            value_keys = {
+                k for k in row if k.startswith("value_") and k.endswith("_vs_random")
+            }
             if u in EVAL_UPDATES:
                 assert game_keys == {f"{p}/{n}" for p in prefixes for n in TOTAL_NAMES}
                 assert any(k.startswith("exploitability") for k in row)
+                assert value_keys == {f"value_{n}" for n in names}
             else:
                 assert not game_keys
                 assert not any(k.startswith("exploitability") for k in row)
+                assert not value_keys
+            # the evaluation against random, every update: COMPARE_EPISODES
+            # complete hands per policy
+            sampled = {k for k in row if k.endswith("_vs_random")} - value_keys
+            assert sampled == {p + n for p in EVAL_PREFIXES for n in names}
+            for n in names:
+                win, loss, draw = (row[f"{k}_rate_{n}"] for k in ("win", "loss", "draw"))
+                assert win + loss + draw == pytest.approx(1.0)
+                for rate in (win, loss, draw):
+                    k = rate * COMPARE_EPISODES
+                    assert k == pytest.approx(round(k), abs=1e-4)
+                assert 2.0 <= row[f"avg_episode_length_{n}"] <= 8.0
+                assert abs(row[f"avg_return_{n}"]) <= 13.0  # at most 13 chips a hand
 
     # checkpoints: the documented files, loading strictly into the networks
     expected = {"config.yaml", "results.jsonl"} | {
@@ -182,8 +217,13 @@ def test_rl_script_run(monkeypatch, tmp_path, name):
     for i in range(2):
         rows = {r["update_step"]: r for r in records if r["seed_index"] == i}
         for n, (_, policy_fn, prefix, _, _) in nets.items():
-            _assert_logged(rows[2], prefix, policy_fn(loaded["half", n, i]))
-            _assert_logged(rows[U - 1], prefix, policy_fn(loaded["full", n, i]))
+            for row, stage in ((rows[2], "half"), (rows[U - 1], "full")):
+                policy = policy_fn(loaded[stage, n, i])
+                _assert_logged(row, prefix, policy)
+                assert row[f"value_{VS_RANDOM[n]}"] == pytest.approx(
+                    leduc.value_vs_random_from_policy_array(policy, leduc._KEY_TO_IDX),
+                    abs=1e-5,
+                )
             _assert_different(loaded["half", n, i], loaded["full", n, i])
 
     # the same run stopped after 3 updates has the half networks, and all U
@@ -210,7 +250,10 @@ def test_rl_script_run(monkeypatch, tmp_path, name):
 
 
 def test_cfr_run(tmp_path):
-    leduc_cfr.main(["--iterations", "6", "--log_every", "4", "--save_dir", str(tmp_path)])
+    leduc_cfr.main(
+        ["--iterations", "6", "--log_every", "4", "--save_dir", str(tmp_path),
+         "--save_checkpoints"]
+    )
     (run_dir,) = glob.glob(f"{tmp_path}/leduc_cfr_*")
     records = read_results(run_dir)
     assert [r["iteration"] for r in records] == [1, 3, 4, 6]  # 1, half, every 4, last
@@ -230,6 +273,9 @@ def test_cfr_run(tmp_path):
         solver = leduc_cfr.run_cfr(iterations, 100)
         np.testing.assert_array_equal(policy, solver.average_policy_array())
         assert record["exploitability"] == pytest.approx(solver.exploitability(), abs=1e-12)
+        assert record["value_vs_random"] == pytest.approx(
+            leduc.value_vs_random_from_policy_array(policy, leduc._KEY_TO_IDX), abs=1e-12
+        )
         _assert_logged(record, "game", policy)
     assert not np.array_equal(half, full)
 
@@ -277,7 +323,7 @@ def test_cfr_checkpoint_rows_identify_infosets(tmp_path):
 DEEP_CFR_ARGS = [
     "--traversals", "5", "--eval_every", "3", "--policy_train_steps", "20",
     "--advantage_train_steps", "10", "--batch_size", "16", "--memory_capacity", "500",
-    "--hidden_sizes", "8", "8",
+    "--hidden_sizes", "8", "8", "--save_checkpoints",
 ]
 
 
@@ -294,6 +340,7 @@ def test_deep_cfr_run(tmp_path):
         for row in rows:  # 1, half (2), every 3, last: all evaluated
             assert {f"game/{n}" for n in TOTAL_NAMES} <= set(row)
             assert "exploitability" in row and "advantage_loss_p1" in row
+            assert "value_vs_random" in row
     found = {
         os.path.relpath(os.path.join(d, f), run_dir)
         for d, _, files in os.walk(run_dir) for f in files
@@ -314,6 +361,10 @@ def test_deep_cfr_run(tmp_path):
             policy = leduc_deep_cfr.policy_array(loaded[stage, i], [8, 8])
             assert rows[it]["exploitability"] == pytest.approx(
                 leduc_deep_cfr.exploitability(policy), rel=1e-5
+            )
+            assert rows[it]["value_vs_random"] == pytest.approx(
+                leduc.value_vs_random_from_policy_array(policy, leduc._KEY_TO_IDX),
+                abs=1e-5,
             )
             _assert_logged(rows[it], "game", policy)
     _assert_different(loaded["full", 0], loaded["full", 1])

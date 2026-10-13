@@ -36,10 +36,12 @@ index i uses seed + i.
 
 Evaluation: the average-strategy (policy) network is trained after iteration
 1, every eval_every iterations, after iteration iterations // 2 (the half
-checkpoint) and after the last; each time its exact exploitability and the
-exact Kuhn policy metrics (bluffjax.metrics.kuhn_poker) are logged. Its
-training key depends only on the iteration, so these intermediate networks
-don't change the run.
+checkpoint) and after the last; each time its exact exploitability, its exact
+expected return per hand against uniformly random play averaged over both
+seats (value_vs_random, kuhn_exploitability.value_vs_random) and the exact
+Kuhn policy metrics (bluffjax.metrics.kuhn_poker) are logged. Its training key
+depends only on the iteration, so these intermediate networks don't change the
+run.
 
 Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
 (run_utils.make_run_dir, with config.yaml holding the flags) before running.
@@ -47,8 +49,8 @@ Every iteration writes one record per seed to {run_dir}/results.jsonl (with
 seed_index and wall_time), and to the seed's wandb run with --wandb:
 iteration, traversals (the traversals so far, both players) and each player's
 final advantage-network loss; at the evaluations also exploitability,
-policy_loss and the policy metrics of the policy network, game/<name> (names
-and definitions in bluffjax.metrics.kuhn_poker).
+value_vs_random, policy_loss and the policy metrics of the policy network,
+game/<name> (names and definitions in bluffjax.metrics.kuhn_poker).
 
 Checkpoints (on unless --no-save_checkpoints), for every seed index i:
     {run_dir}/half/avg_policy_{i}.msgpack  policy network trained after
@@ -98,6 +100,7 @@ from bluffjax.utils.game_utils.kuhn_exploitability import (
     get_returns,
     is_terminal,
     policy_from_array,
+    value_vs_random,
 )
 from bluffjax.utils.paths import REPO_ROOT
 from bluffjax.utils.typing import BoolArray, FloatArray, PRNGKeyArray, PyTree
@@ -475,8 +478,10 @@ def run_deep_cfr(
                 eval_start = time.time()
             table = solver.policy_array(policy_params)
             expl = exploitability(policy_from_array(table))
+            value = value_vs_random(policy_from_array(table))
             record.update(
                 exploitability=expl,
+                value_vs_random=value,
                 policy_loss=loss,
                 **prefixed("game", policy_metrics(table)),
             )
@@ -484,7 +489,10 @@ def run_deep_cfr(
             results["iterations"].append(it)
             results["exploitability"].append(expl)
             results["policy_loss"].append(loss)
-            print(f"Iteration {it:4d}: exploitability = {expl:.6f}")
+            print(
+                f"Iteration {it:4d}: exploitability = {expl:.6f}, "
+                f"value vs random = {value:+.6f}"
+            )
             if run_dir is not None and it in (num_half, config.iterations):
                 stage = "half" if it == num_half else "full"
                 save_params(run_dir, stage, "avg_policy", policy_params, seed_index)

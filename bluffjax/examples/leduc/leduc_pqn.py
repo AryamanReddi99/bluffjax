@@ -12,15 +12,34 @@ state) and learns from Peng's Q(lambda) targets of its own rollouts.
   actions of Q at that next decision (see per_player_q_lambda_targets). The same
   player can act twice in a row, e.g. when it calls a raise at the end of
   round 1 and then opens round 2.
-- Evaluation: exact exploitability (leduc_exploitability) of the greedy policy
-  every eval_interval updates and after the last update, and at the same
-  points the exact behaviour metrics of bluffjax.metrics.leduc_holdem (bluff
-  rate and success, correct-fold rate, round-2 raise rates with and without a
-  pair; definitions there) of the greedy policy in self-play as game/<name>.
+- Exact evaluation, every eval_interval updates and after the last update: the
+  exploitability (leduc_exploitability), the expected return per hand against
+  uniformly random legal play averaged over both seats
+  (leduc_exploitability.value_vs_random) and the behaviour metrics of
+  bluffjax.metrics.leduc_holdem (bluff rate and success, correct-fold rate,
+  round-2 raise rates with and without a pair; definitions there) of the
+  greedy policy in self-play as game/<name>, computed from its table at every
+  infoset.
+- Evaluation against random (compare), every compare_interval updates and
+  after the last update: the greedy policy (argmax Q over the legal actions,
+  ties to the first, the policy of the exact evaluation) plays
+  compare_episodes complete hands against uniformly random legal play, its
+  position alternating between first and second to act
+  (bluffjax.examples.kuhn_leduc_eval). Its own random stream: training doesn't
+  depend on it.
 
 Units: the env pays chips per hand. Training uses reward * reward_scale (so
 Q-values are in scaled units), and logged returns and exploitability are in
 chips.
+
+Logged evaluation metrics (returns in chips): every compare_interval updates
+and after the last one win_rate_vs_random, loss_rate_vs_random,
+draw_rate_vs_random (split pots), win_rate_decided_vs_random (wins among the
+hands won or lost), avg_return_vs_random (per hand) and
+avg_episode_length_vs_random (env steps per hand) over compare_episodes hands;
+every eval_interval updates and after the last one, exploitability,
+value_vs_random (the exact expectation of avg_return_vs_random) and the game/
+metrics.
 
 Run directory ({save_dir}/{job_type}_{timestamp}/, made when the run starts;
 see bluffjax.examples.run_utils):
@@ -64,6 +83,14 @@ from bluffjax.environments.leduc_holdem.leduc_holdem import (
     MAX_ACTIONS_PER_ROUND,
     LeducHoldemState,
 )
+from bluffjax.examples.kuhn_leduc_eval import (
+    eval_key,
+    format_returns,
+    greedy_policy,
+    is_sampled_metric,
+    maybe_vs_random_metrics,
+)
+from bluffjax.examples.parallel_nfsp_common import print_final_evals
 from bluffjax.examples.run_utils import (
     ResultsLog,
     half_update_steps,
@@ -77,6 +104,7 @@ from bluffjax.utils.game_utils.leduc_exploitability import (
     _KEY_TO_IDX,
     exploitability_from_policy_array,
     policy_array_from_qnetwork,
+    value_vs_random_from_policy_array,
 )
 from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
@@ -85,6 +113,10 @@ WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
 RESULTS_LOG: ResultsLog | None = None  # results.jsonl and wandb, created in main()
 # EXPLOITABILITY[seed] = [(env_steps, {policy name: exploitability}), ...]
 EXPLOITABILITY: dict[int, list[tuple[int, dict[str, float]]]] = {}
+# VALUE_VS_RANDOM[seed] = [(env_steps, {policy name: exact value}), ...]
+VALUE_VS_RANDOM: dict[int, list[tuple[int, dict[str, float]]]] = {}
+# EVALUATIONS[seed] = [(env_steps, {metric: value}), ...], against random
+EVALUATIONS: dict[int, list[tuple[int, dict[str, float]]]] = {}
 
 
 class Transition(NamedTuple):
@@ -218,6 +250,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         action_dim=env.num_actions, hidden_dim=config["fc_dim_size"]
     )
     eval_interval = config["eval_interval"]
+    compare_enabled = config["compare"]
+    compare_interval = config["compare_interval"]
+    compare_episodes = config["compare_episodes"]
     last_update = config["num_update_steps"] - 1
     num_half = half_update_steps(config["num_update_steps"])
 
@@ -232,12 +267,19 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         frac = jnp.minimum(1.0, update_step.astype(jnp.float32) / decay_steps)
         return config["start_e"] + frac * (config["end_e"] - config["start_e"])
 
-    def logging_callback(seed_val, metric_dict, policy_arrays) -> None:
-        """Logs the metrics; computes the exact exploitability and behaviour
-        metrics when they are due."""
+    def logging_callback(seed_val, metric_dict, policy_arrays, evaluated) -> None:
+        """Logs the metrics, those of the evaluation against random only when
+        it ran; computes the exact exploitability, value against random and
+        behaviour metrics when they are due."""
         seed_i = int(seed_val)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
         update = int(metrics["update_step"])
+        env_steps = int(metrics["env_steps"])
+        if bool(evaluated):
+            evals = {k: float(v) for k, v in metrics.items() if is_sampled_metric(k)}
+            EVALUATIONS.setdefault(seed_i, []).append((env_steps, evals))
+        else:
+            metrics = {k: v for k, v in metrics.items() if not is_sampled_metric(k)}
         if update % eval_interval == 0 or update == last_update:
             policies = {
                 name: np.asarray(arr, dtype=np.float64)
@@ -247,15 +289,26 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 name: exploitability_from_policy_array(arr, _KEY_TO_IDX)
                 for name, arr in policies.items()
             }
-            env_steps = int(metrics["env_steps"])
+            value = {
+                name: value_vs_random_from_policy_array(arr, _KEY_TO_IDX)
+                for name, arr in policies.items()
+            }
             EXPLOITABILITY.setdefault(seed_i, []).append((env_steps, expl))
+            VALUE_VS_RANDOM.setdefault(seed_i, []).append((env_steps, value))
             metrics["exploitability"] = expl["greedy"]
+            metrics["value_vs_random"] = value["greedy"]
             metrics.update(log_metrics("game", policies["greedy"]))
+            extra = f"; value vs random {value['greedy']:+.4f}"
+            if bool(evaluated):
+                extra += (
+                    f"; return per hand in {compare_episodes} hands vs random: "
+                    f"{format_returns(EVALUATIONS[seed_i][-1][1])}"
+                )
             print(
                 f"seed {seed_i} update {update + 1}/{last_update + 1} "
                 f"({env_steps} env steps): exploitability {expl['greedy']:.4f}; "
                 f"bluff rate {metrics['game/bluff_rate']:.3f}, correct folds "
-                f"{metrics['game/correct_fold_rate']:.3f}",
+                f"{metrics['game/correct_fold_rate']:.3f}{extra}",
                 flush=True,
             )
         RESULTS_LOG.log(metrics, seed_i)
@@ -463,15 +516,37 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             }
             metric.update(loss_info)
 
-            # The greedy policy at every infoset; its exploitability is
-            # computed on the host when due.
+            # Evaluation against random: compare_episodes hands for each
+            # policy, when due, from a stream of its own (eval_key).
+            update = runner_state.update_step
+            evaluated = compare_enabled & (
+                (update % compare_interval == 0) | (update == last_update)
+            )
+            if compare_enabled:
+                metric.update(
+                    maybe_vs_random_metrics(
+                        env,
+                        {
+                            "vs_random": (
+                                greedy_policy(network.apply),
+                                train_state.params,
+                            ),
+                        },
+                        compare_episodes,
+                        eval_key(runner_state.rng),
+                        evaluated,
+                    )
+                )
+
+            # The greedy policy at every infoset; its exploitability and value
+            # against random are computed on the host when due.
             policy_arrays = {
                 "greedy": policy_array_from_qnetwork(
                     network.apply, train_state.params, _INFOSET_LIST
                 )
             }
             jax.experimental.io_callback(
-                logging_callback, None, seed, metric, policy_arrays
+                logging_callback, None, seed, metric, policy_arrays, evaluated
             )
 
             # Half-budget checkpoint: the network after num_half updates.
@@ -520,14 +595,20 @@ def save_checkpoints(run_dir: str, num_seeds: int, half_params, full_params) -> 
 
 
 def print_exploitability_summary(names: list[str]) -> None:
-    """Final exploitability of every seed, and the mean over seeds."""
-    for name in names:
-        finals = [EXPLOITABILITY[s][-1][1][name] for s in sorted(EXPLOITABILITY)]
-        values = " ".join(f"{v:.4f}" for v in finals)
-        print(
-            f"final exploitability ({name}): mean {np.mean(finals):.4f} "
-            f"std {np.std(finals):.4f} over {len(finals)} seed(s): {values}"
-        )
+    """Final exploitability and value against random of every seed, and the
+    mean over seeds; the last evaluation against random."""
+    for title, log in (
+        ("exploitability", EXPLOITABILITY),
+        ("value vs random", VALUE_VS_RANDOM),
+    ):
+        for name in names:
+            finals = [log[s][-1][1][name] for s in sorted(log)]
+            values = " ".join(f"{v:.4f}" for v in finals)
+            print(
+                f"final {title} ({name}): mean {np.mean(finals):.4f} "
+                f"std {np.std(finals):.4f} over {len(finals)} seed(s): {values}"
+            )
+    print_final_evals(EVALUATIONS)
 
 
 @hydra.main(version_base=None, config_path="./", config_name="config_pqn")
@@ -553,6 +634,8 @@ def main(config: dict) -> None:
         )
 
         run_dir = make_run_dir(config)
+        for log in (EXPLOITABILITY, VALUE_VS_RANDOM, EVALUATIONS):
+            log.clear()
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
@@ -587,10 +670,11 @@ def main(config: dict) -> None:
         print("Running...")
         start = time.time()
         final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        jax.effects_barrier()  # every logging callback has run
         run_time = time.time() - start
         print(
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "
-            f"{run_time:.1f} s (all seeds in parallel, exploitability included)"
+            f"{run_time:.1f} s (all seeds in parallel, evaluations included)"
         )
         print_exploitability_summary(["greedy"])
         if config["save_checkpoints"]:

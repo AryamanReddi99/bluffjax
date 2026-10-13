@@ -13,11 +13,17 @@ gamma: 0.99
 fc_dim_size: 128
 anneal_lr: true  # linear decay to 0 over all gradient steps
 
-# exact exploitability and Kuhn policy metrics (game/) of the greedy policy
-# every eval_interval updates and after the last one
+# Exact evaluation of the greedy policy, every eval_interval updates and after
+# the last one: exploitability, value against random (the exact expected return
+# per hand against uniformly random play, averaged over both seats) and the
+# Kuhn policy metrics (game/)
 eval_interval: 10  # updates between exact evaluations (and after the last)
-compare: true
-compare_episodes: 10  # complete games against random, for each policy
+# Evaluation against random (*_vs_random metrics): the greedy policy plays
+# compare_episodes complete hands against uniformly random legal play, its
+# position alternating between first and second to act, every compare_interval
+# updates and after the last one
+compare: true  # false: no evaluation against random
+compare_episodes: 10  # complete hands against random, for each policy
 compare_interval: 1  # updates between evaluations (and after the last)
 
 # run directory {save_dir}/{job_type}_{timestamp}/ with config.yaml,
