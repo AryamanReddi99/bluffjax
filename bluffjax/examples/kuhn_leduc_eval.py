@@ -13,11 +13,12 @@ rotates: in hand g it acts first if (offset + g) % 2 == 0 and second otherwise,
 from a random offset, i.e. it alternates between the two positions and, with
 an even num_games, plays each in exactly half of the hands (its env seat is
 (start_player_idx + position) % 2). Per policy `name` it returns, as
-parallel_nfsp_common.eval_metrics does for the other games:
+parallel_nfsp_common.eval_metrics does for the other games (name vs_random
+for the scripts' output policy, br_vs_random for NFSP's best response):
     win_rate_{name}             share of hands with a positive return
     loss_rate_{name}            share of hands with a negative return
     draw_rate_{name}            share of hands with return 0 (a Leduc split pot)
-    win_rate_decided_{name}     wins / (wins + losses)
+    win_rate_decided_{name}     wins / (wins + losses), NaN if all are draws
     avg_return_{name}           mean return per hand, chips (env units)
     avg_episode_length_{name}   mean env steps per hand
 The expectation of avg_return_{name} is the exact value_vs_random of the
@@ -185,7 +186,8 @@ def vs_random_metrics(
     rng: PRNGKeyArray,
 ) -> dict[str, FloatArray]:
     """eval_metrics(name, ...) of num_games hands against random for every
-    {name: (policy, params)} (names like "avg_vs_random"), independent keys."""
+    {name: (policy, params)} (names like "vs_random" or "br_vs_random"),
+    independent keys."""
     metrics = {}
     for key, (name, (act, params)) in zip(
         jax.random.split(rng, len(policies)), policies.items()

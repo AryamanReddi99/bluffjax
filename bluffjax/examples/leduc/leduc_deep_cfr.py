@@ -31,13 +31,14 @@ Network inputs are OpenSpiel's leduc_poker information_state_tensor, which is
 perfect recall: each of the 936 infosets has a distinct tensor. Exploitability
 is exact, over the full game tree.
 
-Evaluation: after iteration 1, every --eval_every iterations, after half of
-the iterations and after the last one, a policy network is trained on the
-strategy memory (its key depends only on the iteration, so evaluations don't
-change the run) and the exact exploitability of its policy, its exact
-expected return per hand against uniformly random legal play averaged over
-both seats (value_vs_random, leduc_exploitability.value_vs_random) and its
-exact behaviour metrics in self-play are logged, the latter as game/<name>
+Evaluation: after iteration 1, every --eval_interval iterations, after half of
+the iterations (the half checkpoint) and after the last one, a policy network
+is trained on the strategy memory (its key depends only on the iteration, so
+evaluations don't change the run) and the exact exploitability of its policy,
+its exact expected return per hand against uniformly random legal play
+averaged over both seats (value_vs_random,
+leduc_exploitability.value_vs_random) and its exact behaviour metrics in
+self-play are logged, the latter as game/<name>
 (bluffjax.metrics.leduc_holdem: bluff rate and success, correct-fold rate,
 round-2 raise rates with and without a pair; definitions there). Every
 iteration logs the iteration count, the traversals so far and the advantage
@@ -46,9 +47,16 @@ losses.
 Seeds: --num_seeds runs (default 5) one after the other in one run directory;
 seed index i uses seed --seed + i and has its own wandb run "{seed}_{i}".
 
+Flags shared with kuhn_cfr.py, leduc_cfr.py and kuhn_deep_cfr.py, with the
+same meaning: --iterations, --eval_interval, --seed, --num_seeds (Deep CFR),
+--save_dir, --job_type, --wandb, --project, --save_checkpoints. With --wandb
+the runs log to project --project, group {env_name}_{timestamp}, job type
+{job_type}_{env_name} (env_name leduc_poker), as the RL scripts do.
+
 Run directory ({save_dir}/{job_type}_{timestamp}/, made when the run starts;
 see bluffjax.examples.run_utils):
-    config.yaml                  the arguments, with half_iterations
+    config.yaml                  the flags, with env_name, half_iterations and
+                                 run_dir
     results.jsonl                every logged record (what wandb gets, plus
                                  seed_index and wall_time); each has iteration
                                  and traversals
@@ -92,6 +100,7 @@ from bluffjax.utils.game_utils import leduc_exploitability as leduc
 from bluffjax.utils.paths import REPO_ROOT
 from bluffjax.utils.typing import BoolArray, FloatArray, PRNGKeyArray, PyTree
 
+ENV_NAME = "leduc_poker"
 NUM_ACTIONS = 3  # fold, call, raise
 NUM_CARDS = 6
 MAX_ACTIONS_PER_ROUND = 4  # with at most 2 raises, e.g. call raise raise call
@@ -447,7 +456,7 @@ def run_deep_cfr(
 ) -> dict:
     """Runs Deep CFR with seed config.seed + seed_index, logging the
     exploitability and game metrics of the average-strategy network after
-    iteration 1, every `eval_every` iterations, after half_update_steps(
+    iteration 1, every `eval_interval` iterations, after half_update_steps(
     iterations) and at the end; with run_dir, saves that network after half
     and all of the iterations as {half,full}/avg_policy_{seed_index}."""
     start = time.time()
@@ -473,7 +482,7 @@ def run_deep_cfr(
             "advantage_loss_p1": advantage_losses[1],
         }
         is_last = it == config.iterations
-        if it == 1 or it % config.eval_every == 0 or it == num_half or is_last:
+        if it == 1 or it % config.eval_interval == 0 or it == num_half or is_last:
             eval_start = time.time()
             policy_params, loss = solver.learn_policy_network()
             if is_last:
@@ -513,8 +522,21 @@ def run_deep_cfr(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deep CFR on Leduc Poker.")
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=50, help="CFR iterations T")
+    parser.add_argument(
+        "--eval_interval",
+        type=int,
+        default=5,
+        help="evaluate after iteration 1, every this many iterations, after "
+        "half of them and after the last",
+    )
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--num_seeds",
+        type=int,
+        default=5,
+        help="runs one after the other; seed index i uses seed --seed + i",
+    )
     parser.add_argument(
         "--traversals",
         type=int,
@@ -530,25 +552,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--advantage_train_steps", type=int, default=200)
     parser.add_argument("--policy_train_steps", type=int, default=5000)
     parser.add_argument("--memory_capacity", type=int, default=100_000)
-    parser.add_argument("--eval_every", type=int, default=5)
     parser.add_argument(
-        "--num_seeds",
-        type=int,
-        default=5,
-        help="runs one after the other; seed index i uses seed --seed + i",
+        "--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "leduc")
     )
+    parser.add_argument("--job_type", type=str, default="leduc_deep_cfr")
+    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--project", type=str, default="bluffjax")
     parser.add_argument(
         "--save_checkpoints",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="policy network after half and all of the iterations",
     )
-    parser.add_argument(
-        "--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "leduc")
-    )
-    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--project", type=str, default="bluffjax")
-    parser.add_argument("--job_type", type=str, default="leduc_deep_cfr")
     parser.add_argument(
         "--output",
         type=str,
@@ -558,42 +573,41 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    config = parse_args(argv)
-    run_config = {
-        **vars(config),
-        "env_name": "leduc_poker",
-        "half_iterations": half_update_steps(config.iterations),
+def run(args: argparse.Namespace) -> str:
+    """Runs args.num_seeds seeds one after the other with logging and
+    checkpoints; returns the run directory."""
+    config = {
+        **vars(args),
+        "env_name": ENV_NAME,
+        "half_iterations": half_update_steps(args.iterations),
     }
-    run_dir = make_run_dir(run_config)
-    group = run_config["env_name"] + datetime.datetime.now().strftime(
-        "_%Y-%m-%d_%H-%M-%S"
-    )
+    run_dir = make_run_dir(config)
+    group = f"{ENV_NAME}_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     wandb_runs = [
         wandb.init(
-            project=config.project,
+            project=args.project,
             group=group,
-            job_type=f"{config.job_type}_{run_config['env_name']}",
-            name=f"{config.seed}_{i}",
-            config={**run_config, "seed_index": i},
-            mode=None if config.wandb else "disabled",
+            job_type=f"{args.job_type}_{ENV_NAME}",
+            name=f"{args.seed}_{i}",
+            config=config,
+            mode=None if args.wandb else "disabled",
             dir=str(REPO_ROOT),
             reinit="create_new",
         )
-        for i in range(config.num_seeds)
+        for i in range(args.num_seeds)
     ]
     try:
         results_log = ResultsLog(run_dir, wandb_runs)
         print(f"Run directory: {run_dir}")
         print("Deep CFR for Leduc Poker")
         all_results = []
-        for i in range(config.num_seeds):
+        for i in range(args.num_seeds):
             print("=" * 50)
-            print(f"seed index {i} (seed {config.seed + i})")
+            print(f"seed index {i} (seed {args.seed + i})")
             results = run_deep_cfr(
-                config, i, results_log, run_dir if config.save_checkpoints else None
+                args, i, results_log, run_dir if args.save_checkpoints else None
             )
-            all_results.append({"seed": config.seed + i, "seed_index": i, **results})
+            all_results.append({"seed": args.seed + i, "seed_index": i, **results})
             print(f"Final exploitability: {results['final_exploitability']:.6f}")
             print(
                 f"Runtime: {results['runtime_seconds']:.1f}s "
@@ -605,18 +619,23 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"final exploitability: mean {np.mean(finals):.6f} std "
             f"{np.std(finals):.6f} over {len(finals)} seed(s)"
         )
-        if config.save_checkpoints:
+        if args.save_checkpoints:
             print(f"Saved checkpoints to {run_dir}")
-        if config.output:
-            with open(config.output, "w") as f:
+        if args.output:
+            with open(args.output, "w") as f:
                 json.dump(
-                    {"game": "leduc_poker", "config": vars(config), "runs": all_results},
+                    {"game": ENV_NAME, "config": config, "seeds": all_results},
                     f,
                     indent=2,
                 )
     finally:
-        for run in wandb_runs:
-            run.finish()
+        for wandb_run in wandb_runs:
+            wandb_run.finish()
+    return run_dir
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    run(parse_args(argv))
 
 
 if __name__ == "__main__":

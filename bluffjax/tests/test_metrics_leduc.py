@@ -105,9 +105,11 @@ def assert_metrics(got: dict, expected: dict, suffix: str = "") -> None:
 # --------------------------------------------------------- hand derivations
 def test_names():
     assert lm.TOTAL_NAMES == (
-        "bluff_rate", "n_aggressive", "bluff_success", "n_bluffs",
-        "correct_fold_rate", "n_folds", "pair_raise_rate", "n_paired_decisions",
-        "unpaired_raise_rate", "n_unpaired_decisions",
+        "bluff_rate", "n_aggressive_per_hand",
+        "bluff_success", "n_bluffs_per_hand",
+        "correct_fold_rate", "n_folds_per_hand",
+        "pair_raise_rate", "n_paired_decisions_per_hand",
+        "unpaired_raise_rate", "n_unpaired_decisions_per_hand",
     )
     got = lm.policy_metrics(random_policy(0))
     assert set(got) == {n + s for n in lm.TOTAL_NAMES for s in ("", "_p0", "_p1")}
@@ -122,10 +124,11 @@ def test_always_raise():
     paired with P = 1/5."""
     got = lm.policy_metrics(table_policy(always_raise))
     expected = dict(
-        bluff_rate=2 / 5, n_aggressive=4.0, bluff_success=0.0, n_bluffs=8 / 5,
-        correct_fold_rate=NAN, n_folds=0.0,
-        pair_raise_rate=1.0, n_paired_decisions=2 / 5,
-        unpaired_raise_rate=1.0, n_unpaired_decisions=8 / 5,
+        bluff_rate=2 / 5, n_aggressive_per_hand=4.0,
+        bluff_success=0.0, n_bluffs_per_hand=8 / 5,
+        correct_fold_rate=NAN, n_folds_per_hand=0.0,
+        pair_raise_rate=1.0, n_paired_decisions_per_hand=2 / 5,
+        unpaired_raise_rate=1.0, n_unpaired_decisions_per_hand=8 / 5,
     )
     assert_metrics(got, expected)
     # each seat is in each position half of the time: half of every count
@@ -141,10 +144,11 @@ def test_always_call():
     """No raises (bluff rates NaN), no folds (NaN); round 2 is check-check."""
     got = lm.policy_metrics(table_policy(always_call))
     assert_metrics(got, dict(
-        bluff_rate=NAN, n_aggressive=0.0, bluff_success=NAN, n_bluffs=0.0,
-        correct_fold_rate=NAN, n_folds=0.0,
-        pair_raise_rate=0.0, n_paired_decisions=2 / 5,
-        unpaired_raise_rate=0.0, n_unpaired_decisions=8 / 5,
+        bluff_rate=NAN, n_aggressive_per_hand=0.0,
+        bluff_success=NAN, n_bluffs_per_hand=0.0,
+        correct_fold_rate=NAN, n_folds_per_hand=0.0,
+        pair_raise_rate=0.0, n_paired_decisions_per_hand=2 / 5,
+        unpaired_raise_rate=0.0, n_unpaired_decisions_per_hand=8 / 5,
     ))
 
 
@@ -153,10 +157,11 @@ def test_raise_or_fold():
     folder would have lost with P = 2/5, and round 2 is never reached."""
     got = lm.policy_metrics(table_policy(raise_or_fold))
     expected = dict(
-        bluff_rate=2 / 5, n_aggressive=1.0, bluff_success=1.0, n_bluffs=2 / 5,
-        correct_fold_rate=2 / 5, n_folds=1.0,
-        pair_raise_rate=NAN, n_paired_decisions=0.0,
-        unpaired_raise_rate=NAN, n_unpaired_decisions=0.0,
+        bluff_rate=2 / 5, n_aggressive_per_hand=1.0,
+        bluff_success=1.0, n_bluffs_per_hand=2 / 5,
+        correct_fold_rate=2 / 5, n_folds_per_hand=1.0,
+        pair_raise_rate=NAN, n_paired_decisions_per_hand=0.0,
+        unpaired_raise_rate=NAN, n_unpaired_decisions_per_hand=0.0,
     )
     assert_metrics(got, expected)
     for suffix in ("_p0", "_p1"):
@@ -174,10 +179,11 @@ def test_jack_bluffer_uses_the_public_card():
     the public card ignored a Jack would always lose unless tied: 8/9."""
     got = lm.policy_metrics(table_policy(jack_bluffer))
     assert_metrics(got, dict(
-        bluff_rate=2 / 3, n_aggressive=3 / 5, bluff_success=0.0, n_bluffs=2 / 5,
-        correct_fold_rate=NAN, n_folds=0.0,
-        pair_raise_rate=0.0, n_paired_decisions=2 / 5,
-        unpaired_raise_rate=0.0, n_unpaired_decisions=8 / 5,
+        bluff_rate=2 / 3, n_aggressive_per_hand=3 / 5,
+        bluff_success=0.0, n_bluffs_per_hand=2 / 5,
+        correct_fold_rate=NAN, n_folds_per_hand=0.0,
+        pair_raise_rate=0.0, n_paired_decisions_per_hand=2 / 5,
+        unpaired_raise_rate=0.0, n_unpaired_decisions_per_hand=8 / 5,
     ))
 
 
@@ -189,10 +195,11 @@ def test_pair_raiser():
     1/5 + 2/5 + 6/5 = 9/5."""
     got = lm.policy_metrics(table_policy(pair_raiser))
     assert_metrics(got, dict(
-        bluff_rate=0.0, n_aggressive=2 / 5, bluff_success=NAN, n_bluffs=0.0,
-        correct_fold_rate=NAN, n_folds=0.0,
-        pair_raise_rate=1.0, n_paired_decisions=2 / 5,
-        unpaired_raise_rate=0.0, n_unpaired_decisions=9 / 5,
+        bluff_rate=0.0, n_aggressive_per_hand=2 / 5,
+        bluff_success=NAN, n_bluffs_per_hand=0.0,
+        correct_fold_rate=NAN, n_folds_per_hand=0.0,
+        pair_raise_rate=1.0, n_paired_decisions_per_hand=2 / 5,
+        unpaired_raise_rate=0.0, n_unpaired_decisions_per_hand=9 / 5,
     ))
 
 
@@ -204,19 +211,22 @@ def test_head_to_head_seats():
     depends on the cards, so every rate of losing hands is 2/5."""
     got = lm.policy_metrics(table_policy(always_raise), table_policy(raise_or_fold))
     assert_metrics(got, dict(
-        bluff_rate=2 / 5, n_aggressive=1.0, bluff_success=1.0, n_bluffs=2 / 5,
-        correct_fold_rate=NAN, n_folds=0.0,
-        pair_raise_rate=NAN, n_paired_decisions=0.0,
+        bluff_rate=2 / 5, n_aggressive_per_hand=1.0,
+        bluff_success=1.0, n_bluffs_per_hand=2 / 5,
+        correct_fold_rate=NAN, n_folds_per_hand=0.0,
+        pair_raise_rate=NAN, n_paired_decisions_per_hand=0.0,
     ), "_p0")
     assert_metrics(got, dict(
-        bluff_rate=2 / 5, n_aggressive=1 / 2, bluff_success=0.0, n_bluffs=1 / 5,
-        correct_fold_rate=2 / 5, n_folds=1.0,
-        pair_raise_rate=NAN, n_paired_decisions=0.0,
+        bluff_rate=2 / 5, n_aggressive_per_hand=1 / 2,
+        bluff_success=0.0, n_bluffs_per_hand=1 / 5,
+        correct_fold_rate=2 / 5, n_folds_per_hand=1.0,
+        pair_raise_rate=NAN, n_paired_decisions_per_hand=0.0,
     ), "_p1")
     assert_metrics(got, dict(
-        bluff_rate=2 / 5, n_aggressive=3 / 2, bluff_success=2 / 3, n_bluffs=3 / 5,
-        correct_fold_rate=2 / 5, n_folds=1.0,
-        unpaired_raise_rate=NAN, n_unpaired_decisions=0.0,
+        bluff_rate=2 / 5, n_aggressive_per_hand=3 / 2,
+        bluff_success=2 / 3, n_bluffs_per_hand=3 / 5,
+        correct_fold_rate=2 / 5, n_folds_per_hand=1.0,
+        unpaired_raise_rate=NAN, n_unpaired_decisions_per_hand=0.0,
     ))
     # swapping the policies swaps the seats
     swapped = lm.policy_metrics(table_policy(raise_or_fold), table_policy(always_raise))
@@ -271,15 +281,15 @@ def reference_metrics(policy_p0, policy_p1):
         lose = hand_loses(state.private_cards[pos], state.private_cards[1 - pos], public)
         if pending_bluffer is not None:
             assert pending_bluffer == 1 - seat
-            counts["n_successful_bluffs", pending_bluffer] += prob * pi[FOLD]
-        counts["n_aggressive", seat] += prob * pi[RAISE]
-        counts["n_bluffs", seat] += prob * pi[RAISE] * lose
-        counts["n_folds", seat] += prob * pi[FOLD]
-        counts["n_correct_folds", seat] += prob * pi[FOLD] * lose
+            counts["n_successful_bluffs_per_hand", pending_bluffer] += prob * pi[FOLD]
+        counts["n_aggressive_per_hand", seat] += prob * pi[RAISE]
+        counts["n_bluffs_per_hand", seat] += prob * pi[RAISE] * lose
+        counts["n_folds_per_hand", seat] += prob * pi[FOLD]
+        counts["n_correct_folds_per_hand", seat] += prob * pi[FOLD] * lose
         if state.round_ == 2 and RAISE in state.legal_actions():
             kind = "paired" if state.private_cards[pos] // 2 == public // 2 else "unpaired"
-            counts[f"n_{kind}_decisions", seat] += prob
-            counts[f"n_{kind}_raises", seat] += prob * pi[RAISE]
+            counts[f"n_{kind}_decisions_per_hand", seat] += prob
+            counts[f"n_{kind}_raises_per_hand", seat] += prob * pi[RAISE]
         for action in state.legal_actions():
             bluffer = seat if action == RAISE and lose else None
             walk(state.child(action), prob * pi[action], start, public, bluffer)
@@ -291,11 +301,11 @@ def reference_metrics(policy_p0, policy_p1):
 
     out = {}
     rates = {
-        "bluff_rate": ("n_bluffs", "n_aggressive"),
-        "bluff_success": ("n_successful_bluffs", "n_bluffs"),
-        "correct_fold_rate": ("n_correct_folds", "n_folds"),
-        "pair_raise_rate": ("n_paired_raises", "n_paired_decisions"),
-        "unpaired_raise_rate": ("n_unpaired_raises", "n_unpaired_decisions"),
+        "bluff_rate": ("n_bluffs_per_hand", "n_aggressive_per_hand"),
+        "bluff_success": ("n_successful_bluffs_per_hand", "n_bluffs_per_hand"),
+        "correct_fold_rate": ("n_correct_folds_per_hand", "n_folds_per_hand"),
+        "pair_raise_rate": ("n_paired_raises_per_hand", "n_paired_decisions_per_hand"),
+        "unpaired_raise_rate": ("n_unpaired_raises_per_hand", "n_unpaired_decisions_per_hand"),
     }
     for suffix, seats in (("", (0, 1)), ("_p0", (0,)), ("_p1", (1,))):
         total = lambda name: sum(counts[name, s] for s in seats)
@@ -336,9 +346,10 @@ def test_is_fast():
 NUM_HANDS = 1 << 18
 MAX_STEPS = 8  # 4 actions per round at most
 EVENTS = (
-    "n_aggressive", "n_bluffs", "n_successful_bluffs", "n_folds",
-    "n_correct_folds", "n_paired_decisions", "n_paired_raises",
-    "n_unpaired_decisions", "n_unpaired_raises", "n_bluffs_public_ignored",
+    "n_aggressive_per_hand", "n_bluffs_per_hand", "n_successful_bluffs_per_hand",
+    "n_folds_per_hand", "n_correct_folds_per_hand", "n_paired_decisions_per_hand",
+    "n_paired_raises_per_hand", "n_unpaired_decisions_per_hand",
+    "n_unpaired_raises_per_hand", "n_bluffs_public_ignored_per_hand",
 )
 
 
@@ -447,11 +458,11 @@ def test_monte_carlo_in_the_env(head_to_head):
     assert int(np.asarray(problems).sum()) == 0
     idx = {name: i for i, name in enumerate(EVENTS)}
     rates = {
-        "bluff_rate": ("n_bluffs", "n_aggressive"),
-        "bluff_success": ("n_successful_bluffs", "n_bluffs"),
-        "correct_fold_rate": ("n_correct_folds", "n_folds"),
-        "pair_raise_rate": ("n_paired_raises", "n_paired_decisions"),
-        "unpaired_raise_rate": ("n_unpaired_raises", "n_unpaired_decisions"),
+        "bluff_rate": ("n_bluffs_per_hand", "n_aggressive_per_hand"),
+        "bluff_success": ("n_successful_bluffs_per_hand", "n_bluffs_per_hand"),
+        "correct_fold_rate": ("n_correct_folds_per_hand", "n_folds_per_hand"),
+        "pair_raise_rate": ("n_paired_raises_per_hand", "n_paired_decisions_per_hand"),
+        "unpaired_raise_rate": ("n_unpaired_raises_per_hand", "n_unpaired_decisions_per_hand"),
     }
     checked = 0
     for suffix, seats in (("", [0, 1]), ("_p0", [0]), ("_p1", [1])):
@@ -466,7 +477,10 @@ def test_monte_carlo_in_the_env(head_to_head):
             checked += 1
         if suffix == "":
             # the same check would fail if "would lose" ignored the public card
-            r, se = _ratio_ci(per_hand["n_bluffs_public_ignored"], per_hand["n_aggressive"])
+            r, se = _ratio_ci(
+                per_hand["n_bluffs_public_ignored_per_hand"],
+                per_hand["n_aggressive_per_hand"],
+            )
             assert abs(r - exact["bluff_rate"]) > 8 * se, r
     assert checked == 15
     # every metric has plenty of events in this sample

@@ -14,13 +14,23 @@ directory, results.jsonl and the half / full checkpoints.
   after the last update are those of the half and full checkpoints, and the
   full checkpoint differs from the half one. With compare=false no
   evaluation against random is logged.
-- CFR: the half / full tables are the average strategy after iterations // 2
-  and all iterations, the iteration count is a flag (default 100), and the
-  logged metrics (exploitability, value against random, game/) are those of
-  the logged tables.
+- The rollout statistics have the names shared by every game
+  (episodes_completed, ep_length_avg, return_per_episode[_br] for NFSP,
+  first_player_return_per_episode and abs_return_per_episode in self-play);
+  the output policy's exact evaluation is exploitability / value_vs_random,
+  NFSP's BR adds br.
+- CFR: the half / full checkpoints hold the average strategy after
+  iterations // 2 and all iterations with the fields that identify each row's
+  infoset (load_average_policy matches rows by them, in any order), the
+  iteration count is a flag (default 100), evaluations come after iteration
+  1, every eval_interval, at the half point and at the end, and the logged
+  metrics (exploitability, value against random, game/) are those of the
+  logged tables.
 - Deep CFR: seeds run one after the other with seed + i; the policy network is
   also trained (and evaluated) at iterations // 2; the half checkpoint is the
   final policy network of a run of iterations // 2 iterations.
+- CFR and Deep CFR: the flags, config.yaml and wandb names are those shared
+  with the Leduc scripts and the RL scripts.
 - ReBeL: the half value network equals the final one of a run of
   num_update_steps // 2 updates, and the logged metrics (exploitability,
   value against random, game/) are those of the test-time policy of the
@@ -30,6 +40,8 @@ directory, results.jsonl and the half / full checkpoints.
 import functools
 import math
 import os
+
+import yaml
 
 import jax
 import jax.numpy as jnp
@@ -62,8 +74,8 @@ H = 16  # hidden units of the tiny networks
 #            {checkpoint name: metric prefix}, final-state attribute per name)
 # and the names of the evaluation against random and of the exact value
 VS_RANDOM = {
-    "kuhn_ppo_nfsp": {"avg_policy": "avg_vs_random", "br": "br_vs_random"},
-    "kuhn_pqn_nfsp": {"avg_policy": "avg_vs_random", "br": "br_vs_random"},
+    "kuhn_ppo_nfsp": {"avg_policy": "vs_random", "br": "br_vs_random"},
+    "kuhn_pqn_nfsp": {"avg_policy": "vs_random", "br": "br_vs_random"},
     "kuhn_ppo": {"policy": "vs_random"},
     "kuhn_pqn": {"q_network": "vs_random"},
 }
@@ -103,6 +115,17 @@ SCRIPTS = {
         {"q_network": "game"},
         {"q_network": "train_state"},
     ),
+}
+# rollout statistics of every update (names shared with the other games)
+ROLLOUT_STATS = {
+    "kuhn_ppo_nfsp": ("episodes_completed", "ep_length_avg", "return_per_episode",
+                      "return_per_episode_br"),
+    "kuhn_pqn_nfsp": ("episodes_completed", "ep_length_avg", "return_per_episode",
+                      "return_per_episode_br"),
+    "kuhn_ppo": ("episodes_completed", "ep_length_avg",
+                 "first_player_return_per_episode", "abs_return_per_episode"),
+    "kuhn_pqn": ("episodes_completed", "ep_length_avg",
+                 "first_player_return_per_episode", "abs_return_per_episode"),
 }
 NUM_UPDATES, NUM_ENVS, NUM_STEPS, NUM_SEEDS = 5, 16, 8, 2
 NUM_HALF = 2  # half_update_steps(5)
@@ -208,7 +231,12 @@ def test_rl_run_dir_metrics_and_checkpoints(monkeypatch, tmp_path, name):
         assert [r["update_step"] for r in rows] == list(range(NUM_UPDATES))
         for u, r in enumerate(rows):
             assert r["env_steps"] == (u + 1) * NUM_ENVS * NUM_STEPS
+            assert set(ROLLOUT_STATS[name]) <= set(r)
+            assert 2.0 <= r["ep_length_avg"] <= 3.0 and r["episodes_completed"] > 0
             assert set(GAME) <= set(r)  # eval_interval = 1
+            exact = {"exploitability", "exploitability_br"} & set(r)
+            assert exact == ({"exploitability", "exploitability_br"}
+                             if "nfsp" in name else {"exploitability"})
             assert (set(GAME_BR) <= set(r)) == ("nfsp" in name)
             for key in GAME + GAME_BR:
                 if key in r:
@@ -242,10 +270,7 @@ def test_rl_run_dir_metrics_and_checkpoints(monkeypatch, tmp_path, name):
                 table = np.asarray(to_policy(network.apply, params))
                 record = records[i][update]
                 _assert_metrics_close(record, prefixes[net], policy_metrics(table), 1e-5)
-                expl_key = {
-                    "kuhn_ppo": "exploitability",
-                    "kuhn_pqn": "exploitability",
-                }.get(name, f"exploitability_{'avg' if net == 'avg_policy' else 'br'}_policy")
+                expl_key = "exploitability_br" if net == "br" else "exploitability"
                 assert record[expl_key] == pytest.approx(
                     ke.exploitability_from_policy_array(table), abs=1e-5
                 )
@@ -320,7 +345,7 @@ def test_rl_compare_off_and_interval(tmp_path, name):
 def test_cfr_run(tmp_path):
     assert kuhn_cfr.parse_args([]).iterations == 100
     args = [
-        "--iterations", "10", "--log_interval", "3", "--save_dir", str(tmp_path),
+        "--iterations", "10", "--eval_interval", "3", "--save_dir", str(tmp_path),
         "--save_checkpoints",
     ]
     run_dir = kuhn_cfr.run(kuhn_cfr.parse_args(args))
@@ -330,31 +355,112 @@ def test_cfr_run(tmp_path):
         "half/average_policy.msgpack",
         "full/average_policy.msgpack",
     }
-    template = np.zeros((12, 2))
-    half = run_utils.load_params(os.path.join(run_dir, "half/average_policy.msgpack"), template)
-    full = run_utils.load_params(os.path.join(run_dir, "full/average_policy.msgpack"), template)
-    np.testing.assert_array_equal(half, kuhn_cfr.run_cfr(5, log_interval=100).full_policy)
-    np.testing.assert_array_equal(full, kuhn_cfr.run_cfr(10, log_interval=100).full_policy)
+    paths = {stage: os.path.join(run_dir, f"{stage}/average_policy.msgpack")
+             for stage in ("half", "full")}
+    half = kuhn_cfr.load_average_policy(paths["half"])
+    full = kuhn_cfr.load_average_policy(paths["full"])
+    np.testing.assert_array_equal(half, kuhn_cfr.run_cfr(5, eval_interval=100).full_policy)
+    np.testing.assert_array_equal(full, kuhn_cfr.run_cfr(10, eval_interval=100).full_policy)
     assert np.abs(half - full).max() > 1e-4
+    for stage, iterations in (("half", 5), ("full", 10)):
+        tree = run_utils.load_params(paths[stage], kuhn_cfr.policy_checkpoint(half, 0))
+        assert int(tree["iterations"]) == iterations
+    # after iteration 1, every eval_interval, at the half point and at the end
     records = run_utils.read_results(run_dir)
-    assert [r["iteration"] for r in records] == [0, 3, 6, 9, 10]
+    assert [r["iteration"] for r in records] == [1, 3, 5, 6, 9, 10]
     assert all(r["seed_index"] == 0 for r in records)
-    uniform = policy_metrics(np.full((12, 2), 0.5))
-    _assert_metrics_close(records[0], "game", uniform, 0.0)
-    _assert_metrics_close(records[-1], "game", policy_metrics(full), 0.0)
-    assert records[-1]["exploitability"] == ke.exploitability_from_policy_array(full)
-    assert records[0]["value_vs_random"] == 0.0  # uniform
-    assert records[-1]["value_vs_random"] == pytest.approx(
-        ke.value_vs_random_from_policy_array(full), abs=1e-12
-    )
+    first = kuhn_cfr.run_cfr(1, eval_interval=100).full_policy
+    for record, table in ((records[0], first), (records[2], half), (records[-1], full)):
+        _assert_metrics_close(record, "game", policy_metrics(table), 0.0)
+        assert record["exploitability"] == ke.exploitability_from_policy_array(table)
+        assert record["value_vs_random"] == pytest.approx(
+            ke.value_vs_random_from_policy_array(table), abs=1e-12
+        )
     # an odd count: the half table after 3 of 7 iterations
     run_dir = kuhn_cfr.run(
         kuhn_cfr.parse_args(
             ["--iterations", "7", "--save_dir", str(tmp_path), "--save_checkpoints"]
         )
     )
-    half = run_utils.load_params(os.path.join(run_dir, "half/average_policy.msgpack"), template)
-    np.testing.assert_array_equal(half, kuhn_cfr.run_cfr(3, log_interval=100).full_policy)
+    half = kuhn_cfr.load_average_policy(os.path.join(run_dir, "half/average_policy.msgpack"))
+    np.testing.assert_array_equal(half, kuhn_cfr.run_cfr(3, eval_interval=100).full_policy)
+    records = run_utils.read_results(run_dir)
+    assert [r["iteration"] for r in records] == [1, 3, 7]
+
+
+def test_cfr_checkpoint_rows_identify_infosets(tmp_path):
+    """Rows are matched by their infoset fields, not by position."""
+    policy = np.random.default_rng(0).dirichlet(np.ones(2), size=len(ke.INFOSETS))
+    tree = kuhn_cfr.policy_checkpoint(policy, 5)
+    for i, key in enumerate(ke.INFOSETS):  # the fields of the INFOSETS key
+        betting = "".join("pb"[a] for a in tree["betting"][i] if a >= 0)
+        assert f"{tree['private_card'][i]}{betting}" == key
+        assert tree["player"][i] == len(betting) % 2
+    assert tree["legal"].all() and int(tree["iterations"]) == 5
+    perm = np.random.default_rng(1).permutation(len(policy))
+    shuffled = {k: (v[perm] if v.ndim else v) for k, v in tree.items()}
+    path = run_utils.save_params(str(tmp_path), "full", "average_policy", shuffled)
+    np.testing.assert_array_equal(kuhn_cfr.load_average_policy(path), policy)
+    # a duplicated infoset is refused
+    shuffled["private_card"] = shuffled["private_card"].copy()
+    shuffled["private_card"][0] = (shuffled["private_card"][0] + 1) % 3
+    path = run_utils.save_params(str(tmp_path), "full", "average_policy", shuffled)
+    with pytest.raises(KeyError):
+        kuhn_cfr.load_average_policy(path)
+
+
+# Flags, config.yaml and wandb names shared by the CFR and Deep CFR scripts of
+# Kuhn and Leduc (bluffjax/tests/test_leduc_training.py checks the Leduc ones)
+SHARED_FLAGS = {
+    "iterations", "eval_interval", "seed", "save_dir", "job_type", "wandb",
+    "project", "save_checkpoints",
+}
+
+
+class _WandbRun:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def log(self, metrics):
+        pass
+
+    def finish(self):
+        pass
+
+
+@pytest.mark.parametrize("name", ["kuhn_cfr", "kuhn_deep_cfr"])
+def test_cfr_flags_config_and_wandb(monkeypatch, tmp_path, name):
+    mod = {"kuhn_cfr": kuhn_cfr, "kuhn_deep_cfr": kuhn_deep_cfr}[name]
+    defaults = vars(mod.parse_args([]))
+    deep = name == "kuhn_deep_cfr"
+    assert SHARED_FLAGS | ({"num_seeds"} if deep else set()) <= set(defaults)
+    assert defaults["job_type"] == name and defaults["project"] == "bluffjax"
+    assert defaults["seed"] == 0 and defaults["wandb"] is False
+    assert defaults["save_checkpoints"] is True
+    assert (defaults["iterations"], defaults["eval_interval"]) == ((50, 5) if deep else (100, 10))
+    assert defaults["save_dir"].endswith(os.path.join("checkpoints", "kuhn"))
+    assert mod.parse_args(["--wandb"]).wandb and not mod.parse_args(["--no-wandb"]).wandb
+    runs = []
+    monkeypatch.setattr(mod.wandb, "init", lambda **kw: runs.append(_WandbRun(**kw)) or runs[-1])
+    argv = ["--iterations", "2", "--seed", "3", "--save_dir", str(tmp_path), "--wandb"]
+    if deep:
+        argv += ["--num_seeds", "2", "--traversals", "2", "--hidden_sizes", "4",
+                 "--batch_size", "4", "--advantage_train_steps", "1",
+                 "--policy_train_steps", "1", "--memory_capacity", "50"]
+    mod.main(argv)
+    (run_dir,) = os.listdir(tmp_path)
+    assert run_dir.startswith(f"{name}_")
+    with open(os.path.join(tmp_path, run_dir, "config.yaml")) as f:
+        config = yaml.safe_load(f)
+    assert config["env_name"] == "kuhn_poker" and config["seed"] == 3
+    assert config["num_seeds"] == (2 if deep else 1) and config["half_iterations"] == 1
+    assert SHARED_FLAGS <= set(config)
+    assert [r.kwargs["name"] for r in runs] == (["3_0", "3_1"] if deep else ["3_0"])
+    for r in runs:
+        assert r.kwargs["project"] == "bluffjax" and r.kwargs["mode"] is None
+        assert r.kwargs["job_type"] == f"{name}_kuhn_poker"
+        assert r.kwargs["group"].startswith("kuhn_poker_")
+        assert r.kwargs["config"]["env_name"] == "kuhn_poker"
 
 
 # ------------------------------------------------------------- Deep CFR
@@ -376,7 +482,9 @@ def _deep_cfr_args(tmp_path, *extra):
 
 def test_deep_cfr_run(tmp_path):
     assert kuhn_deep_cfr.parse_args([]).num_seeds == 5
-    config = _deep_cfr_args(tmp_path, "--iterations", "6", "--eval_every", "4", "--num_seeds", "2")
+    config = _deep_cfr_args(
+        tmp_path, "--iterations", "6", "--eval_interval", "4", "--num_seeds", "2"
+    )
     run_dir = kuhn_deep_cfr.run(config)
     assert _files(run_dir) == {"config.yaml", "results.jsonl"} | {
         f"{stage}/avg_policy_{i}.msgpack" for stage in ("half", "full") for i in range(2)
@@ -389,7 +497,7 @@ def test_deep_cfr_run(tmp_path):
         assert [r["iteration"] for r in rows] == list(range(1, 7))
         assert [r["traversals"] for r in rows] == [8 * it for it in range(1, 7)]
         evaluated = [r["iteration"] for r in rows if "exploitability" in r]
-        assert evaluated == [1, 3, 4, 6]  # first, half, eval_every, last
+        assert evaluated == [1, 3, 4, 6]  # first, half, eval_interval, last
         for r in rows:
             assert (set(GAME) <= set(r)) == ("exploitability" in r)
             assert ("value_vs_random" in r) == ("exploitability" in r)
@@ -409,11 +517,12 @@ def test_deep_cfr_run(tmp_path):
     # the half network is the final one of a 3-iteration run with the same
     # seeds, and seed index i uses seed + i
     short = kuhn_deep_cfr.run(
-        _deep_cfr_args(tmp_path, "--iterations", "3", "--eval_every", "4", "--num_seeds", "2")
+        _deep_cfr_args(tmp_path, "--iterations", "3", "--eval_interval", "4", "--num_seeds", "2")
     )
     seed1 = kuhn_deep_cfr.run(
         _deep_cfr_args(
-            tmp_path, "--iterations", "3", "--eval_every", "4", "--num_seeds", "1", "--seed", "1"
+            tmp_path, "--iterations", "3", "--eval_interval", "4", "--num_seeds", "1",
+            "--seed", "1"
         )
     )
 
@@ -432,9 +541,9 @@ def rebel_config(save_dir: str, num_update_steps: int) -> dict:
     return dict(
         num_update_steps=num_update_steps,
         num_subgames_per_update=4,
-        cfr_iterations=4,
+        cfr_iters=4,
         max_depth=1,
-        random_action_prob=0.25,
+        explore_prob=0.25,
         value_lr=1e-3,
         value_lr_halving_interval=0,
         value_hidden_dim=8,
@@ -442,7 +551,7 @@ def rebel_config(save_dir: str, num_update_steps: int) -> dict:
         replay_capacity=32,
         batch_size=8,
         num_value_train_steps=2,
-        log_interval=2,
+        eval_interval=2,
         save_checkpoints=True,
         save_dir=save_dir,
         env_name="kuhn_poker",
@@ -460,7 +569,7 @@ def test_rebel_run(tmp_path):
     run_dir = kuhn_rebel.run(config)
     assert config["half_update_steps"] == 2
     assert _files(run_dir) == {"config.yaml", "results.jsonl", "curves.json"} | {
-        f"{stage}/value_network_{i}.msgpack" for stage in ("half", "full") for i in range(2)
+        f"{stage}/value_net_{i}.msgpack" for stage in ("half", "full") for i in range(2)
     }
     records = _by_seed(run_utils.read_results(run_dir), "num_subgames")
     network = kuhn_rebel.ValueNetwork(hidden_dim=8)
@@ -475,13 +584,14 @@ def test_rebel_run(tmp_path):
     short = kuhn_rebel.run(rebel_config(str(tmp_path), 2))
     for i, rows in records.items():
         assert [r["num_subgames"] for r in rows] == [0, 8, 16]
+        assert [r["updates_completed"] for r in rows] == [0, 2, 4]
         assert "value_loss" not in rows[0] and "value_loss" in rows[1]
         for r in rows:
             assert set(GAME) <= set(r) and "value_vs_random" in r
         loaded = {}
         for stage, row in (("half", rows[1]), ("full", rows[2])):
             params = run_utils.load_params(
-                run_utils.checkpoint_path(run_dir, stage, "value_network", i), template
+                run_utils.checkpoint_path(run_dir, stage, "value_net", i), template
             )
             loaded[stage] = params
             table = kuhn_rebel.policy_array(np.asarray(table_of(params)))
@@ -493,7 +603,7 @@ def test_rebel_run(tmp_path):
                 ke.value_vs_random_from_policy_array(table), abs=1e-5
             )
         short_full = run_utils.load_params(
-            run_utils.checkpoint_path(short, "full", "value_network", i), template
+            run_utils.checkpoint_path(short, "full", "value_net", i), template
         )
         assert _max_diff(loaded["half"], short_full) < 1e-6
         assert _max_diff(loaded["half"], loaded["full"]) > 1e-4

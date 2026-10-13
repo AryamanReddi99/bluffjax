@@ -529,12 +529,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "env_steps": (runner_state.update_step + 1)
                 * config["num_envs"]
                 * config["num_steps_per_env_per_update"],
-                "hands_completed": hand_end.sum(),
-                "hand_length": (transitions.info["timestep"] * hand_end).sum()
+                "episodes_completed": hand_end.sum(),
+                "ep_length_avg": (transitions.info["timestep"] * hand_end).sum()
                 / num_hands,
-                "first_player_return_per_hand": (first_return * hand_end).sum()
+                "first_player_return_per_episode": (first_return * hand_end).sum()
                 / num_hands,
-                "abs_return_per_hand": (jnp.abs(first_return) * hand_end).sum()
+                "abs_return_per_episode": (jnp.abs(first_return) * hand_end).sum()
                 / num_hands,
                 "ppo_sample_frac": train_mask.mean(),
                 "lr": (

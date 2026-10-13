@@ -23,7 +23,7 @@ csrc/liars_dice):
 - Self play: sample a half-step, iteration t's with probability
   proportional to t + 1, draw a deal from the root PBS and play that
   half-step's policy profile down to a leaf, with one random player taking a
-  uniformly random action with probability random_action_prob. The leaf
+  uniformly random action with probability explore_prob. The leaf
   PBS, with beliefs updated by the profile, is the root of the next
   subgame. A terminal leaf ends the game.
 - At test time ReBeL plays the same way without exploration, sampling
@@ -35,7 +35,7 @@ Deviations from the paper: there is no policy network or warm start, which
 the paper lists as optional. An action that a player's policy never takes
 with any card in their range leaves that player's range unchanged.
 
-Evaluation: before training, every log_interval updates and after the last
+Evaluation: before training, every eval_interval updates and after the last
 update, the exact exploitability of the test-time policy, its exact expected
 return per hand against uniformly random play averaged over both seats
 (kuhn_exploitability.value_vs_random) and its exact Kuhn policy metrics
@@ -46,7 +46,7 @@ Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
 (run_utils.make_run_dir, with config.yaml) before training. Every evaluation
 writes one record per seed to {run_dir}/results.jsonl (with seed_index and
 wall_time) and to the seed's wandb run: num_subgames (the subgames solved in
-self play so far, the sample counter), update_step, replay_size,
+self play so far, the sample counter), updates_completed, replay_size,
 root_value_p0, the mean value_loss (left out before training) and the
 games_finished of the updates since the last evaluation, exploitability,
 value_vs_random and the policy metrics of the test-time policy, game/<name>
@@ -57,16 +57,16 @@ training) and root_value_p0 at the evaluations.
 
 Checkpoints (save_checkpoints), for every seed i = 0..num_seeds-1 (the wandb
 run "{seed}_{i}"):
-    {run_dir}/half/value_network_{i}.msgpack  after half_update_steps(num_update_steps)
-    {run_dir}/full/value_network_{i}.msgpack  after all num_update_steps updates
+    {run_dir}/half/value_net_{i}.msgpack  after half_update_steps(num_update_steps)
+    {run_dir}/full/value_net_{i}.msgpack  after all num_update_steps updates
 both from the same run. Each holds the flax params of the
 ValueNetwork(hidden_dim=value_hidden_dim), written with
 flax.serialization.to_bytes. It maps a PBS encoding (encode_pbs: one-hot
 public state and both players' ranges, PBS_DIM floats) to the infostate
 values (2, 3) in chips: values[i, c] is player i's expected return holding
 card c. ReBeL's policy is test_time_policy(network_value_fn(network, params),
-subgame_structure(max_depth), cfr_iterations), with max_depth and
-cfr_iterations from config.yaml. Restore one with
+subgame_structure(max_depth), cfr_iters), with max_depth and cfr_iters
+from config.yaml. Restore one with
 run_utils.load_params(path, network.init(rng, jnp.zeros(PBS_DIM))).
 """
 
@@ -506,12 +506,12 @@ def sample_leaf(
     pbs: PBS,
     policy: FloatArray,
     structure: SubgameStructure,
-    random_action_prob: float,
+    explore_prob: float,
 ) -> PBS:
     """
     ReBeL's SampleLeaf: draws a deal from pbs and plays `policy` from the
     subgame root to a leaf or terminal node. A random player takes a uniform
-    random action with probability random_action_prob at each of their
+    random action with probability explore_prob at each of their
     decisions. Beliefs at the reached node follow from `policy` alone.
     """
     rng_explorer, rng_deal, rng_walk = jax.random.split(rng, 3)
@@ -523,7 +523,7 @@ def sample_leaf(
         rng_explore, rng_random, rng_policy = jax.random.split(rng_step, 3)
         player = jnp.asarray(ACTING_PLAYER)[node]
         explore = (player == explorer) & (
-            jax.random.uniform(rng_explore) < random_action_prob
+            jax.random.uniform(rng_explore) < explore_prob
         )
         action = jnp.where(
             explore,
@@ -676,15 +676,15 @@ def make_train(
     # Nodes that are a leaf of some subgame; the value network is queried
     # there on every CFR iteration of self play.
     leaf_nodes = tuple(int(n) for n in np.nonzero(structure.leaf.any(axis=0))[0])
-    num_iterations = config["cfr_iterations"]
+    num_iterations = config["cfr_iters"]
     num_subgames = config["num_subgames_per_update"]
     capacity = config["replay_capacity"]
     batch_size = config["batch_size"]
-    log_interval = config["log_interval"]
+    eval_interval = config["eval_interval"]
     if capacity < num_subgames:
         raise ValueError("replay_capacity must be at least num_subgames_per_update")
-    if config["num_update_steps"] % log_interval != 0:
-        raise ValueError("num_update_steps must be a multiple of log_interval")
+    if config["num_update_steps"] % eval_interval != 0:
+        raise ValueError("num_update_steps must be a multiple of eval_interval")
     num_half = half_update_steps(config["num_update_steps"])
 
     network = ValueNetwork(hidden_dim=config["value_hidden_dim"])
@@ -712,7 +712,7 @@ def make_train(
             pbs,
             sample_profile(rng_profile, solution, num_iterations),
             structure,
-            config["random_action_prob"],
+            config["explore_prob"],
         )
         done = jnp.asarray(IS_TERMINAL)[next_pbs.node]
         next_pbs = jax.tree.map(
@@ -808,7 +808,7 @@ def make_train(
             root_values = network.apply(params, encode_pbs(start.node, start.ranges))
             metrics = {
                 **train_metrics,
-                "update_step": runner_state.update_step,
+                "updates_completed": runner_state.update_step,
                 "num_subgames": runner_state.update_step * num_subgames,
                 "replay_size": runner_state.replay_buffer.size,
                 "root_value_p0": jnp.mean(root_values[0]),
@@ -841,7 +841,7 @@ def make_train(
             runner_state, train_metrics = carry
             metrics = evaluate(runner_state, train_metrics)
             runner_state, block_metrics = lax.scan(
-                update_step, runner_state, None, log_interval
+                update_step, runner_state, None, eval_interval
             )
             train_metrics = {
                 "value_loss": jnp.mean(block_metrics["value_loss"]),
@@ -858,7 +858,7 @@ def make_train(
             rng=rng,
         )
         # The untrained value network is evaluated first, then every
-        # log_interval updates.
+        # eval_interval updates.
         no_training = {
             "value_loss": jnp.float32(jnp.nan),
             "games_finished": jnp.int32(0),
@@ -867,7 +867,7 @@ def make_train(
             log_step,
             (runner_state, no_training),
             None,
-            config["num_update_steps"] // log_interval,
+            config["num_update_steps"] // eval_interval,
         )
         final_metrics = evaluate(runner_state, train_metrics)
         metrics = jax.tree.map(
@@ -964,10 +964,10 @@ def run(config: dict) -> str:
         if config["save_checkpoints"]:
             seeds = range(config["num_seeds"])
             save_seed_params(
-                run_dir, "half", "value_network", runner_state.half_params, seeds
+                run_dir, "half", "value_net", runner_state.half_params, seeds
             )
             save_seed_params(
-                run_dir, "full", "value_network", runner_state.train_state.params, seeds
+                run_dir, "full", "value_net", runner_state.train_state.params, seeds
             )
             print(f"Saved value networks to {run_dir}")
     finally:

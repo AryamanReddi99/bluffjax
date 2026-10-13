@@ -10,29 +10,53 @@ The average policy converges to a Nash equilibrium. Its exact exploitability
 (the OpenSpiel-compatible metric of kuhn_exploitability), its exact expected
 return per hand against uniformly random play averaged over both seats
 (kuhn_exploitability.value_vs_random) and the exact Kuhn policy metrics
-(bluffjax.metrics.kuhn_poker) are logged before the first iteration (uniform
-policy), every log_interval iterations and after the last.
+(bluffjax.metrics.kuhn_poker) are logged after iteration 1, every
+--eval_interval iterations, after half of the iterations (the half
+checkpoint) and after the last one.
 
-CFR is deterministic, so a run has no seeds:
+CFR is deterministic, so a run is one solve (seed index 0, one wandb run
+"{seed}_0"; --seed only names it):
 
     python bluffjax/examples/kuhn/kuhn_cfr.py --iterations 100 [--wandb]
 
-Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
-(run_utils.make_run_dir, with config.yaml holding the flags) before running.
-Every evaluation writes one record to {run_dir}/results.jsonl (with
-seed_index 0 and wall_time), and to the wandb run with --wandb: iteration,
-exploitability, value_vs_random and the policy metrics of the average policy,
-game/<name> (names and definitions in bluffjax.metrics.kuhn_poker).
+Flags (the same as leduc_cfr.py; kuhn_deep_cfr.py and leduc_deep_cfr.py add
+--num_seeds and their own hyperparameters): --iterations, --eval_interval,
+--seed, --save_dir, --job_type, --wandb, --project, --save_checkpoints. With
+--wandb the run logs to project --project, group {env_name}_{timestamp}, job
+type {job_type}_{env_name} (env_name kuhn_poker), as the RL scripts do.
 
-Checkpoints (on unless --no-save_checkpoints):
+Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
+(run_utils.make_run_dir) before running; config.yaml holds the flags with
+env_name, num_seeds (1), half_iterations and run_dir. Every evaluation writes
+one record to {run_dir}/results.jsonl (with seed_index 0 and wall_time) and to
+the wandb run: iteration, exploitability, value_vs_random and the policy
+metrics of the average policy, game/<name> (names and definitions in
+bluffjax.metrics.kuhn_poker).
+
+Checkpoints (unless --no-save_checkpoints):
     {run_dir}/half/average_policy.msgpack  average strategy after
-                                           iterations // 2 iterations
+                                           half_iterations =
+                                           half_update_steps(iterations)
     {run_dir}/full/average_policy.msgpack  after all iterations
-both from the same run. Each holds the average strategy as a (12, 2) float64
-array of [P(pass), P(bet)] per infoset, rows in kuhn_exploitability.INFOSETS
-order (the policy array of kuhn_exploitability and bluffjax.metrics), written
-with flax.serialization.to_bytes. Restore one with
-run_utils.load_params(path, np.zeros((12, 2))).
+both from the same run. Each checkpoint is a dict of numpy arrays, one row per
+information set (the 12 infosets, in kuhn_exploitability.INFOSETS order),
+written with run_utils.save_params, as leduc_cfr.py's checkpoints:
+    policy        float64 (12, 2)  average strategy [P(pass), P(bet)], rows
+                                   sum to 1 (uniform where the strategy sum
+                                   is 0)
+    player        int32 (12,)      the acting player's position, 0 = acts first
+    private_card  int32 (12,)      its card 0..2 = J, Q, K
+    betting       int32 (12, 2)    the actions so far (0 = pass, 1 = bet,
+                                   -1 = none)
+    legal         bool (12, 2)     legal actions (pass, bet): all of them
+    iterations    int64 ()         CFR iterations behind the strategy
+player, private_card and betting identify the infoset (its INFOSETS key is
+the card followed by the actions as p / b). load_average_policy(path) reads a
+checkpoint back as the (12, 2) policy array in INFOSETS order (the policy
+array of kuhn_exploitability and bluffjax.metrics), matching rows by these
+fields. In the env, the acting player's infoset is (position
+(current_player_idx - start_player_idx) % 2, agent_hands[current_player_idx],
+the actions of the hand so far).
 """
 
 import argparse
@@ -42,10 +66,12 @@ from collections import defaultdict
 from typing import Callable, NamedTuple, Sequence
 
 import numpy as np
+import wandb
 
 from bluffjax.examples.run_utils import (
     ResultsLog,
     half_update_steps,
+    load_params,
     make_run_dir,
     save_params,
 )
@@ -64,6 +90,9 @@ from bluffjax.utils.game_utils.kuhn_exploitability import (
     value_vs_random,
 )
 from bluffjax.utils.paths import REPO_ROOT
+
+ENV_NAME = "kuhn_poker"
+MAX_BETTING = 2  # actions before a decision: at most pass, bet
 
 
 def _regret_matching(
@@ -241,10 +270,67 @@ def policy_array(policy: Callable[[str], np.ndarray]) -> np.ndarray:
     return np.stack([policy(k) for k in INFOSETS])
 
 
+# --- Checkpoints of the average strategy (layout in the module docstring) ---
+def _history(infoset: str) -> tuple[int, ...]:
+    """The actions of an INFOSETS key, e.g. "1pb" -> (pass, bet)."""
+    return tuple(ACTION_PASS if c == "p" else ACTION_BET for c in infoset[1:])
+
+
+def _infoset_fields() -> dict[str, np.ndarray]:
+    """player, private_card and betting of every infoset."""
+    n = len(INFOSETS)
+    fields = {
+        "player": np.zeros(n, dtype=np.int32),
+        "private_card": np.zeros(n, dtype=np.int32),
+        "betting": np.full((n, MAX_BETTING), -1, dtype=np.int32),
+    }
+    for i, key in enumerate(INFOSETS):
+        history = _history(key)
+        fields["player"][i] = get_current_player(history)
+        fields["private_card"][i] = int(key[0])
+        fields["betting"][i, : len(history)] = history
+    return fields
+
+
+def policy_checkpoint(policy: np.ndarray, iterations: int) -> dict[str, np.ndarray]:
+    """The checkpoint tree of a (12, 2) policy in INFOSETS order."""
+    legal = np.zeros((len(INFOSETS), 2), dtype=bool)
+    for i, key in enumerate(INFOSETS):
+        legal[i, get_legal_actions(_history(key))] = True
+    return {
+        "policy": np.asarray(policy, dtype=np.float64),
+        **_infoset_fields(),
+        "legal": legal,
+        "iterations": np.asarray(iterations, dtype=np.int64),
+    }
+
+
+def load_average_policy(path: str) -> np.ndarray:
+    """A checkpoint written by run() as the (12, 2) policy in INFOSETS order,
+    matching rows by their infoset fields (strict: every infoset once)."""
+    template = policy_checkpoint(np.zeros((len(INFOSETS), 2)), 0)
+    tree = load_params(path, template)
+    row_of = {
+        (get_current_player(_history(key)), int(key[0]), _history(key)): i
+        for i, key in enumerate(INFOSETS)
+    }
+    assert len(row_of) == len(INFOSETS)
+    policy = np.full((len(row_of), 2), np.nan)
+    for j in range(len(row_of)):
+        key = (
+            int(tree["player"][j]),
+            int(tree["private_card"][j]),
+            tuple(int(a) for a in tree["betting"][j] if a >= 0),
+        )
+        i = row_of.pop(key)  # KeyError for an unknown or repeated infoset
+        policy[i] = tree["policy"][j]
+    return policy
+
+
 class CFRResult(NamedTuple):
     average_policy: Callable[[str], np.ndarray]  # after all iterations
     exploitability_log: list[tuple[int, float]]  # (iteration, exploitability)
-    half_policy: np.ndarray  # (12, 2) average strategy after num_iterations // 2
+    half_policy: np.ndarray  # (12, 2) average strategy after half_update_steps
     full_policy: np.ndarray  # (12, 2) average strategy after num_iterations
 
 
@@ -252,7 +338,7 @@ def run_cfr(
     num_iterations: int = 10_000,
     linear_averaging: bool = False,
     alternating_updates: bool = True,
-    log_interval: int = 100,
+    eval_interval: int = 100,
     results_log: ResultsLog | None = None,
 ) -> CFRResult:
     """
@@ -262,14 +348,17 @@ def run_cfr(
         num_iterations: Number of CFR iterations.
         linear_averaging: If True, use linear (iteration-weighted) averaging.
         alternating_updates: If True, alternate updates between players (faster convergence).
-        log_interval: Log exploitability every this many iterations.
+        eval_interval: evaluate after iteration 1, every this many
+            iterations, after half_update_steps(num_iterations) and after the
+            last.
         results_log: if given, every evaluation is logged to it (iteration,
             exploitability, value_vs_random and the game/ policy metrics).
 
     Returns:
         CFRResult: the average policy after all iterations, the
         (iteration, exploitability) log, and the average strategy tables after
-        half_update_steps(num_iterations) and after all iterations.
+        half_update_steps(num_iterations) (the uniform policy if that is 0)
+        and after all iterations.
     """
     infoset_nodes: dict[str, dict] = {}
     current_policy: dict[str, np.ndarray] = {}
@@ -285,26 +374,28 @@ def run_cfr(
     exploitability_log: list[tuple[int, float]] = []
     num_half = half_update_steps(num_iterations)
 
-    def evaluate(it: int) -> float:
+    def evaluate(it: int) -> None:
         avg_policy = _average_policy_from_nodes(infoset_nodes)
         expl = exploitability(avg_policy)
+        value = value_vs_random(avg_policy)
         exploitability_log.append((it, expl))
         if results_log is not None:
             results_log.log(
                 {
                     "iteration": it,
                     "exploitability": expl,
-                    "value_vs_random": value_vs_random(avg_policy),
+                    "value_vs_random": value,
                     **prefixed("game", policy_metrics(policy_array(avg_policy))),
                 }
             )
-        return expl
+        print(
+            f"Iteration {it:6d}: exploitability = {expl:.6f}, "
+            f"value vs random = {value:+.6f}",
+            flush=True,
+        )
 
-    # Log initial (uniform) exploitability
-    expl_0 = evaluate(0)
-    print(f"Iteration      0: exploitability = {expl_0:.6f} (uniform)")
+    # The uniform policy, until num_half >= 1 iterations have run
     half_policy = policy_array(_average_policy_from_nodes(infoset_nodes))
-
     for it in range(1, num_iterations + 1):
         _run_cfr_iteration(
             infoset_nodes,
@@ -316,9 +407,13 @@ def run_cfr(
 
         if it == num_half:
             half_policy = policy_array(_average_policy_from_nodes(infoset_nodes))
-        if it % log_interval == 0 or it == num_iterations:
-            expl = evaluate(it)
-            print(f"Iteration {it:6d}: exploitability = {expl:.6f}")
+        if (
+            it == 1
+            or it % eval_interval == 0
+            or it == num_half
+            or it == num_iterations
+        ):
+            evaluate(it)
 
     average_policy = _average_policy_from_nodes(infoset_nodes)
     return CFRResult(
@@ -333,53 +428,61 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CFR on Kuhn Poker.")
     parser.add_argument("--iterations", type=int, default=100, help="CFR iterations")
     parser.add_argument(
-        "--log_interval",
+        "--eval_interval",
         type=int,
         default=10,
-        help="evaluate every this many iterations (and after the last)",
+        help="evaluate after iteration 1, every this many iterations, after "
+        "half of them and after the last",
     )
+    parser.add_argument(
+        "--seed", type=int, default=0, help="names the run (CFR is deterministic)"
+    )
+    parser.add_argument(
+        "--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "kuhn")
+    )
+    parser.add_argument("--job_type", type=str, default="kuhn_cfr")
+    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--project", type=str, default="bluffjax")
     parser.add_argument(
         "--save_checkpoints",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="save the half and full average strategy tables",
+        help="average strategy after half and all of the iterations",
     )
-    parser.add_argument("--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "kuhn"))
-    parser.add_argument("--job_type", type=str, default="kuhn_cfr")
-    parser.add_argument("--wandb", action="store_true", help="log to wandb")
-    parser.add_argument("--project", type=str, default="bluffjax")
     return parser.parse_args(argv)
 
 
-def run(config: argparse.Namespace) -> str:
+def run(args: argparse.Namespace) -> str:
     """Runs CFR with logging and checkpoints; returns the run directory."""
-    run_config = vars(config).copy()
-    run_config["half_iterations"] = half_update_steps(config.iterations)
-    run_dir = make_run_dir(run_config)
-    wandb_runs = []
-    if config.wandb:
-        import wandb
-
-        wandb_runs = [
-            wandb.init(
-                project=config.project,
-                group="kuhn_poker" + datetime.datetime.now().strftime("_%Y-%m-%d_%H-%M-%S"),
-                job_type=config.job_type,
-                name="cfr",
-                config=run_config,
-                dir=str(REPO_ROOT),
-                reinit="create_new",
-            )
-        ]
+    config = {
+        **vars(args),
+        "env_name": ENV_NAME,
+        "num_seeds": 1,
+        "half_iterations": half_update_steps(args.iterations),
+    }
+    run_dir = make_run_dir(config)
+    group = f"{ENV_NAME}_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    wandb_runs = [
+        wandb.init(
+            project=args.project,
+            group=group,
+            job_type=f"{args.job_type}_{ENV_NAME}",
+            name=f"{args.seed}_0",  # one deterministic run (seed index 0)
+            config=config,
+            mode=None if args.wandb else "disabled",
+            dir=str(REPO_ROOT),
+            reinit="create_new",
+        )
+    ]
     try:
         results_log = ResultsLog(run_dir, wandb_runs)
         print(f"Run directory: {run_dir}")
         print("CFR for Kuhn Poker")
         print("=" * 50)
         result = run_cfr(
-            num_iterations=config.iterations,
+            num_iterations=args.iterations,
             linear_averaging=False,
-            log_interval=config.log_interval,
+            eval_interval=args.eval_interval,
             results_log=results_log,
         )
         final_expl = float(result.exploitability_log[-1][1])
@@ -390,9 +493,13 @@ def run(config: argparse.Namespace) -> str:
             f"Final value vs random: {final_value:+.6f} chips per hand (Nash "
             f"equilibria: 1/9 + alpha/6, between 0.1111 and 0.1667)"
         )
-        if config.save_checkpoints:
-            save_params(run_dir, "half", "average_policy", result.half_policy)
-            save_params(run_dir, "full", "average_policy", result.full_policy)
+        if args.save_checkpoints:
+            for stage, policy, iterations in (
+                ("half", result.half_policy, config["half_iterations"]),
+                ("full", result.full_policy, args.iterations),
+            ):
+                tree = policy_checkpoint(policy, iterations)
+                save_params(run_dir, stage, "average_policy", tree)
             print(f"Saved checkpoints to {run_dir}")
     finally:
         for wandb_run in wandb_runs:
@@ -400,8 +507,8 @@ def run(config: argparse.Namespace) -> str:
     return run_dir
 
 
-def main() -> None:
-    run(parse_args())
+def main(argv: Sequence[str] | None = None) -> None:
+    run(parse_args(argv))
 
 
 if __name__ == "__main__":

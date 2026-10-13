@@ -30,7 +30,7 @@ exploitability are in chips.
 Logged evaluation metrics (returns in chips): every compare_interval updates
 and after the last one win_rate_vs_random, loss_rate_vs_random,
 draw_rate_vs_random (split pots), win_rate_decided_vs_random (wins among the
-hands won or lost), avg_return_vs_random (per hand) and
+hands won or lost, NaN without any), avg_return_vs_random (per hand) and
 avg_episode_length_vs_random (env steps per hand) over compare_episodes hands;
 every eval_interval updates and after the last one, exploitability,
 value_vs_random (the exact expectation of avg_return_vs_random) and the game/
@@ -122,7 +122,7 @@ class Transition(NamedTuple):
     log_prob: FloatArray
     reward: FloatArray  # (num_agents,) env reward for every player, chips
     done: BoolArray  # the hand ended at this step (the env auto-resets)
-    value: FloatArray  # critic value of obs, in scaled reward units
+    value: FloatArray  # critic value of obs, chips
     player_idx: IntArray
     start_player_idx: IntArray  # the hand's first player
     info: dict[str, Any]
@@ -375,8 +375,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
             _, last_val = network.apply(train_state.params, runner_state.obs)
 
-            # Per-player GAE in scaled reward units; every decision with a
-            # known outcome trains the actor and the critic.
+            # Per-player GAE in chips; every decision with a known outcome
+            # trains the actor and the critic.
             advantages, targets, valid = per_player_gae(
                 transitions.value,
                 transitions.reward,
@@ -547,12 +547,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "env_steps": (runner_state.update_step + 1)
                 * config["num_envs"]
                 * config["num_steps_per_env_per_update"],
-                "hands_completed": hand_end.sum(),
-                "hand_length": (transitions.info["timestep"] * hand_end).sum()
+                "episodes_completed": hand_end.sum(),
+                "ep_length_avg": (transitions.info["timestep"] * hand_end).sum()
                 / num_hands,
-                "first_player_return_per_hand": (first_return * hand_end).sum()
+                "first_player_return_per_episode": (first_return * hand_end).sum()
                 / num_hands,
-                "abs_return_per_hand": (jnp.abs(first_return) * hand_end).sum()
+                "abs_return_per_episode": (jnp.abs(first_return) * hand_end).sum()
                 / num_hands,
                 "ppo_sample_frac": train_mask.mean(),
                 "lr": (

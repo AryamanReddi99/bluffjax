@@ -502,11 +502,13 @@ def test_nfsp_mixing_per_hand(monkeypatch, tmp_path, name: str) -> None:
             np.testing.assert_array_equal(
                 seen["targets"][u][3], np.float32(0.9) * br.astype(np.float32)
             )
-        has_expl = "exploitability_avg_policy" in row
+        has_expl = "exploitability" in row
         assert has_expl == (u % 2 == 0 or u == 3)
-        assert ("value_avg_vs_random" in row) == ("value_br_vs_random" in row) == has_expl
+        assert ("exploitability_br" in row) == has_expl
+        assert ("value_vs_random" in row) == ("value_br_vs_random" in row) == has_expl
         if has_expl:
-            assert 0.0 <= row["exploitability_avg_policy"] < 1.0
+            assert 0.0 <= row["exploitability"] < 1.0
+            assert 0.0 <= row["exploitability_br"] <= 2.0  # payoffs are at most 2
         # against random: compare_interval 3 and the last update
         sampled = [k for k in row if k.endswith("_vs_random") and "value_" not in k]
         assert len(sampled) == (12 if u in (0, 3) else 0)  # 6 metrics x 2 policies
