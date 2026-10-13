@@ -39,7 +39,7 @@ compare: true
 compare_mode: random  # "random" or "checkpoint"
 # checkpoint opponent: a .msgpack file written by save_checkpoints of
 # werewolf_ppo_nfsp.py (actor_critic) or werewolf_pqn_nfsp.py (q_network for
-# br_<i>, actor for avg_policy_<i>)
+# br_<i>, actor for avg_policy_<i>), e.g. <run_dir>/full/avg_policy_0.msgpack
 compare_with: ""
 compare_network_type: actor_critic  # "actor_critic", "q_network", or "actor"
 compare_steps: 50
@@ -50,8 +50,10 @@ project: bluffjax
 job_type: werewolf_pqn_nfsp
 wandb: false
 
-# optional checkpoint save (see save_checkpoints in the script)
-save_final: false
+# run directory {save_dir}/{job_type}_{timestamp}/ with config.yaml and
+# results.jsonl; save_checkpoints adds the half- and full-budget networks
+# (half/ and full/, see save_checkpoints in the script)
+save_checkpoints: true
 save_dir: ${repo_root:}/checkpoints/werewolf
 
 # Hydra configs and logs go to outputs/ at the repo root

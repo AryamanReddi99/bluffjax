@@ -1,21 +1,24 @@
 """
 Parts shared by bluff_ppo_nfsp.py and bluff_pqn_nfsp.py: the NFSP reservoir
-buffer, the per-game policy mixing, checkpoint saving and strict loading, and
-the head-to-head evaluation.
+buffer, the per-game policy mixing, the half- and full-budget checkpoints with
+strict loading, the head-to-head evaluation, and logging.
 """
 
-import datetime
-import os
 from typing import Any, Callable, NamedTuple
 
 import jax
-from flax import serialization
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-from omegaconf import OmegaConf
 
 from bluffjax.environments.bluff.bluff import Bluff
+from bluffjax.examples.run_utils import (
+    CHECKPOINT_STAGES,
+    ResultsLog,
+    load_params,
+    save_seed_params,
+)
+from bluffjax.examples.run_utils import checkpoint_path as _checkpoint_path
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 
 
@@ -122,67 +125,75 @@ def greedy_random_ties(
 # =============================================================================
 
 
-def load_params(path: str, template: Any) -> Any:
-    """Loads flax params written by save_checkpoints, failing loudly.
+class Checkpoint(NamedTuple):
+    """The two NFSP networks at one point of training."""
 
-    The file must exist and hold exactly the parameter tree of `template`
-    (same keys, shapes and dtypes); flax's from_bytes alone silently ignores
-    extra keys and doesn't check shapes.
-    """
-    if not path or not os.path.isfile(path):
-        raise FileNotFoundError(f"checkpoint not found: '{path}'")
-    with open(path, "rb") as f:
-        restored = serialization.msgpack_restore(f.read())
-    expected = serialization.to_state_dict(template)
-    if jax.tree_util.tree_structure(restored) != jax.tree_util.tree_structure(
-        expected
-    ):
-        raise ValueError(
-            f"checkpoint {path} doesn't match the network: parameter tree "
-            f"{jax.tree_util.tree_structure(restored)} vs expected "
-            f"{jax.tree_util.tree_structure(expected)}"
-        )
-    for (key, got), want in zip(
-        jax.tree_util.tree_flatten_with_path(restored)[0],
-        jax.tree_util.tree_leaves(expected),
-    ):
-        if np.shape(got) != np.shape(want) or np.asarray(got).dtype != want.dtype:
-            raise ValueError(
-                f"checkpoint {path} doesn't match the network at "
-                f"{jax.tree_util.keystr(key)}: {np.asarray(got).dtype}"
-                f"{np.shape(got)} vs expected {want.dtype}{np.shape(want)}"
-            )
-    return serialization.from_state_dict(template, restored)
+    avg_params: Any  # average policy, NFSP's output strategy
+    br_params: Any  # best response
 
 
-def save_checkpoints(config: dict, avg_params: Any, br_params: Any) -> str:
-    """Saves the networks of every seed after training.
+def checkpoint_path(run_dir: str, stage: str, name: str, seed_index: int) -> str:
+    """{run_dir}/{stage}/{name}_{seed_index}.msgpack, name avg_policy or br."""
+    if name not in ("avg_policy", "br"):
+        raise ValueError(f"name must be 'avg_policy' or 'br', got '{name}'")
+    return _checkpoint_path(run_dir, stage, name, seed_index)
 
-    Layout of {save_dir}/{job_type}_{timestamp}/:
-        avg_policy_{i}.msgpack  average policy of seed i (NFSP's output strategy)
-        br_{i}.msgpack          best response of seed i
-        config.yaml             resolved config of the run
-    i = 0..num_seeds-1 indexes the vmapped seeds (wandb run "{seed}_{i}"). Each
-    file holds the flax params of one network, without a seed axis, written with
-    flax.serialization.to_bytes; restore with load_params(path, template) where
-    template = network.init(rng, obs). The networks map a Bluff observation to:
+
+def save_checkpoints(
+    run_dir: str, num_seeds: int, half: Checkpoint, full: Checkpoint
+) -> str:
+    """Saves the networks of every seed at half and at the full budget.
+
+    Layout of the run directory (bluffjax.examples.run_utils.make_run_dir):
+        config.yaml                  resolved config of the run
+        results.jsonl                everything logged (see run_utils)
+        half/avg_policy_{i}.msgpack  after half_update_steps(num_update_steps)
+        half/br_{i}.msgpack          (= num_update_steps // 2) updates
+        full/avg_policy_{i}.msgpack  after all num_update_steps updates
+        full/br_{i}.msgpack
+    Both checkpoints come from the same run: the half one is the state after
+    exactly that many updates, with the learning-rate and epsilon schedules
+    running over the whole run (config.yaml records num_update_steps and
+    half_update_steps). i = 0..num_seeds-1 indexes the vmapped seeds (wandb
+    run "{seed}_{i}"). Each file holds the flax params of one network, without
+    a seed axis, written with flax.serialization.to_bytes; restore one with
+    load_params(path, template) (or load_checkpoint), where template =
+    network.init(rng, obs). The networks map a Bluff observation of the player
+    to act (env.obs_from_state(state), env.obs_dim floats) to:
         PPO-NFSP: both ActorCriticDiscreteMLP(action_dim, fc_dim_size) ->
-            (action logits, value); the average policy's value head is unused.
+            (action logits, value in env reward units); the average policy's
+            value head is unused.
         PQN-NFSP: average policy ActorDiscreteMLP(action_dim, fc_dim_size) ->
             action logits; BR QNetworkDiscreteMLP(action_dim, fc_dim_size) ->
-            Q-values (its policy is the argmax over legal actions).
-    Mask illegal actions (env.get_avail_actions) before the softmax or argmax.
+            Q-values in env reward units (its policy is the argmax over legal
+            actions).
+    action_dim is env.action_dim; mask illegal actions
+    (env.get_avail_actions(state)) before the softmax or argmax. As an
+    evaluation opponent (compare_mode=checkpoint) use compare_network_type
+    actor_critic for PPO-NFSP files, actor for PQN-NFSP avg_policy files and
+    q_network for PQN-NFSP br files.
     """
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = os.path.join(config["save_dir"], f"{config['job_type']}_{timestamp}")
-    os.makedirs(run_dir, exist_ok=True)
-    for name, params in (("avg_policy", avg_params), ("br", br_params)):
-        for i in range(config["num_seeds"]):
-            params_i = jax.tree_util.tree_map(lambda x: np.asarray(x[i]), params)
-            with open(os.path.join(run_dir, f"{name}_{i}.msgpack"), "wb") as f:
-                f.write(serialization.to_bytes(params_i))
-    OmegaConf.save(OmegaConf.create(config), os.path.join(run_dir, "config.yaml"))
+    for stage, checkpoint in zip(CHECKPOINT_STAGES, (half, full)):
+        for name, params in (
+            ("avg_policy", checkpoint.avg_params),
+            ("br", checkpoint.br_params),
+        ):
+            save_seed_params(run_dir, stage, name, params, range(num_seeds))
     return run_dir
+
+
+def load_checkpoint(
+    run_dir: str, stage: str, seed_index: int, avg_template: Any, br_template: Any
+) -> Checkpoint:
+    """Both networks of one seed and stage ("half" or "full"), loaded strictly."""
+    return Checkpoint(
+        avg_params=load_params(
+            checkpoint_path(run_dir, stage, "avg_policy", seed_index), avg_template
+        ),
+        br_params=load_params(
+            checkpoint_path(run_dir, stage, "br", seed_index), br_template
+        ),
+    )
 
 
 # =============================================================================
@@ -292,8 +303,10 @@ def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
 # =============================================================================
 
 
-def log_update(wandb_runs: list, evals_by_seed: dict, seed_val, metric_dict: dict) -> None:
-    """Logs the metrics of one update of one seed.
+def log_update(
+    results_log: ResultsLog, evals_by_seed: dict, seed_val, metric_dict: dict
+) -> None:
+    """Logs the metrics of one update of one seed to wandb and results.jsonl.
 
     metric_dict["evaluated"] says whether the evaluation metrics (keys with
     "_vs_") were computed in this update; they are logged, printed and kept in
@@ -314,7 +327,7 @@ def log_update(wandb_runs: list, evals_by_seed: dict, seed_val, metric_dict: dic
     else:
         for k in eval_keys:
             del metrics[k]
-    wandb_runs[seed].log(metrics)
+    results_log.log(metrics, seed)
 
 
 def format_eval(evals: dict[str, float]) -> str:
