@@ -281,8 +281,7 @@ def check_training_run(
             for i in range(2):
                 want = jax.tree_util.tree_map(lambda x: x[i], params)
                 assert max_diff(loaded[(stage, net, i)], want) < 1e-6, (stage, net, i)
-    # ... and they differ (by far more than the tolerance above; the Werewolf
-    # PQN BR's RAdam makes small first steps)
+    # ... and they differ (by far more than the tolerance above)
     for net in templates:
         diff = max_diff(loaded[("half", net, 0)], loaded[("full", net, 0)])
         assert diff > 1e-5, (net, diff)

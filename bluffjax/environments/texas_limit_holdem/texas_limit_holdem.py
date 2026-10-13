@@ -353,7 +353,8 @@ class TexasLimitHoldem(AECEnv):
             pot_total = jnp.sum(new_chips_in).astype(jnp.float32)
             num_winners = jnp.sum(winners).astype(jnp.float32)
             chips_gained = jnp.where(winners, pot_total / num_winners, 0.0)
-            payoffs = (chips_gained - new_chips_in.astype(jnp.float32)) / self.big_blind
+            # net chips, as in No-Limit Hold'em
+            payoffs = chips_gained - new_chips_in.astype(jnp.float32)
             return payoffs
 
         rewards = lax.cond(

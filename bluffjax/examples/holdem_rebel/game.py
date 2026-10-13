@@ -80,7 +80,7 @@ def make_game(name: str, max_raises: int | None = None) -> HoldemGame:
         # Env actions: 0 call, 1 raise, 2 fold, 3 check. Slots: 0 check/call,
         # 1 raise, 2 fold. 4 raises per round is the env's cap. The largest
         # contribution is 1 + 4 bets of 1 BB preflop and on the flop and 2 BB
-        # on the turn and river: 25 BB.
+        # on the turn and river: 25 BB = 50 chips (the env pays chips).
         return HoldemGame(
             name="hul",
             env_id="texas_limit_holdem",
@@ -91,8 +91,8 @@ def make_game(name: str, max_raises: int | None = None) -> HoldemGame:
             fold_slot=2,
             fold_action=2,
             max_raises=4,
-            reward_per_chip=0.5,
-            value_scale=25.0,
+            reward_per_chip=1.0,
+            value_scale=50.0,
             stack=float("inf"),
         )
     if name == "hunl":

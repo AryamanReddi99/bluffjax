@@ -17,7 +17,6 @@ vf_clip: 0.2  # 0.2 x the std of a game's return under random play (reward units
 ent_coef: 0.0  # as in the paper and the Leduc/Hold'em configs
 vf_coef: 1.0
 max_grad_norm: 0.5
-reward_scale: 1.0  # the env pays +1 / -1 per team at the end of a hand
 
 # Shared network architecture
 fc_dim_size: 128

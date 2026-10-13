@@ -167,7 +167,7 @@ def test_lhe_river_bluff_succeeds(lhe):
         "folds": {1: 1},
         "vpip_by_position": {(0, 0): 1},
     })
-    np.testing.assert_array_equal(reward, [1.0, -1.0])  # 1 BB limp + 2 BB river bet
+    np.testing.assert_array_equal(reward, [2.0, -2.0])  # the BB's blind, in chips
     assert_initial(gm, carry)
     rates = gm.summarize(counts_total([counts]))
     assert rates["bluff_rate"] == 1 and rates["bluff_rate_river"] == 1
@@ -262,7 +262,7 @@ def test_lhe_showdown_win_and_tie(lhe):
         "showdowns": {0: 1, 1: 1},
         "showdown_wins": {1: 1},
     })
-    np.testing.assert_array_equal(reward, [-1.0, 1.0])
+    np.testing.assert_array_equal(reward, [-2.0, 2.0])  # one big blind each, in chips
     # both play the royal flush on the board: a split pot is no win
     counts, reward, _, _ = play_hand(
         env, gm, deal(env, 0, ["2c 3d", "2h 3h"], "Ts Js Qs Ks As"), passive

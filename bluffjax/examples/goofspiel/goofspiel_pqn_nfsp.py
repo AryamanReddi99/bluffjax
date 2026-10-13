@@ -20,8 +20,7 @@ game.
   lambda-trace runs through decisions taken by the epsilon-greedy BR (Peng's
   Q(lambda), as in PQN) and is cut at average-policy decisions, so those give
   one-step Q-learning targets (see
-  parallel_nfsp_common.per_agent_q_lambda_targets). Training uses
-  reward * reward_scale.
+  parallel_nfsp_common.per_agent_q_lambda_targets).
 - Truncation: a game the env cuts off without ending it (done without
   absorbing; Goofspiel always ends after 13 rounds, so this doesn't happen
   with the current env) would not be treated as terminal: the decisions at
@@ -66,8 +65,7 @@ player's observation (env.obs_from_state(state)[p], env.obs_dim floats):
     avg_policy: ActorDiscreteMLP(action_dim=13, hidden_dim=fc_dim_size) ->
         logits over the 13 cards to bid;
     br: QNetworkDiscreteMLP(action_dim=13, hidden_dim=fc_dim_size) ->
-        Q-values of the 13 bids in units of reward_scale * env reward (the
-        BR's policy is the argmax over the cards in hand).
+        Q-values of the 13 bids in env reward units (the BR's policy is the argmax over the cards in hand).
 Mask the cards no longer in hand (env.get_avail_actions(state)[p]) before the
 softmax or argmax. Load a file with run_utils.load_params(path,
 network.init(rng, obs)), or both networks of a seed with
@@ -436,7 +434,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             # trains the Q-network; the trace is cut at average-policy decisions.
             targets, valid = per_agent_q_lambda_targets(
                 transitions.q_max,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 jnp.broadcast_to(
                     transitions.done[..., None], transitions.reward.shape
                 ),

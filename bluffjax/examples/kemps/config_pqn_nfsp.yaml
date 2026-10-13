@@ -17,7 +17,6 @@ end_e: 0.005
 exploration_fraction: 0.1  # epsilon decays linearly over this share of the run
 q_lambda: 0.9
 max_grad_norm: 0.5
-reward_scale: 1.0  # the env pays +1 / -1 per team at the end of a hand
 
 # Shared
 gamma: 0.99

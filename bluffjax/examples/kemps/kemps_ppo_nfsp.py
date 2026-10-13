@@ -20,8 +20,7 @@ env.get_avail_actions (a game action is legal with every signal).
   step and bootstraps from the value of its decision at t + 1, unless the
   hand ends at t (see parallel_nfsp_common.per_agent_gae). The env pays both
   partners their team's reward (+1 / -1 with two teams) when a declaration
-  ends the hand, so each player is credited with its team's outcome. Training
-  uses reward * reward_scale.
+  ends the hand, so each player is credited with its team's outcome.
 - Truncation: a hand cut off at the env horizon is not over (the env sets
   absorbing on the cut-off too, so it is recognised by
   parallel_nfsp_common.kemps_horizon_cutoff). It is not treated as terminal:
@@ -66,7 +65,7 @@ Every checkpoint file holds the flax params, without a seed axis, of an
 ActorCriticDiscreteMLP(action_dim=env.num_actions, hidden_dim=fc_dim_size):
 input one player's observation (env.obs_from_state(state)[p], env.obs_dim
 floats), output (logits over the actions game_action * comm_dim + signal,
-value in units of reward_scale * env reward). Mask the illegal swaps
+value in env reward units). Mask the illegal swaps
 (env.get_avail_actions(state)[p]) before the softmax; the average policy's
 value head is untrained. Load a file with run_utils.load_params(path,
 network.init(rng, obs)), or both networks of a seed with
@@ -424,7 +423,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             # actor and critic train on BR decisions whose outcome is known.
             advantages, targets, valid = per_agent_gae(
                 transitions.value,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 jnp.broadcast_to(
                     transitions.done[..., None], transitions.reward.shape
                 ),

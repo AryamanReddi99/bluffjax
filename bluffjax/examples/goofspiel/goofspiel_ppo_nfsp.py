@@ -15,7 +15,7 @@ every step, so every player makes a decision at every step of the game.
   step of its games, and its decision at step t gets its own reward of that
   step (the round's zero-sum payoff) and bootstraps from the value of its
   decision at t + 1, unless the game ends at t (see
-  parallel_nfsp_common.per_agent_gae). Training uses reward * reward_scale.
+  parallel_nfsp_common.per_agent_gae).
 - Truncation: a game the env cuts off without ending it (done without
   absorbing; Goofspiel always ends after 13 rounds, so this doesn't happen
   with the current env) would not be treated as terminal: the decisions at
@@ -56,8 +56,8 @@ Run directory, {save_dir}/{job_type}_{timestamp}/, made when the run starts
 Every checkpoint file holds the flax params, without a seed axis, of an
 ActorCriticDiscreteMLP(action_dim=13, hidden_dim=fc_dim_size): input one
 player's observation (env.obs_from_state(state)[p], env.obs_dim floats),
-output (logits over the 13 cards to bid, value in units of
-reward_scale * env reward). Mask the cards no longer in hand
+output (logits over the 13 cards to bid, value in env reward units).
+Mask the cards no longer in hand
 (env.get_avail_actions(state)[p]) before the softmax; the average policy's
 value head is untrained. Load a file with run_utils.load_params(path,
 network.init(rng, obs)), or both networks of a seed with
@@ -408,7 +408,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             # actor and critic train on BR decisions whose outcome is known.
             advantages, targets, valid = per_agent_gae(
                 transitions.value,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 jnp.broadcast_to(
                     transitions.done[..., None], transitions.reward.shape
                 ),

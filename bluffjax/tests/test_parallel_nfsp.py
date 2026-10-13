@@ -489,7 +489,7 @@ def tiny_config(name, **extra):
     config = dict(
         num_envs=16, num_steps_per_env_per_update=16, num_epochs=2,
         num_minibatches=2, lr=2.5e-4, anneal_lr=True, gamma=1.0,
-        max_grad_norm=0.5, reward_scale=0.1 if game == "goofspiel" else 1.0,
+        max_grad_norm=0.5,
         fc_dim_size=16, anticipatory_eta=0.3, sl_reservoir_capacity=200,
         sl_batch_size=32, sl_num_steps_per_update=2, sl_lr=3e-4,
         env_name=game, seed=0, num_seeds=2,
@@ -631,8 +631,8 @@ def test_real_run_mixing_targets_and_reservoir(common, monkeypatch, tmp_path, na
                 total = sum(row[f"{k}_rate_{who}_vs_random"] for k in ("win", "loss", "draw"))
                 assert total == pytest.approx(1.0)
     # the per-game returns logged for the games that ended in each update, by
-    # the policy the agent followed, are the env's (rewards were scaled)
-    env_rewards = rewards / np.float32(config["reward_scale"])
+    # the policy the agent followed, are the env's
+    env_rewards = rewards
     game_return = np.zeros_like(env_rewards)
     acc = np.zeros(env_rewards.shape[1:], np.float64)
     for t in range(len(done)):

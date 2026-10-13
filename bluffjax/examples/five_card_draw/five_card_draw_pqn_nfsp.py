@@ -50,6 +50,7 @@ import datetime
 import time
 from typing import Callable, NamedTuple
 
+import flax.linen as nn
 from flax.training.train_state import TrainState
 import hydra
 import jax
@@ -82,6 +83,7 @@ from bluffjax.networks.mlp import (
     ActorDiscreteMLP,
     QNetworkDiscreteMLP,
 )
+from bluffjax.networks.scaled_input import ScaledInput
 from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
@@ -90,6 +92,17 @@ WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
 RESULTS_LOG: ResultsLog | None = None
 # EVALUATIONS[seed] = [(env_steps, {metric: value}), ...]
 EVALUATIONS: dict[int, list[tuple[int, dict[str, float]]]] = {}
+
+
+def chip_scaled(net: nn.Module, env: Any) -> nn.Module:
+    """`net` applied to the observation with its two chip counts (the acting
+    player's chips in the pot and the largest chips in the pot, features 52
+    and 53, raw chips up to init_chips) divided by init_chips, as No-Limit
+    Hold'em does; the other features are 0/1. Every use of the networks,
+    training, evaluation and checkpoints alike, goes through this."""
+    return ScaledInput(
+        net=net, start=env.deck_size, stop=env.deck_size + 2, factor=1.0 / env.init_chips
+    )
 
 
 class Transition(NamedTuple):
@@ -409,11 +422,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     num_half = half_update_steps(config["num_update_steps"])
     game_metrics = make_metrics("five_card_draw", env)
 
-    br_network = QNetworkDiscreteMLP(
-        action_dim=action_dim, hidden_dim=config["fc_dim_size"]
+    br_network = chip_scaled(
+        QNetworkDiscreteMLP(action_dim=action_dim, hidden_dim=config["fc_dim_size"]),
+        env,
     )
-    avg_network = ActorDiscreteMLP(
-        action_dim=action_dim, hidden_dim=config["fc_dim_size"]
+    avg_network = chip_scaled(
+        ActorDiscreteMLP(action_dim=action_dim, hidden_dim=config["fc_dim_size"]),
+        env,
     )
 
     compare_enabled = config["compare"]
@@ -440,8 +455,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 f"compare_network_type must be one of {list(baseline_networks)}, "
                 f"got {compare_network_type!r}"
             )
-        baseline_network = baseline_networks[compare_network_type](
-            action_dim=action_dim, hidden_dim=config["fc_dim_size"]
+        baseline_network = chip_scaled(
+            baseline_networks[compare_network_type](
+                action_dim=action_dim, hidden_dim=config["fc_dim_size"]
+            ),
+            env,
         )
         template = baseline_network.init(
             jax.random.PRNGKey(0), jnp.zeros((env.obs_dim,), dtype=jnp.float32)
@@ -574,7 +592,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         br_lr = linear_decay if config["anneal_lr"] else config["lr"]
         br_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.radam(learning_rate=br_lr),
+            optax.adam(learning_rate=br_lr),
         )
         avg_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
@@ -986,13 +1004,14 @@ def save_checkpoints(
     load_params(path, template), where template = network.init(rng, obs). The
     networks map the acting player's observation (env.obs_from_state(state),
     env.obs_dim = 57 + 6 * num_agents floats) to:
-        avg_policy (NFSP's output strategy): ActorDiscreteMLP(action_dim=37,
-            hidden_dim=fc_dim_size) -> action logits; load it as an
+        avg_policy (NFSP's output strategy): chip_scaled(ActorDiscreteMLP(
+            action_dim=37, hidden_dim=fc_dim_size), env) -> action logits; load it as an
             evaluation baseline with compare_network_type=actor.
-        br: QNetworkDiscreteMLP(action_dim=37, hidden_dim=fc_dim_size) ->
-            Q-values in chips; its policy is the argmax over legal actions
+        br: chip_scaled(QNetworkDiscreteMLP(action_dim=37,
+            hidden_dim=fc_dim_size), env) -> Q-values in chips; its policy is the argmax over legal actions
             (compare_network_type=q_network).
-    Mask illegal actions (env.get_avail_actions(state)) before the softmax or
+    (chip_scaled puts the parameters under "net".) Mask illegal actions
+    (env.get_avail_actions(state)) before the softmax or
     argmax.
     """
     for stage, checkpoint in (("half", half), ("full", full)):

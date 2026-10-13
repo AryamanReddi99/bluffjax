@@ -17,10 +17,6 @@ vf_clip: 4.0  # 0.2 x the std of a game's return under random play (reward units
 ent_coef: 0.0  # as in the paper and the Leduc/Hold'em configs
 vf_coef: 1.0
 max_grad_norm: 0.5
-# judgement call: the env pays prize values (1-13 per round, a game's return
-# is the point difference, std ~19 points under random play); train in tens
-# of points so that returns are O(1) next to vf_clip and max_grad_norm
-reward_scale: 1.0
 
 # Shared network architecture
 fc_dim_size: 128

@@ -24,8 +24,7 @@ masked with env.get_avail_actions (a game action is legal with every signal).
   player is credited with its team's outcome. The lambda-trace runs through
   decisions taken by the epsilon-greedy BR (Peng's Q(lambda), as in PQN) and
   is cut at average-policy decisions, so those give one-step Q-learning
-  targets (see parallel_nfsp_common.per_agent_q_lambda_targets). Training
-  uses reward * reward_scale.
+  targets (see parallel_nfsp_common.per_agent_q_lambda_targets).
 - Truncation: a hand cut off at the env horizon is not over (the env sets
   absorbing on the cut-off too, so it is recognised by
   parallel_nfsp_common.kemps_horizon_cutoff). It is not treated as terminal:
@@ -73,8 +72,8 @@ player's observation (env.obs_from_state(state)[p], env.obs_dim floats):
         hidden_dim=fc_dim_size) -> logits over the actions
         game_action * comm_dim + signal;
     br: QNetworkDiscreteMLP(action_dim=env.num_actions,
-        hidden_dim=fc_dim_size) -> Q-values of those actions in units of
-        reward_scale * env reward (the BR's policy is the argmax over the
+        hidden_dim=fc_dim_size) -> Q-values of those actions in env reward
+        units (the BR's policy is the argmax over the
         legal actions).
 Mask the illegal swaps (env.get_avail_actions(state)[p]) before the softmax
 or argmax. Load a file with run_utils.load_params(path,
@@ -445,7 +444,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             # trains the Q-network; the trace is cut at average-policy decisions.
             targets, valid = per_agent_q_lambda_targets(
                 transitions.q_max,
-                transitions.reward * config["reward_scale"],
+                transitions.reward,
                 jnp.broadcast_to(
                     transitions.done[..., None], transitions.reward.shape
                 ),

@@ -47,6 +47,7 @@ import time
 from typing import Callable, NamedTuple
 
 import distrax
+import flax.linen as nn
 from flax.training.train_state import TrainState
 import hydra
 import jax
@@ -79,6 +80,7 @@ from bluffjax.networks.mlp import (
     ActorDiscreteMLP,
     QNetworkDiscreteMLP,
 )
+from bluffjax.networks.scaled_input import ScaledInput
 from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
@@ -87,6 +89,17 @@ WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
 RESULTS_LOG: ResultsLog | None = None
 # EVALUATIONS[seed] = [(env_steps, {metric: value}), ...]
 EVALUATIONS: dict[int, list[tuple[int, dict[str, float]]]] = {}
+
+
+def chip_scaled(net: nn.Module, env: Any) -> nn.Module:
+    """`net` applied to the observation with its two chip counts (the acting
+    player's chips in the pot and the largest chips in the pot, features 52
+    and 53, raw chips up to init_chips) divided by init_chips, as No-Limit
+    Hold'em does; the other features are 0/1. Every use of the networks,
+    training, evaluation and checkpoints alike, goes through this."""
+    return ScaledInput(
+        net=net, start=env.deck_size, stop=env.deck_size + 2, factor=1.0 / env.init_chips
+    )
 
 
 class Transition(NamedTuple):
@@ -410,8 +423,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
     # The average policy uses the same actor-critic module so that both
     # networks are evaluated the same way; only its actor is trained.
-    network = ActorCriticDiscreteMLP(
-        action_dim=action_dim, hidden_dim=config["fc_dim_size"]
+    network = chip_scaled(
+        ActorCriticDiscreteMLP(action_dim=action_dim, hidden_dim=config["fc_dim_size"]),
+        env,
     )
 
     compare_enabled = config["compare"]
@@ -438,8 +452,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 f"compare_network_type must be one of {list(baseline_networks)}, "
                 f"got {compare_network_type!r}"
             )
-        baseline_network = baseline_networks[compare_network_type](
-            action_dim=action_dim, hidden_dim=config["fc_dim_size"]
+        baseline_network = chip_scaled(
+            baseline_networks[compare_network_type](
+                action_dim=action_dim, hidden_dim=config["fc_dim_size"]
+            ),
+            env,
         )
         template = baseline_network.init(
             jax.random.PRNGKey(0), jnp.zeros((env.obs_dim,), dtype=jnp.float32)
@@ -1026,8 +1043,8 @@ def save_checkpoints(
     run "{seed}_{i}"). Each file holds the flax params of one network, without
     a seed axis, written with flax.serialization.to_bytes; restore one with
     load_params(path, template), where template = network.init(rng, obs).
-    Both networks are ActorCriticDiscreteMLP(action_dim=37,
-    hidden_dim=fc_dim_size), mapping the acting player's observation
+    Both networks are chip_scaled(ActorCriticDiscreteMLP(action_dim=37,
+    hidden_dim=fc_dim_size), env) (parameters under "net"), mapping the acting player's observation
     (env.obs_from_state(state), env.obs_dim = 57 + 6 * num_agents floats) to
     (action logits, value in chips); the value head of the average policy is
     unused. Mask illegal actions (env.get_avail_actions(state)) before the

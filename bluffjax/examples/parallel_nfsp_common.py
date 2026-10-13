@@ -297,11 +297,11 @@ def save_checkpoints(
     network.init(rng, obs). The networks map one agent's observation
     (env.obs_from_state(state)[agent], env.obs_dim floats) to:
         PPO-NFSP: both ActorCriticDiscreteMLP(action_dim, fc_dim_size) ->
-            (action logits, value in units of reward_scale * env reward); the
+            (action logits, value in env reward units); the
             average policy's value head is unused.
         PQN-NFSP: average policy ActorDiscreteMLP(action_dim, fc_dim_size) ->
             action logits; BR QNetworkDiscreteMLP(action_dim, fc_dim_size) ->
-            Q-values in units of reward_scale * env reward (its policy is the
+            Q-values in env reward units (its policy is the
             argmax over legal actions).
     action_dim is env.num_actions; mask illegal actions
     (env.get_avail_actions(state)[agent]) before the softmax or argmax. As an

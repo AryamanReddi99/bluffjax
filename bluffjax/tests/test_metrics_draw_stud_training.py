@@ -295,12 +295,14 @@ def test_results_log_half_checkpoint_and_round_trip(monkeypatch, tmp_path, name)
     obs = jnp.zeros((env.obs_dim,))
     A, H = env.action_space().n, config["fc_dim_size"]
     assert A == (37 if _game(name) == "five_card_draw" else 4)
+    # 5-Card Draw wraps every network in its chip scaling (parameters under "net")
+    wrap = (lambda net: mod.chip_scaled(net, env)) if _game(name) == "five_card_draw" else (lambda net: net)
     if "ppo" in name:
-        avg_net = br_net = ActorCriticDiscreteMLP(A, H)
-        wrong = QNetworkDiscreteMLP(A, H)
+        avg_net = br_net = wrap(ActorCriticDiscreteMLP(A, H))
+        wrong = wrap(QNetworkDiscreteMLP(A, H))
     else:
-        avg_net, br_net = ActorDiscreteMLP(A, H), QNetworkDiscreteMLP(A, H)
-        wrong = ActorCriticDiscreteMLP(A, H)
+        avg_net, br_net = wrap(ActorDiscreteMLP(A, H)), wrap(QNetworkDiscreteMLP(A, H))
+        wrong = wrap(ActorCriticDiscreteMLP(A, H))
     templates = {"avg_policy": avg_net.init(KEY, obs), "br": br_net.init(KEY, obs)}
     for stage, ckpt in (("half", full.half), ("full", full_ckpt)):
         for net, params in (("avg_policy", ckpt.avg_params), ("br", ckpt.br_params)):
@@ -315,8 +317,14 @@ def test_results_log_half_checkpoint_and_round_trip(monkeypatch, tmp_path, name)
     with pytest.raises(ValueError):
         load_params(
             checkpoint_path(run_dir, "full", "avg_policy", 0),
-            type(avg_net)(A, 2 * H).init(KEY, obs),
+            wrap((ActorCriticDiscreteMLP if "ppo" in name else ActorDiscreteMLP)(A, 2 * H)).init(KEY, obs),
         )
+    if _game(name) == "five_card_draw":  # an unscaled network doesn't load
+        with pytest.raises(ValueError):
+            load_params(
+                checkpoint_path(run_dir, "full", "avg_policy", 0),
+                (ActorCriticDiscreteMLP if "ppo" in name else ActorDiscreteMLP)(A, H).init(KEY, obs),
+            )
 
     # a saved network as the evaluation opponent (compare_mode=checkpoint)
     network_type = "actor_critic" if "ppo" in name else "actor"
@@ -374,3 +382,30 @@ def test_main_writes_the_run_directory(monkeypatch, tmp_path, name):
         assert sorted(os.listdir(os.path.join(run_dir, stage))) == [
             "avg_policy_0.msgpack", "avg_policy_1.msgpack", "br_0.msgpack", "br_1.msgpack"
         ]
+
+
+@pytest.mark.parametrize("name", ["five_card_draw_ppo_nfsp", "five_card_draw_pqn_nfsp"])
+def test_five_card_draw_networks_see_chips_divided_by_the_stack(name):
+    """chip_scaled divides exactly the two chip counts of the observation (the
+    acting player's chips in the pot and the largest) by init_chips."""
+    import flax.linen as nn
+
+    class Identity(nn.Module):
+        @nn.compact
+        def __call__(self, x):
+            return x
+
+    mod = _script(name)
+    env = make("five_card_draw", num_agents=3, init_chips=80)
+    state, obs = env.reset(KEY)
+    # put 7 chips in for the player to act and 30 for another
+    current = int(state.current_player_idx)
+    other = (current + 1) % 3
+    state = state.replace(chips_in=state.chips_in.at[current].set(7).at[other].set(30))
+    obs = env.obs_from_state(state)
+    net = mod.chip_scaled(Identity(), env)
+    out = net.apply(net.init(KEY, obs), obs)
+    np.testing.assert_allclose(np.asarray(obs[52:54]), [7.0, 30.0])
+    np.testing.assert_allclose(np.asarray(out[52:54]), [7.0 / 80, 30.0 / 80])
+    keep = np.r_[0:52, 54 : env.obs_dim]
+    np.testing.assert_array_equal(np.asarray(out)[keep], np.asarray(obs)[keep])
