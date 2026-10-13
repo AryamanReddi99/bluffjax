@@ -559,7 +559,13 @@ def summarize(results: list[MatchResult]) -> dict[str, float]:
 
 
 def save_checkpoint(path: str, params, meta: dict) -> str:
-    """Write params to path (.msgpack) and the model/search config next to it."""
+    """Write params to path (.msgpack) and the model/search config next to it.
+
+    The metadata goes to the same path with .json instead of .msgpack. A
+    ReBeL run saves {run_dir}/{stage}/value_net_{i}.msgpack (+ value_net_{i}.json),
+    stage half or full and i the seed index, always 0 (one seed per process),
+    see holdem_rebel/train.py.
+    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "wb") as f:
         f.write(serialization.to_bytes(params))
@@ -578,7 +584,15 @@ def load_rebel(
     solve_chunk: int = 32,
     by_street: bool = True,
 ) -> tuple[RebelPlayer, Any, dict]:
-    """Load a ReBeL checkpoint as (player, params, meta). Fails loudly."""
+    """Load a ReBeL checkpoint as (player, params, meta). Fails loudly.
+
+    path is a value network file written by save_checkpoint, with its
+    metadata next to it: for a ReBeL run (holdem_rebel/train.py),
+    {run_dir}/half/value_net_0.msgpack or {run_dir}/full/value_net_0.msgpack
+    (value_net_{i}, i the seed index, always 0: one seed per process), with
+    value_net_0.json alongside. cfr_iters, if given, overrides the CFR
+    iterations per subgame of the metadata (those of training).
+    """
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"ReBeL checkpoint not found: '{path}'")
     meta_file = _meta_path(path)
