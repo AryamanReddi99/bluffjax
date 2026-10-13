@@ -304,3 +304,39 @@ def test_rebel_run_log_metrics_and_checkpoints(game_name, tmp_path):
     assert metas["half"]["samples"] == first_half
     assert metas["full"]["samples"] == samples[-1]
     assert sorted(os.listdir(run_dir)) == ["config.yaml", "full", "half", "results.jsonl"]
+
+
+@pytest.mark.parametrize("name", ["hul_pqn_nfsp", "hunl_ppo_nfsp"])
+def test_eval_nfsp_reads_the_run_directory(name, monkeypatch, tmp_path):
+    """holdem_rebel/eval_nfsp.py plays the average policies of half/ or
+    full/ against a ReBeL value network file with its metadata."""
+    import json
+
+    from bluffjax.examples.holdem_rebel import eval_nfsp
+    from bluffjax.examples.holdem_rebel.agent import save_checkpoint
+    from bluffjax.examples.holdem_rebel.cards import NUM_HANDS
+    from bluffjax.examples.holdem_rebel.game import PUBLIC_DIM, make_game
+    from bluffjax.examples.holdem_rebel.solver import ValueNetwork
+
+    mod = _module(name)
+    config = tiny_config(name, tmp_path, num_update_steps=2, compare=False)
+    run_dir, full = run(mod, config, monkeypatch)
+    mod.save_checkpoints(
+        run_dir, 2, full.half,
+        mod.Checkpoint(full.avg_train_state.params, full.br_train_state.params),
+    )
+    game = make_game(name.split("_")[0])
+    params = ValueNetwork(16, 1).init(KEY, jnp.zeros((PUBLIC_DIM,)), jnp.zeros((2, NUM_HANDS)))
+    rebel_path = save_checkpoint(
+        str(tmp_path / "rebel" / "full" / "value_net.msgpack"), params,
+        {"game": game.name, "max_raises": game.max_raises, "value_hidden_dim": 16,
+         "value_num_layers": 1, "cfr_iters": 2, "samples": 0, "seed": 0},
+    )
+    for stage in ("half", "full"):
+        eval_nfsp.main(run_dir, rebel_path, 2, 2, stage)
+        with open(os.path.join(run_dir, f"eval_vs_rebel_{stage}.json")) as f:
+            summary = json.load(f)
+        assert summary["stage"] == stage and len(summary["per_seed"]) == 2
+        assert all(r["hands"] == 4 and r["unfinished"] == 0 for r in summary["per_seed"])
+    with pytest.raises(ValueError):
+        eval_nfsp.main(run_dir, rebel_path, 2, 2, "quarter")
