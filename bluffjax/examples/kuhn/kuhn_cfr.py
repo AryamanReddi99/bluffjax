@@ -7,9 +7,11 @@ CFR learns a Nash equilibrium by iteratively:
 3. Updating cumulative regrets and cumulative policy
 
 The average policy converges to a Nash equilibrium. Its exact exploitability
-(the OpenSpiel-compatible metric of kuhn_exploitability) and the exact Kuhn
-policy metrics (bluffjax.metrics.kuhn_poker) are logged before the first
-iteration (uniform policy), every log_interval iterations and after the last.
+(the OpenSpiel-compatible metric of kuhn_exploitability), its exact expected
+return per hand against uniformly random play averaged over both seats
+(kuhn_exploitability.value_vs_random) and the exact Kuhn policy metrics
+(bluffjax.metrics.kuhn_poker) are logged before the first iteration (uniform
+policy), every log_interval iterations and after the last.
 
 CFR is deterministic, so a run has no seeds:
 
@@ -19,8 +21,8 @@ Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
 (run_utils.make_run_dir, with config.yaml holding the flags) before running.
 Every evaluation writes one record to {run_dir}/results.jsonl (with
 seed_index 0 and wall_time), and to the wandb run with --wandb: iteration,
-exploitability and the policy metrics of the average policy, game/<name>
-(names and definitions in bluffjax.metrics.kuhn_poker).
+exploitability, value_vs_random and the policy metrics of the average policy,
+game/<name> (names and definitions in bluffjax.metrics.kuhn_poker).
 
 Checkpoints (on unless --no-save_checkpoints):
     {run_dir}/half/average_policy.msgpack  average strategy after
@@ -59,6 +61,7 @@ from bluffjax.utils.game_utils.kuhn_exploitability import (
     get_legal_actions,
     get_current_player,
     exploitability,
+    value_vs_random,
 )
 from bluffjax.utils.paths import REPO_ROOT
 
@@ -261,7 +264,7 @@ def run_cfr(
         alternating_updates: If True, alternate updates between players (faster convergence).
         log_interval: Log exploitability every this many iterations.
         results_log: if given, every evaluation is logged to it (iteration,
-            exploitability and the game/ policy metrics).
+            exploitability, value_vs_random and the game/ policy metrics).
 
     Returns:
         CFRResult: the average policy after all iterations, the
@@ -291,6 +294,7 @@ def run_cfr(
                 {
                     "iteration": it,
                     "exploitability": expl,
+                    "value_vs_random": value_vs_random(avg_policy),
                     **prefixed("game", policy_metrics(policy_array(avg_policy))),
                 }
             )
@@ -381,6 +385,11 @@ def run(config: argparse.Namespace) -> str:
         final_expl = float(result.exploitability_log[-1][1])
         print("=" * 50)
         print(f"Final exploitability: {final_expl:.6f} (expected ~0 at Nash)")
+        final_value = value_vs_random(result.average_policy)
+        print(
+            f"Final value vs random: {final_value:+.6f} chips per hand (Nash "
+            f"equilibria: 1/9 + alpha/6, between 0.1111 and 0.1667)"
+        )
         if config.save_checkpoints:
             save_params(run_dir, "half", "average_policy", result.half_policy)
             save_params(run_dir, "full", "average_policy", result.full_policy)

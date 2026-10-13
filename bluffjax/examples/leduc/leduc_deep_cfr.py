@@ -34,8 +34,10 @@ is exact, over the full game tree.
 Evaluation: after iteration 1, every --eval_every iterations, after half of
 the iterations and after the last one, a policy network is trained on the
 strategy memory (its key depends only on the iteration, so evaluations don't
-change the run) and the exact exploitability of its policy and its exact
-behaviour metrics in self-play are logged, the latter as game/<name>
+change the run) and the exact exploitability of its policy, its exact
+expected return per hand against uniformly random legal play averaged over
+both seats (value_vs_random, leduc_exploitability.value_vs_random) and its
+exact behaviour metrics in self-play are logged, the latter as game/<name>
 (bluffjax.metrics.leduc_holdem: bluff rate and success, correct-fold rate,
 round-2 raise rates with and without a pair; definitions there). Every
 iteration logs the iteration count, the traversals so far and the advantage
@@ -433,6 +435,10 @@ def exploitability(policy_array: np.ndarray) -> float:
     return leduc.exploitability_from_policy_array(policy_array, leduc._KEY_TO_IDX)
 
 
+def value_vs_random(policy_array: np.ndarray) -> float:
+    return leduc.value_vs_random_from_policy_array(policy_array, leduc._KEY_TO_IDX)
+
+
 def run_deep_cfr(
     config: argparse.Namespace,
     seed_index: int = 0,
@@ -475,7 +481,10 @@ def run_deep_cfr(
                 eval_start = time.time()
             policy = solver.average_policy(policy_params)
             expl = exploitability(policy)
-            metrics.update(exploitability=expl, policy_loss=loss)
+            value = value_vs_random(policy)
+            metrics.update(
+                exploitability=expl, value_vs_random=value, policy_loss=loss
+            )
             metrics.update(log_metrics("game", policy))
             eval_seconds += time.time() - eval_start
             results["iterations"].append(it)
@@ -483,7 +492,8 @@ def run_deep_cfr(
             results["policy_loss"].append(loss)
             print(
                 f"seed index {seed_index} iteration {it:4d}: exploitability = "
-                f"{expl:.6f}, bluff rate {metrics['game/bluff_rate']:.4f}, "
+                f"{expl:.6f}, value vs random {value:+.6f}, "
+                f"bluff rate {metrics['game/bluff_rate']:.4f}, "
                 f"correct folds {metrics['game/correct_fold_rate']:.4f}",
                 flush=True,
             )

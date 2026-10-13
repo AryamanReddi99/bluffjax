@@ -17,15 +17,35 @@ acting player's perfect-recall information state).
 - Average policy: every BR decision (obs, action) is added to a reservoir
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
-- Evaluation: exact exploitability (leduc_exploitability) of the average and
-  BR policies every eval_interval updates and after the last update, and at
-  the same points the exact behaviour metrics of bluffjax.metrics.leduc_holdem
-  (bluff rate and success, correct-fold rate, round-2 raise rates with and
-  without a pair; definitions there) of the average policy in self-play as
-  game/<name> and of the BR in self-play as game_br/<name>.
+- Exact evaluation, every eval_interval updates and after the last update: the
+  exploitability (leduc_exploitability), the expected return per hand against
+  uniformly random legal play averaged over both seats
+  (leduc_exploitability.value_vs_random) and the behaviour metrics of
+  bluffjax.metrics.leduc_holdem (bluff rate and success, correct-fold rate,
+  round-2 raise rates with and without a pair; definitions there) of the
+  average policy in self-play as game/<name> and of the BR in self-play as
+  game_br/<name>, computed from their tables at every infoset.
+- Evaluation against random (compare), every compare_interval updates and
+  after the last update: the average policy and the BR (both sampled from
+  softmax(logits), the policies of the exact evaluation) each play
+  compare_episodes complete hands against uniformly random legal play, the
+  learner's position alternating between first and second to act
+  (bluffjax.examples.kuhn_leduc_eval). Its own random stream: training doesn't
+  depend on it.
 
 Units: the env pays chips per hand. Training uses reward * reward_scale, and
 logged returns and exploitability are in chips.
+
+Logged evaluation metrics (returns in chips): every compare_interval updates
+and after the last one, for the average policy (name avg_vs_random) and the BR
+(br_vs_random), win_rate_<name>, loss_rate_<name>, draw_rate_<name> (split
+pots), win_rate_decided_<name> (wins among the hands won or lost),
+avg_return_<name> (per hand) and avg_episode_length_<name> (env steps per
+hand) over compare_episodes hands each; every eval_interval updates and after
+the last one, exploitability_avg_policy, exploitability_br_policy,
+value_avg_vs_random and value_br_vs_random (the exact expectation of
+avg_return_avg_vs_random and avg_return_br_vs_random) and the game/ and
+game_br/ metrics.
 
 Run directory ({save_dir}/{job_type}_{timestamp}/, made when the run starts;
 see bluffjax.examples.run_utils):
@@ -77,6 +97,14 @@ from bluffjax.environments.leduc_holdem.leduc_holdem import (
     MAX_ACTIONS_PER_ROUND,
     LeducHoldemState,
 )
+from bluffjax.examples.kuhn_leduc_eval import (
+    eval_key,
+    format_returns,
+    is_sampled_metric,
+    maybe_vs_random_metrics,
+    softmax_policy,
+)
+from bluffjax.examples.parallel_nfsp_common import print_final_evals
 from bluffjax.examples.run_utils import (
     CHECKPOINT_STAGES,
     ResultsLog,
@@ -91,6 +119,7 @@ from bluffjax.utils.game_utils.leduc_exploitability import (
     _KEY_TO_IDX,
     exploitability_from_policy_array,
     policy_array_from_network,
+    value_vs_random_from_policy_array,
 )
 from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
@@ -99,6 +128,10 @@ WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
 RESULTS_LOG: ResultsLog | None = None  # results.jsonl and wandb, created in main()
 # EXPLOITABILITY[seed] = [(env_steps, {policy name: exploitability}), ...]
 EXPLOITABILITY: dict[int, list[tuple[int, dict[str, float]]]] = {}
+# VALUE_VS_RANDOM[seed] = [(env_steps, {policy name: exact value}), ...]
+VALUE_VS_RANDOM: dict[int, list[tuple[int, dict[str, float]]]] = {}
+# EVALUATIONS[seed] = [(env_steps, {metric: value}), ...], against random
+EVALUATIONS: dict[int, list[tuple[int, dict[str, float]]]] = {}
 
 
 class Transition(NamedTuple):
@@ -311,6 +344,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         action_dim=action_dim, hidden_dim=config["fc_dim_size"]
     )
     eval_interval = config["eval_interval"]
+    compare_enabled = config["compare"]
+    compare_interval = config["compare_interval"]
+    compare_episodes = config["compare_episodes"]
     last_update = config["num_update_steps"] - 1
     num_half = half_update_steps(config["num_update_steps"])
 
@@ -318,12 +354,19 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         frac = 1.0 - count / config["num_gradient_steps"]
         return config["lr"] * frac
 
-    def logging_callback(seed_val, metric_dict, policy_arrays) -> None:
-        """Logs the metrics; computes the exact exploitability and behaviour
-        metrics when they are due."""
+    def logging_callback(seed_val, metric_dict, policy_arrays, evaluated) -> None:
+        """Logs the metrics, those of the evaluation against random only when
+        it ran; computes the exact exploitability, value against random and
+        behaviour metrics when they are due."""
         seed_i = int(seed_val)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
         update = int(metrics["update_step"])
+        env_steps = int(metrics["env_steps"])
+        if bool(evaluated):
+            evals = {k: float(v) for k, v in metrics.items() if is_sampled_metric(k)}
+            EVALUATIONS.setdefault(seed_i, []).append((env_steps, evals))
+        else:
+            metrics = {k: v for k, v in metrics.items() if not is_sampled_metric(k)}
         if update % eval_interval == 0 or update == last_update:
             policies = {
                 name: np.asarray(arr, dtype=np.float64)
@@ -333,18 +376,33 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 name: exploitability_from_policy_array(arr, _KEY_TO_IDX)
                 for name, arr in policies.items()
             }
-            env_steps = int(metrics["env_steps"])
+            value = {
+                name: value_vs_random_from_policy_array(arr, _KEY_TO_IDX)
+                for name, arr in policies.items()
+            }
             EXPLOITABILITY.setdefault(seed_i, []).append((env_steps, expl))
+            VALUE_VS_RANDOM.setdefault(seed_i, []).append((env_steps, value))
             metrics["exploitability_avg_policy"] = expl["avg_policy"]
             metrics["exploitability_br_policy"] = expl["br_policy"]
+            metrics["value_avg_vs_random"] = value["avg_policy"]
+            metrics["value_br_vs_random"] = value["br_policy"]
             metrics.update(log_metrics("game", policies["avg_policy"]))
             metrics.update(log_metrics("game_br", policies["br_policy"]))
+            extra = (
+                f"; value vs random average policy {value['avg_policy']:+.4f}, "
+                f"BR {value['br_policy']:+.4f}"
+            )
+            if bool(evaluated):
+                extra += (
+                    f"; return per hand in {compare_episodes} hands vs random: "
+                    f"{format_returns(EVALUATIONS[seed_i][-1][1])}"
+                )
             print(
                 f"seed {seed_i} update {update + 1}/{last_update + 1} "
                 f"({env_steps} env steps): exploitability average policy "
                 f"{expl['avg_policy']:.4f}, BR {expl['br_policy']:.4f}; average "
                 f"policy bluff rate {metrics['game/bluff_rate']:.3f}, "
-                f"correct folds {metrics['game/correct_fold_rate']:.3f}",
+                f"correct folds {metrics['game/correct_fold_rate']:.3f}{extra}",
                 flush=True,
             )
         RESULTS_LOG.log(metrics, seed_i)
@@ -742,8 +800,34 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             metric.update(ppo_loss_info)
             metric.update(sl_loss_info)
 
-            # Both policies at every infoset; their exploitability is computed
-            # on the host when due.
+            # Evaluation against random: compare_episodes hands for each
+            # policy, when due, from a stream of its own (eval_key).
+            update = runner_state.update_step
+            evaluated = compare_enabled & (
+                (update % compare_interval == 0) | (update == last_update)
+            )
+            if compare_enabled:
+                metric.update(
+                    maybe_vs_random_metrics(
+                        env,
+                        {
+                            "avg_vs_random": (
+                                softmax_policy(network.apply),
+                                avg_train_state.params,
+                            ),
+                            "br_vs_random": (
+                                softmax_policy(network.apply),
+                                br_train_state.params,
+                            ),
+                        },
+                        compare_episodes,
+                        eval_key(runner_state.rng),
+                        evaluated,
+                    )
+                )
+
+            # Both policies at every infoset; their exploitability and value
+            # against random are computed on the host when due.
             policy_arrays = {
                 "avg_policy": policy_array_from_network(
                     network.apply, avg_train_state.params, _INFOSET_LIST
@@ -753,7 +837,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 ),
             }
             jax.experimental.io_callback(
-                logging_callback, None, seed, metric, policy_arrays
+                logging_callback, None, seed, metric, policy_arrays, evaluated
             )
 
             # Half-budget checkpoint: the networks after num_half updates.
@@ -813,14 +897,20 @@ def save_checkpoints(
 
 
 def print_exploitability_summary(names: list[str]) -> None:
-    """Final exploitability of every seed, and the mean over seeds."""
-    for name in names:
-        finals = [EXPLOITABILITY[s][-1][1][name] for s in sorted(EXPLOITABILITY)]
-        values = " ".join(f"{v:.4f}" for v in finals)
-        print(
-            f"final exploitability ({name}): mean {np.mean(finals):.4f} "
-            f"std {np.std(finals):.4f} over {len(finals)} seed(s): {values}"
-        )
+    """Final exploitability and value against random of every seed, and the
+    mean over seeds; the last evaluation against random."""
+    for title, log in (
+        ("exploitability", EXPLOITABILITY),
+        ("value vs random", VALUE_VS_RANDOM),
+    ):
+        for name in names:
+            finals = [log[s][-1][1][name] for s in sorted(log)]
+            values = " ".join(f"{v:.4f}" for v in finals)
+            print(
+                f"final {title} ({name}): mean {np.mean(finals):.4f} "
+                f"std {np.std(finals):.4f} over {len(finals)} seed(s): {values}"
+            )
+    print_final_evals(EVALUATIONS)
 
 
 @hydra.main(version_base=None, config_path="./", config_name="config_ppo_nfsp")
@@ -846,6 +936,8 @@ def main(config: dict) -> None:
         )
 
         run_dir = make_run_dir(config)
+        for log in (EXPLOITABILITY, VALUE_VS_RANDOM, EVALUATIONS):
+            log.clear()
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
@@ -880,10 +972,11 @@ def main(config: dict) -> None:
         print("Running...")
         start = time.time()
         final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        jax.effects_barrier()  # every logging callback has run
         run_time = time.time() - start
         print(
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "
-            f"{run_time:.1f} s (all seeds in parallel, exploitability included)"
+            f"{run_time:.1f} s (all seeds in parallel, evaluations included)"
         )
         print_exploitability_summary(["avg_policy", "br_policy"])
         if config["save_checkpoints"]:
