@@ -612,7 +612,7 @@
       <div class="sub">In pot ${chips(S.chips_in[i])}${S.remaining_chips ? ` · stack ${chips(S.remaining_chips[i])}` : ""}${extra}</div>
       <div class="hand">${handHtml}</div></div>`;
   const potLine = (S) => `<div class="row"><span class="label">Pot</span>${chips(S.chips_in.reduce((a, b) => a + b, 0))}</div>`;
-  function pokerVerb(labels, a) { return labels[a].replace(/^Call.*/, "calls").replace(/^Check/, "checks").replace(/^Fold/, "folds").replace(/^Raise (.*)/, "raises $1").replace(/^All in.*/, "goes all in").replace(/^Bet (.*)/, "bets $1"); }
+  function pokerVerb(labels, a) { return labels[a].replace(/^Bring in (.*)/, "brings in $1").replace(/^Complete to (.*)/, "completes to $1").replace(/^Call.*/, "calls").replace(/^Check/, "checks").replace(/^Fold/, "folds").replace(/^Raise (.*)/, "raises $1").replace(/^All in.*/, "goes all in").replace(/^Bet (.*)/, "bets $1"); }
 
   // ---- 5-card draw
   GAMES.five_card_draw = {
@@ -677,11 +677,18 @@
   // (slot 6); -1 = not dealt. Slots 2-5 are face up. With 8+ players a street can be dealt as one face-up
   // community card shared by everyone still in (community[street]); it is drawn in the centre.
   const STUD_UP = [false, false, true, true, true, true, false];
+  // The bring-in's first decision: 3rd street with only the antes (½ each) in. Call (0) posts the ½
+  // bring-in, raise (1) completes to 1; it can't fold or check.
+  const studBringInToAct = (S) => S.stage[0] === 0 && Math.max(...S.chips_in) <= 0.5;
   GAMES.seven_card_stud = {
     title: "7-Card Stud", who: "You vs 1 bot · limit", blurb: "Seven cards each, four of them face up. No community cards.",
     art: () => back() + back() + card52(25) + card52(38),
-    rules: `<p>Ante ½. The lowest door card (suits break ties) posts a ½ bring-in. Cards 3 to 6 are dealt face up, the 7th face down; from 4th street on, the best hand showing acts first. Best five of seven wins.</p><p>Bets are 1 on 3rd and 4th street and 2 after that, up to four raises a street; on 3rd street the first raise completes the bring-in to 1. Winnings are counted in big bets (2 chips).</p>`,
-    labels(S) { return LIMIT_LABELS(S.stage[0] >= 2 ? 2 : 1); },
+    rules: `<p>Ante ½. The lowest door card (suits break ties) is the bring-in and acts first: it brings in for ½ or completes to 1, and can't fold or check. Cards 3 to 6 are dealt face up, the 7th face down; from 4th street on, the best hand showing acts first. Best five of seven wins.</p><p>Bets are 1 on 3rd and 4th street and 2 after that, up to four raises a street. On 3rd street the first raise completes the bring-in to 1. If everyone else just calls the bring-in, 3rd street is over: the bring-in gets no option. Winnings are counted in chips.</p>`,
+    labels(S) {
+      if (studBringInToAct(S)) return ["Bring in ½", "Complete to 1", "Fold", "Check"];
+      if (S.stage[0] === 0 && S.raise_nums[0] === 0) return ["Call", "Complete to 1", "Fold", "Check"];
+      return LIMIT_LABELS(S.stage[0] >= 2 ? 2 : 1);
+    },
     render(S, ctx) {
       const reveal = ctx.reveal && showdown(S, ctx);
       const hand = (i) => STUD_UP.map((up, k) => {
@@ -690,15 +697,18 @@
         return i === 0 || up || reveal ? card52(id, { tag: up ? "" : "down" }) : back();
       }).join("");
       const community = [1, 2, 3, 4].filter((t) => S.community[t]).map((t) => card52(Math.max(...ctx.names.map((_, i) => S.agent_cards[i * 7 + t + 2]))));
-      return `<div class="seats">${pokerSeat(S, ctx, 1, hand(1), S.bring_in_idx[0] === 1 ? " · brought in" : "")}</div>
+      return `<div class="seats">${pokerSeat(S, ctx, 1, hand(1), S.bring_in_idx[0] === 1 ? " · bring-in" : "")}</div>
         <div class="center"><div class="label">${ctx.done ? "Hand over" : `${["3rd", "4th", "5th", "6th", "7th"][S.stage[0]]} street`}</div>
           ${community.length ? `<div class="row">${community.join("")}</div>` : ""}${potLine(S)}</div>
-        <div class="seats">${pokerSeat(S, ctx, 0, hand(0), S.bring_in_idx[0] === 0 ? " · brought in" : "")}</div>`;
+        <div class="seats">${pokerSeat(S, ctx, 0, hand(0), S.bring_in_idx[0] === 0 ? " · bring-in" : "")}</div>`;
     },
     controls(S, av) { return labelButtons(GAMES.seven_card_stud.labels(S), av); },
     bot(S, seat, av) {
       const ids = S.agent_cards.slice(seat * 7, seat * 7 + 7).filter((id) => id >= 0);
-      return pokerBot(av, handStrength(ids), S.chips_in[seat] < Math.max(...S.chips_in), LIMIT_MAP);
+      const s = handStrength(ids);
+      // the bring-in's first decision: complete with a pair or better (and now and then without), else bring in
+      if (studBringInToAct(S)) return av[1] && rand() < (s > 0.2 ? 0.6 : 0.1) ? 1 : 0;
+      return pokerBot(av, s, S.chips_in[seat] < Math.max(...S.chips_in), LIMIT_MAP);
     },
     log(prev, seat, a, next, ctx) { return `${ctx.names[seat]} ${pokerVerb(GAMES.seven_card_stud.labels(prev), a)}.`; },
   };
@@ -820,7 +830,7 @@
   function wireButtons(el, act) { el.querySelectorAll("[data-a]").forEach((b) => (b.onclick = () => act(+b.dataset.a))); }
   function labelButtons(labels, av) {
     return {
-      html: labels.map((l, a) => (av[a] ? `<button class="btn ${/^(Fold)/.test(l) ? "danger" : /^(Check|Call)/.test(l) ? "primary" : ""}" data-a="${a}">${esc(l)}</button>` : "")).join(""),
+      html: labels.map((l, a) => (av[a] ? `<button class="btn ${/^(Fold)/.test(l) ? "danger" : /^(Check|Call|Bring in)/.test(l) ? "primary" : ""}" data-a="${a}">${esc(l)}</button>` : "")).join(""),
       wire: wireButtons,
     };
   }
@@ -860,7 +870,7 @@
   }
   // Bots get third-person verbs; "You" needs the plain form.
   const YOU_VERBS = { calls: "call", folds: "fold", checks: "check", bets: "bet", raises: "raise", goes: "go", accuses: "accuse", votes: "vote",
-    plays: "play", draws: "draw", picks: "pick", swaps: "swap", tries: "try", empties: "empty", holds: "hold", wins: "win", is: "are", was: "were", loses: "lose" };
+    plays: "play", draws: "draw", brings: "bring", completes: "complete", picks: "pick", swaps: "swap", tries: "try", empties: "empty", holds: "hold", wins: "win", is: "are", was: "were", loses: "lose" };
   function addLog(msg) {
     if (!msg) return;
     msg = msg.replace(/\bYou (\w+)/g, (m, v) => `You ${YOU_VERBS[v] ?? v}`);

@@ -689,9 +689,9 @@
    }
   ],
   "bytes": {
-   "reset": 46990,
-   "step": 199955,
-   "avail": 6010
+   "reset": 42761,
+   "step": 200353,
+   "avail": 5476
   }
  },
  "texas_limit_holdem": {

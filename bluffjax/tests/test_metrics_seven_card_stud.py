@@ -39,7 +39,8 @@ def _setup(n: int):
 def table(n: int, deck_names: str):
     """Start of a hand dealt from a deck that begins with deck_names: player p
     gets cards 3p, 3p + 1 (hole) and 3p + 2 (door), and each later street
-    goes to the players still in, clockwise from the bring-in's left."""
+    goes to the players still in, clockwise from the bring-in's left. The
+    antes are in and the bring-in is to act (post or complete)."""
     env = _setup(n)[0]
     first = [c(x) for x in deck_names.split()]
     deck = first + [x for x in range(52) if x not in first]
@@ -51,8 +52,7 @@ def table(n: int, deck_names: str):
         deck=deck,
         agent_cards=jnp.full((n, 7), -1, jnp.int32).at[:, :3].set(deck[: 3 * n].reshape(n, 3)),
         bring_in_idx=jnp.int32(bring_in),
-        chips_in=jnp.full(n, 0.5).at[bring_in].add(0.5),
-        current_player_idx=jnp.int32((bring_in + 1) % n),
+        current_player_idx=jnp.int32(bring_in),
     )
 
 
@@ -101,8 +101,9 @@ class Play:
         )
 
 
-# Heads-up deals: player 0 has the 2c door card and brings in, player 1 acts
-# first on 3rd street; later streets go to player 1, then player 0.
+# Heads-up deals: player 0 has the 2c door card and is the bring-in: it acts
+# first on 3rd street (posts or completes), then player 1; later streets go
+# to player 1, then player 0.
 FIFTH_STREET = (
     "3c 4d 2c  Kh Ks Kd"  # 3rd street: player 0, player 1
     "  5s 9h  7c 9d  8h Jc  Th Qd"  # 4th to 7th street: player 1, player 0
@@ -110,13 +111,15 @@ FIFTH_STREET = (
 
 
 def test_bluff_on_fifth_street_ends_the_hand():
-    """Player 0 pairs its board on 5th street and bets; its final hand (a
-    pair of nines) loses to player 1's kings: a bluff with the board ahead.
-    Player 1 folds: the hand ends by a fold on 5th street, the bluff succeeds
-    and the fold was not correct."""
+    """Player 0 posts the bring-in, player 1 calls (3rd street ends: no
+    option for the bring-in). Player 0 pairs its board on 5th street and
+    bets; its final hand (a pair of nines) loses to player 1's kings: a
+    bluff with the board ahead. Player 1 folds: the hand ends by a fold on
+    5th street, the bluff succeeds and the fold was not correct."""
     p = Play(2, table(2, FIFTH_STREET))
+    p.act(0, CALL)  # posts the bring-in
     p.act(1, CALL)
-    p.act(0, CHECK)
+    assert int(p.state.stage) == 1
     p.act(1, CHECK)  # 4th street: K-5 shows above 2-9
     p.act(0, CHECK)
     p.act(0, RAISE)  # 5th street: the pair of nines acts first
@@ -140,14 +143,68 @@ def test_bluff_on_fifth_street_ends_the_hand():
     assert np.isnan(rates["bluff_rate_board_not_ahead"])
 
 
+def test_the_bring_in_completes_with_a_losing_hand():
+    """The bring-in completes instead of posting: an aggressive action, a
+    steal (the first raise of 3rd street) and, with the pair of nines against
+    trip kings, a bluff, made with the board behind (the lowest door card).
+    Player 1 folds at once: steal and bluff win; the fold was not correct."""
+    p = Play(2, table(2, FIFTH_STREET))
+    assert p.act(0, RAISE) is False
+    assert p.act(1, FOLD)
+    assert p.last_reward.tolist() == [0.5, -0.5]  # the ante, in chips
+    assert p.count("aggressive") == [1, 0] and p.count("steals") == [1, 0]
+    assert p.count("steal_wins") == [1, 0]
+    assert p.count("bluffs") == [1, 0] and p.count("bluff_wins") == [1, 0]
+    assert p.count("aggressive_board_not_ahead") == [1, 0]
+    assert p.count("bluff_wins_board_not_ahead") == [1, 0]
+    assert p.count("aggressive_board_ahead") == [0, 0]
+    assert p.count("folds") == [0, 1] and p.count("correct_folds") == [0, 0]
+    assert p.street_ended() == [[3], [3]]
+
+
 # player 0: aces (brings in with the 2c); player 1: king high
 STEAL = "Ah As 2c  3h 4s Kd  6d 5h  8c 7s  Jd Tc  9s Qh"
 
 
-def test_third_street_completion_wins_immediately():
+def test_posting_the_bring_in_counts_nothing():
+    """Posting the bring-in is the forced minimum: no aggressive action, no
+    steal, and it answers nothing (the carry stays as it was). Player 1
+    folds to it: the hand ends on 3rd street without a bet or raise, so
+    there is no bluff or steal to win; the fold (king high against aces)
+    is correct."""
     p = Play(2, table(2, STEAL))
+    p.act(0, CALL)
+    assert p.carry_is_reset()
+    assert not any(v.any() for v in p.totals.values())
+    assert p.act(1, FOLD)
+    assert p.last_reward.tolist() == [0.5, -0.5]
+    for k in ("aggressive", "steals", "bluffs", "bluff_wins", "steal_wins"):
+        assert p.count(k) == [0, 0], k
+    assert p.count("folds") == [0, 1] and p.count("correct_folds") == [0, 1]
+    assert p.street_ended() == [[3], [3]]
+
+
+def test_the_bring_in_completes_and_wins_immediately():
+    """The bring-in's completion with aces: a steal, no bluff, with the
+    board behind; player 1 folds (correctly) and the steal wins."""
+    p = Play(2, table(2, STEAL))
+    p.act(0, RAISE)
+    assert p.act(1, FOLD)
+    assert p.count("steals") == [1, 0] and p.count("steal_wins") == [1, 0]
+    assert p.count("aggressive_board_not_ahead") == [1, 0]
+    assert p.count("bluffs") == [0, 0] and p.count("bluff_wins") == [0, 0]
+    assert p.count("correct_folds") == [0, 1]
+
+
+def test_third_street_completion_wins_immediately():
+    """After the bring-in posts, player 1 completes (a steal and, with king
+    high against aces, a bluff, made with the board ahead) and the bring-in
+    folds."""
+    p = Play(2, table(2, STEAL))
+    p.act(0, CALL)
     p.act(1, RAISE)  # completes the bring-in
     assert p.act(0, FOLD)
+    assert p.last_reward.tolist() == [-1.0, 1.0]
     assert p.count("steals") == [0, 1] and p.count("steal_wins") == [0, 1]
     assert p.count("bluffs") == [0, 1] and p.count("bluff_wins") == [0, 1]
     assert p.count("bluffs_board_ahead") == [0, 1]  # a king against a deuce
@@ -160,6 +217,7 @@ def test_called_steal_then_a_free_fold_is_no_success():
     could check: the hand ends without a showdown, but the steal (and bluff)
     was answered by the call."""
     p = Play(2, table(2, STEAL))
+    p.act(0, CALL)
     p.act(1, RAISE)
     p.act(0, CALL)
     p.act(1, CHECK)  # K-6 above 2-5
@@ -170,27 +228,25 @@ def test_called_steal_then_a_free_fold_is_no_success():
     assert p.street_ended() == [[4], [4]]
 
 
-def test_bring_in_raises_after_a_call():
-    """Player 1 just calls; the bring-in's raise is the first raise of 3rd
-    street: a steal (no bluff: aces win), made with the board behind."""
+@pytest.mark.parametrize("bring_in_completes", (False, True))
+def test_reraise_is_not_a_steal_and_answers_one(bring_in_completes):
+    """A raise over the completion (whoever completed) is not a steal and
+    answers the steal: the steal doesn't win when the other player folds."""
     p = Play(2, table(2, STEAL))
-    p.act(1, CALL)
-    p.act(0, RAISE)
-    assert p.act(1, FOLD)
-    assert p.count("steals") == [1, 0] and p.count("steal_wins") == [1, 0]
-    assert p.count("aggressive_board_not_ahead") == [1, 0]
-    assert p.count("bluffs") == [0, 0] and p.count("bluff_wins") == [0, 0]
-    assert p.count("correct_folds") == [0, 1]
-
-
-def test_reraise_is_not_a_steal_and_answers_one():
-    p = Play(2, table(2, STEAL))
-    p.act(1, RAISE)
-    p.act(0, RAISE)
-    assert p.act(1, FOLD)
-    assert p.count("steals") == [0, 1] and p.count("steal_wins") == [0, 0]
+    if bring_in_completes:
+        p.act(0, RAISE)
+        p.act(1, RAISE)
+        assert p.act(0, FOLD)
+        assert p.count("steals") == [1, 0] and p.count("steal_wins") == [0, 0]
+        assert p.count("bluff_wins") == [0, 1]  # king high re-raises aces: a won bluff
+    else:
+        p.act(0, CALL)
+        p.act(1, RAISE)
+        p.act(0, RAISE)
+        assert p.act(1, FOLD)
+        assert p.count("steals") == [0, 1] and p.count("steal_wins") == [0, 0]
+        assert p.count("bluff_wins") == [0, 0]  # the re-raise with aces is no bluff
     assert p.count("aggressive") == [1, 1]
-    assert p.count("bluff_wins") == [0, 0]  # the re-raise with aces is no bluff
 
 
 # player 0 makes a heart flush with the face-down 7th-street card; player 1
@@ -200,12 +256,13 @@ SHOWDOWN = "3h 5h 2c  Qs Qd Kd  7c 9h  8d Jh  Tc 4s  6s Kh"
 
 def test_showdown_and_a_bluff_against_a_hand_made_on_seventh_street():
     p = Play(2, table(2, SHOWDOWN))
+    p.act(0, CALL)
     p.act(1, RAISE)  # loses to the flush made on 7th street: a bluff
     p.act(0, CALL)
     for _ in range(4):  # 4th to 7th street: the king high board acts first
         p.act(1, CHECK)
         done = p.act(0, CHECK)
-    assert done and p.last_reward[0] > 0
+    assert done and p.last_reward.tolist() == [1.5, -1.5]  # chips
     assert p.count("showdowns") == [1, 1] and p.count("hands") == [1, 1]
     assert p.street_ended() == [[], []]
     assert p.count("bluffs") == [0, 1] and p.count("bluffs_board_ahead") == [0, 1]
@@ -226,9 +283,10 @@ THREE = (
 
 
 def test_three_players_final_hands_at_the_time_of_the_action():
-    """Player 1's completion (pair of queens) loses to player 0's flush in
-    the deal with all three in: a bluff, although after player 2's fold
-    player 1 would have won. Player 2's fold is correct (jack high). On 4th
+    """Player 0 posts the bring-in. Player 1's completion (pair of queens)
+    loses to player 0's flush in the deal with all three in: a bluff,
+    although after player 2's fold player 1 would have won. Player 2's fold
+    is correct (jack high). Player 0 calls, which ends 3rd street. On 4th
     street player 0 (now jack high against queens) bluffs with the board
     behind and player 1 folds."""
     env = _setup(3)[0]
@@ -236,15 +294,17 @@ def test_three_players_final_hands_at_the_time_of_the_action():
     hands = np.asarray(final_hands(env, state))
     assert [best_hand(h)[0] for h in hands.tolist()] == [6, 2, 1]  # flush, pair, high
     p = Play(3, state)
+    p.act(0, CALL)
     p.act(1, RAISE)
     p.act(2, FOLD)
     p.act(0, CALL)
+    assert int(p.state.stage) == 1
     after_fold = np.asarray(final_hands(env, p.state))
     assert best_hand(after_fold[1].tolist()) > best_hand(after_fold[0].tolist())
     p.act(1, CHECK)  # 4th street: K-7 shows above 2-9
     p.act(0, RAISE)
     assert p.act(1, FOLD)
-    assert p.last_reward[0] > 0
+    assert p.last_reward.tolist() == [2.0, -1.5, -0.5]  # chips
     assert p.count("aggressive") == [1, 1, 0]
     assert p.count("bluffs") == [1, 1, 0]
     assert p.count("bluffs_board_ahead") == [0, 1, 0]
@@ -259,25 +319,29 @@ def test_three_players_final_hands_at_the_time_of_the_action():
 
 
 def test_carry_resets_between_hands():
-    """A hand ends with player 0's successful bluff; in the next hand (the
-    env's auto-reset deal) player 0 brings in and the first player folds at
-    once: no stale bluff or steal win for player 0."""
+    """A hand ends with the bring-in's (player 0's) successful completion, a
+    bluff and a steal: the carry is back to its initial value. In the next
+    hand (the env's auto-reset deal) player 0 is the bring-in again, posts,
+    and player 1 folds at once: player 0 wins without a bet or raise, so no
+    further bluff or steal is counted or won."""
     env = _setup(2)[0]
     # a key whose reset deal makes player 0 the bring-in again
     key = next(
         k for k in map(jax.random.PRNGKey, range(100))
         if int(env.reset(jax.random.split(k)[1])[0].bring_in_idx) == 0
     )
-    p = Play(2, table(2, STEAL))
-    p.act(1, CALL)
+    p = Play(2, table(2, FIFTH_STREET))
     p.act(0, RAISE)
     assert p.act(1, FOLD, key=key)
+    assert p.count("bluff_wins") == [1, 0] and p.count("steal_wins") == [1, 0]
     assert p.carry_is_reset()
     before = {k: v.copy() for k, v in p.totals.items()}
-    assert int(p.state.bring_in_idx) == 0
+    assert int(p.state.bring_in_idx) == 0 and int(p.state.current_player_idx) == 0
+    p.act(0, CALL)
+    assert p.carry_is_reset()
     assert p.act(1, FOLD)
     assert p.last_reward[0] > 0
-    for k in ("bluff_wins", "steal_wins", "aggressive", "steals"):
+    for k in ("bluffs", "bluff_wins", "steal_wins", "aggressive", "steals"):
         np.testing.assert_array_equal(p.totals[k], before[k], err_msg=k)
     assert p.count("hands") == [2, 2]
     assert p.street_ended() == [[3, 3], [3, 3]]
@@ -376,7 +440,11 @@ def reference_counts(n, states, actions, raws, dones):
             elif a == FOLD:
                 out["folds"][t, e, p] = 1
                 out["correct_folds"][t, e, p] = loses
-            else:
+            elif stage == 0 and a == CALL and max(s.chips_in) == 0.5:
+                # the bring-in posts, the forced minimum: neither aggressive
+                # nor a call; the hand's first action, so there is no bet yet
+                assert aggressor is None and p == int(s.bring_in_idx)
+            else:  # a call or check answers the last bet or raise
                 aggressor = None
             if dones[t, e]:
                 left = [q for q in range(n) if not raws.folded[t, e][q]]
@@ -400,6 +468,10 @@ def test_counts_match_plain_python_replay(n, envs, steps):
     ref = reference_counts(n, states, actions, raws, dones)
     for k, v in ref.items():
         np.testing.assert_array_equal(counts[k], v, err_msg=k)
+    # steals by the bring-in (completing instead of posting) and by others
+    steal = (actions == RAISE) & (states.stage == 0) & (states.raise_nums[..., 0] == 0)
+    by_bring_in = states.current_player_idx == states.bring_in_idx
+    assert (steal & by_bring_in).any() and (steal & ~by_bring_in).any()
     totals = {k: v.sum() for k, v in ref.items()}
     for k in ("bluff_wins_board_ahead", "bluff_wins_board_not_ahead", "correct_folds",
               "showdowns", "steals"):
@@ -462,12 +534,14 @@ def test_final_hands_are_the_showdown_hands(n):
     assert checked > 100
 
 
-def p_fold_on_street(facing: bool) -> float:
+def p_fold_on_street(third: bool) -> float:
     """Heads-up, uniform random legal actions: probability that a betting
-    round ends with a fold. It starts facing the bring-in (3rd street) or
-    with equal chips (later streets); at most 4 raises per street."""
+    round ends with a fold, at most 4 raises per street. On 3rd street the
+    bring-in first posts the bring-in or completes (probability 1/2 each; it
+    can't fold or check) and the other player then faces that bet (the
+    bring-in has no option); later streets start with equal chips."""
 
-    def p(facing, acted, raises):  # acted: players who called or checked since the last raise
+    def p(facing, acted, raises):  # acted: players who bet, called or checked since the last bet
         legal = ["fold", "call" if facing else "check"] + (["raise"] if raises < 4 else [])
         total = 0.0
         for a in legal:
@@ -479,13 +553,16 @@ def p_fold_on_street(facing: bool) -> float:
                 total += p(False, acted + 1, raises)
         return total / len(legal)
 
-    return p(facing, 0, 0)
+    if third:  # posted (no raise yet) or completed (the first raise)
+        return (p(True, 1, 0) + p(True, 1, 1)) / 2
+    return p(False, 0, 0)
 
 
 def test_uniform_random_play_values():
     """Heads-up uniform random play: the street on which a hand ends follows
     from the betting rounds alone (exact probabilities below); a first raise
-    on 3rd street is answered by fold, call or raise, so steal_success = 1/3;
+    on 3rd street (the bring-in's completion, or a completion after it
+    posted) is answered by fold, call or raise, so steal_success = 1/3;
     a bluff succeeds when the opponent folds at once, with probability 1/3,
     or 1/2 after the 4th raise of a street (no raise left)."""
     env, gm = _setup(2)[:2]

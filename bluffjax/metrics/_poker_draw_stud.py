@@ -1,7 +1,10 @@
 """Poker definitions shared by the 5-Card Draw and 7-Card Stud metrics.
 
-- Aggressive action: a bet or raise of any size. Antes, blinds and the Stud
-  bring-in are forced and not actions; completing the bring-in is a raise.
+- Aggressive action: a bet or raise of any size. Antes and blinds are forced
+  and not actions. In Stud the bring-in player's first decision is to post
+  the bring-in or complete: posting is the forced minimum and is neither an
+  aggressive action nor a call; completing the bring-in (by the bring-in
+  player, or by a later player after it posted) is a raise.
 - Would lose at showdown (at the time of an action): the acting player's
   final hand is strictly worse, by the env's hand scorer, than the final hand
   of at least one opponent still in the hand (not folded; all-in players are

@@ -1,12 +1,16 @@
 """7-Card Stud metrics (bluffjax-metrics.md), from environment steps.
 
-Actions: 0 call, 1 raise, 2 fold, 3 check. The antes and the bring-in are
-posted at the deal; aggressive actions are the raises (action 1), which
-include completing the bring-in and the first bet of a street. Aggressive
-action, would lose at showdown, bluff and bluff success are defined in
-bluffjax.metrics._poker_draw_stud. Each rate below is numerator /
-denominator, NaN without events, and summarize() also returns the
-denominator as n_<name>.
+Actions: 0 call, 1 raise, 2 fold, 3 check. The antes are posted at the deal.
+The hand's first action is the bring-in's decision (it can't fold or check):
+call posts the bring-in, the forced minimum, which is neither an aggressive
+action nor a call (it answers no bet; nothing is counted for it), and raise
+completes to one small bet. Aggressive actions are the raises (action 1):
+completing the bring-in (by the bring-in at its first decision, or by a later
+player after the bring-in was posted), the first bet of a later street and
+every raise. Aggressive action, would lose at showdown, bluff and bluff
+success are defined in bluffjax.metrics._poker_draw_stud. Each rate below is
+numerator / denominator, NaN without events, and summarize() also returns
+the denominator as n_<name>.
 
 Final hands. The env shuffles the deck at the deal and deals each later
 street from its front to the players still in at that point (a fold changes
@@ -27,7 +31,9 @@ card alone (the scorers' exact values, computed without sorting). The
 bettor's board is ahead if it scores strictly higher than the best board
 among the opponents still in.
 
-Per action, credited to the acting player (wins to the bettor):
+Per action, credited to the acting player (wins to the bettor, counted at the
+step that ends the hand; so the counts of one update's rollout can hold the
+win of a bluff or steal made in the previous rollout):
 - bluff_rate = bluffs / aggressive.
 - bluff_success = bluff_wins / bluffs: the hand then ends without a showdown
   and the actions after the bluff were all folds.
@@ -41,9 +47,11 @@ Per action, credited to the acting player (wins to the bettor):
   aggressive_board_not_ahead, bluffs_board_not_ahead) for the others (board
   tied or behind).
 - steal_success = steal_wins / steals: a steal is the first raise on 3rd
-  street (raise count of 3rd street 0 before it: the completion of the
-  bring-in, or the bring-in's own raise when everyone just called it); it
-  wins if every other player then folds before anyone calls or raises.
+  street (raise count of 3rd street 0 before it), i.e. the completion of the
+  bring-in, by the bring-in player instead of posting or by a later player
+  after it posted (the bring-in has no option, so it never raises a bring-in
+  that everyone just called); it wins if every other player then folds
+  before anyone calls or raises.
 
 Per hand, credited to every player (all are dealt in), counted at the step
 that ends the hand:
@@ -160,6 +168,9 @@ class Metrics(GameMetrics):
         in_hand = ~state.folded
         others = in_hand & (jnp.arange(n) != player)
 
+        # Posting the bring-in (CALL at the hand's first action) counts as
+        # nothing: not aggressive, no fold, and as no bet is open before it,
+        # the carry has no aggressor that it could answer.
         aggressive = action == RAISE
         fold = action == FOLD
         scores = jax.vmap(_score_seven_card_hand)(

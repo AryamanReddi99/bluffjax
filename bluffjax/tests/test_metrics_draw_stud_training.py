@@ -158,17 +158,39 @@ def _metric_keys(name: str) -> set[str]:
     return {f"{prefix}/{k}" for prefix in ("game", "game_br") for k in keys}
 
 
+# 7-Card Stud success rates and their denominators. A win is counted at the
+# end of the hand and its bluff or steal at the action, so in one update a
+# hand that began in the previous rollout can add a win without its bluff
+# (the logged rate can then exceed 1); over the whole run the wins never
+# exceed the bluffs or steals.
+STUD_SUCCESS = {
+    "bluff_success": "n_bluffs",
+    "bluff_success_board_ahead": "n_bluffs_board_ahead",
+    "bluff_success_board_not_ahead": "n_bluffs_board_not_ahead",
+    "steal_success": "n_steals",
+}
+
+
 def _check_game_metrics(name: str, records: list[dict]) -> None:
     keys = _metric_keys(name)
+    stud = _game(name) == "seven_card_stud"
+    wins, events = {}, {}
     for row in records:
         assert keys <= set(row), sorted(keys - set(row))
         for key in keys:
             value = row[key]
-            stat = key.split("/", 1)[1]
+            prefix, stat = key.split("/", 1)
             if stat.startswith("n_"):
                 assert value >= 0 and value == int(value), (key, value)
             elif stat == "cards_drawn":
                 assert math.isnan(value) or 0 <= value <= 5, (key, value)
+            elif stud and stat in STUD_SUCCESS:
+                n = row[f"{prefix}/{STUD_SUCCESS[stat]}"]
+                assert math.isnan(value) == (n == 0), (key, value, n)
+                assert math.isnan(value) or value >= 0, (key, value)
+                run = (row["seed_index"], key)
+                wins[run] = wins.get(run, 0) + (0 if n == 0 else round(value * n))
+                events[run] = events.get(run, 0) + n
             else:
                 assert math.isnan(value) or 0 <= value <= 1, (key, value)
         hands = row["episodes_completed"]
@@ -181,6 +203,8 @@ def _check_game_metrics(name: str, records: list[dict]) -> None:
                         row[f"{prefix}/fold_street_{k}"] for k in range(3, 8)
                     )
                     assert total == pytest.approx(1.0, abs=1e-5)
+    for run in events:
+        assert wins[run] <= events[run], (run, wins[run], events[run])
     # the metrics see events, not only NaN
     for key in ("game/n_draws", "game/n_hands"):
         if key in keys:
