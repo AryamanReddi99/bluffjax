@@ -164,28 +164,36 @@ def test_card_removal_and_showdown_values() -> None:
 
 @pytest.mark.parametrize("name", GAMES)
 def test_polarised_river_equilibrium(name: str) -> None:
-    """Value hand vs bluff-catcher: closed-form bluff/call frequencies and values."""
+    """Value hand vs bluff-catcher: closed-form bluff/call frequencies and values.
+
+    The polarised range (value hand a, bluff b) is the big blind's, which acts
+    first on the river; the small blind holds the bluff-catcher c.
+    """
     game = G.make_game(name)
     tpl = G.build_template(game)
     a, b, c = (int(C.hand_index(jnp.array(p))) for p in ([12, 38], [2, 29], [10, 35]))
     board = jnp.array([1, 19, 34, 49, 25], jnp.int32)  # 2c 7d 9h Js Kd
-    x = jnp.zeros((2, 1326)).at[0, a].set(0.5).at[0, b].set(0.5).at[1, c].set(1.0)
+    bettor, catcher = 1, 0  # big blind, small blind
+    x = (jnp.zeros((2, 1326)).at[bettor, a].set(0.5).at[bettor, b].set(0.5)
+         .at[catcher, c].set(1.0))
     sg = SV.make_subgame(game, tpl, G.round_root(game, 3, 10.0), board, x)
+    assert int(sg.tree.actor[0]) == bettor
     sol = jax.jit(lambda s: SV.solve(game, tpl, s, _zero_net, jax.random.PRNGKey(0), 1500))(sg)
     pol = np.asarray(sol.avg_policy)
     bet = 1 if game.is_limit else game.allin_slot  # 4 chips in Limit, all-in in No-Limit
-    size = float(np.asarray(sol.tree.chips)[tpl.children[0, bet], 0]) - 10.0
+    size = float(np.asarray(sol.tree.chips)[tpl.children[0, bet], bettor]) - 10.0
     pot = 20.0
     node = tpl.internal_id[tpl.children[0, bet]]
+    assert int(sol.tree.actor[tpl.children[0, bet]]) == catcher
     assert pol[0, bet, a] > 0.99
     assert abs(pol[0, bet, b] - size / (pot + size)) < 0.01
     assert abs(pol[node, G.PASSIVE_SLOT, c] - pot / (pot + size)) < 0.01
-    posterior = np.asarray(C.normalize(x[0] * sol.avg_policy[0, bet]))[b]
+    posterior = np.asarray(C.normalize(x[bettor] * sol.avg_policy[0, bet]))[b]
     assert abs(posterior - size / (pot + 2 * size)) < 0.01
     call = pot / (pot + size)
     v = np.asarray(sol.values) * game.value_scale / game.reward_per_chip  # chips
-    assert abs(v[0, a] - (10 + call * size)) < 0.05 * (10 + call * size)
-    assert abs(v[0, b] + 10) < 0.2
+    assert abs(v[bettor, a] - (10 + call * size)) < 0.05 * (10 + call * size)
+    assert abs(v[bettor, b] + 10) < 0.2
 
 
 @pytest.mark.parametrize("name", GAMES)

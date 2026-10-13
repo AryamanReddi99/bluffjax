@@ -3,8 +3,11 @@ Behaviour metrics of Limit Hold'em (texas_limit_holdem), from env steps.
 
 The env deals the whole board in advance and draws the small blind uniformly
 at random for every hand (there is no button moving between hands); the big
-blind is the next seat. Heads-up, the small blind acts first on every street
-(the env's rule). Positions are named by seat relative to the small blind:
+blind is the next seat. The env's turn order is the standard one: heads-up
+the small blind acts first preflop and the big blind first on the flop, turn
+and river; with more players the player after the big blind acts first
+preflop, and the small blind (or the next player still in after it) on the
+later streets. Positions are named by seat relative to the small blind:
 "sb", "bb", then "pos2", "pos3", ... with more than two players. Env actions:
 0 call, 1 raise (a bet when nothing is to call), 2 fold, 3 check.
 

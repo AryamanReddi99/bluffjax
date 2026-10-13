@@ -3,8 +3,9 @@ Betting rules and search trees for heads-up Limit and No-Limit Hold'em.
 
 The rules mirror texas_limit_holdem.py and texas_nolimit_holdem.py exactly
 (the tests compare them with env.step_env), with players indexed by position:
-0 = small blind, 1 = big blind. As in the environments, the small blind acts
-first on every street.
+0 = small blind, 1 = big blind. As in the environments (standard heads-up
+rules), the small blind is the button: it acts first preflop and the big blind
+acts first on the flop, turn and river.
 
 A ReBeL subgame covers the rest of the current betting round. Its shape comes
 from a static template of action strings; the betting state, legality and the
@@ -132,6 +133,12 @@ class BetState(NamedTuple):
     allin: BoolArray  # (2,) (No-Limit)
 
 
+# Position acting first in a betting round: the small blind preflop, the big
+# blind on the flop, turn and river.
+PREFLOP_FIRST = 0
+POSTFLOP_FIRST = 1
+
+
 def preflop_root() -> BetState:
     blinds = jnp.array([1.0, 2.0])
     return BetState(
@@ -139,21 +146,24 @@ def preflop_root() -> BetState:
         round_bets=blinds,
         raises=jnp.int32(0),
         nrn=jnp.int32(0),
-        actor=jnp.int32(0),
+        actor=jnp.int32(PREFLOP_FIRST),
         street=jnp.int32(0),
         allin=jnp.zeros(2, dtype=bool),
     )
 
 
 def round_root(game: HoldemGame, street: IntArray, chips: FloatArray) -> BetState:
-    """Start of a betting round with equal contributions (preflop: blinds)."""
+    """Start of a betting round with equal contributions (preflop: blinds).
+
+    The small blind acts first preflop, the big blind on later streets.
+    """
     pre = preflop_root()
     post = BetState(
         chips=jnp.full(2, chips, dtype=jnp.float32),
         round_bets=jnp.zeros(2),
         raises=jnp.int32(0),
         nrn=jnp.int32(0),
-        actor=jnp.int32(0),
+        actor=jnp.int32(POSTFLOP_FIRST),
         street=jnp.asarray(street, jnp.int32),
         allin=jnp.full(2, chips >= game.stack),
     )

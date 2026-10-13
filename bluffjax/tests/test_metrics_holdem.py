@@ -4,7 +4,10 @@
 - scripted hands, heads-up and with three players: every event is detected,
   credited to the right player (and position / street / size), counted once,
   only at the step where the hand ends, and the carry is reset at the end of
-  a hand, also across env.step's auto-reset;
+  a hand, also across env.step's auto-reset (the env's turn order: heads-up
+  the SB acts first preflop and the BB first on the flop, turn and river;
+  with three players the seat after the BB acts first preflop and the SB on
+  later streets);
 - uniform-random play against an independent per-hand reference
   implementation of the definitions (exact counts, 2 and 3 players);
 - uniform-random heads-up play against values derived by hand or from the
@@ -152,12 +155,13 @@ SB_HAND = {"hands_by_position": {(0, 0): 1, (1, 1): 1}, "hands": {0: 1, 1: 1}}
 
 
 def test_lhe_river_bluff_succeeds(lhe):
-    """SB limps, everything is checked to the river, the SB bets the worse
-    hand and the BB folds: one river bluff, successful, by the SB; the BB's
-    fold is incorrect."""
+    """SB limps, everything is checked to the river, the BB checks the river,
+    the SB bets the worse hand and the BB folds: one river bluff, successful,
+    by the SB; the BB's fold is incorrect."""
     env, gm = lhe
     state = deal(env, 0, [MID, BEST], BOARD)
-    actions = [CALL, CHECK, CHECK, CHECK, CHECK, CHECK, RAISE, FOLD]
+    # preflop SB, BB; flop, turn and river BB, SB
+    actions = [CALL, CHECK, CHECK, CHECK, CHECK, CHECK, CHECK, RAISE, FOLD]
     counts, reward, carry, _ = play_hand(env, gm, state, actions)
     check_counts(counts, {
         **SB_HAND,
@@ -188,9 +192,11 @@ def counts_total(hands):
 
 
 def test_lhe_value_bet_and_correct_fold(lhe):
+    """As above with the SB holding the better hand: a value bet on the
+    river after the BB checks, and the BB's fold is correct."""
     env, gm = lhe
     state = deal(env, 0, [BEST, MID], BOARD)
-    actions = [CALL, CHECK, CHECK, CHECK, CHECK, CHECK, RAISE, FOLD]
+    actions = [CALL, CHECK, CHECK, CHECK, CHECK, CHECK, CHECK, RAISE, FOLD]
     counts, _, _, _ = play_hand(env, gm, state, actions)
     check_counts(counts, {
         **SB_HAND,
@@ -235,11 +241,12 @@ def test_lhe_reraise_bluff_succeeds(lhe):
 
 
 def test_lhe_called_bluff_is_no_success(lhe):
-    """A preflop bluff is called; the caller folds on the flop without facing
-    a bet. The bluffer wins uncontested, but not by the bluff."""
+    """A preflop bluff by the SB is called; the caller (the BB, first to act
+    on the flop) folds there without facing a bet. The bluffer wins
+    uncontested, but not by the bluff."""
     env, gm = lhe
     state = deal(env, 0, [MID, BEST], BOARD)
-    counts, reward, _, _ = play_hand(env, gm, state, [RAISE, CALL, CHECK, FOLD])
+    counts, reward, _, _ = play_hand(env, gm, state, [RAISE, CALL, FOLD])
     check_counts(counts, {
         **SB_HAND,
         "aggressive": {(0, PRE): 1},
@@ -278,11 +285,11 @@ def test_lhe_showdown_win_and_tie(lhe):
 
 def test_lhe_positions_follow_the_small_blind(lhe):
     """Seat 1 posts the small blind and limps, seat 0 (BB) raises, seat 1
-    calls and folds the flop."""
+    calls; on the flop seat 0 checks and seat 1 folds."""
     env, gm = lhe
     state = deal(env, 1, [BEST, MID], BOARD)
     assert int(state.current_player_idx) == 1
-    counts, _, _, _ = play_hand(env, gm, state, [CALL, RAISE, CALL, FOLD])
+    counts, _, _, _ = play_hand(env, gm, state, [CALL, RAISE, CALL, CHECK, FOLD])
     check_counts(counts, {
         "hands_by_position": {(1, 0): 1, (0, 1): 1},
         "hands": {0: 1, 1: 1},
@@ -302,7 +309,8 @@ def test_lhe_carry_resets_across_auto_reset(lhe):
     counts don't include the first's."""
     env, gm = lhe
     state = deal(env, 0, [MID, BEST], BOARD)
-    _, _, carry, state = play_hand(env, gm, state, [RAISE, RAISE, CALL] + [CHECK] * 5 + [RAISE, FOLD])
+    # raised preflop, checked to the river, the BB bets the river, the SB folds
+    _, _, carry, state = play_hand(env, gm, state, [RAISE, RAISE, CALL] + [CHECK] * 4 + [RAISE, FOLD])
     assert_initial(gm, carry)
     assert int(state.stage) == 0 and not bool(state.folded.any())  # the next hand
     sb = int(state.small_blind_idx)
@@ -450,11 +458,11 @@ def test_nlhe_allin_bluff_folded(nlhe):
 
 
 def test_nlhe_raise_sizes(nlhe):
-    """Preflop: SB pot raise, BB half-pot raise (a bluff), SB calls. Flop: SB
-    checks, BB shoves (a bluff), SB folds the better hand."""
+    """Preflop: SB pot raise, BB half-pot raise (a bluff), SB calls. Flop:
+    the BB, first to act, shoves (a bluff), SB folds the better hand."""
     env, gm = nlhe
     state = deal(env, 0, [BEST, MID], BOARD)
-    actions = [POT, HALF, NL_CALL, NL_CALL, ALLIN, NL_FOLD]
+    actions = [POT, HALF, NL_CALL, ALLIN, NL_FOLD]
     counts, _, _, _ = play_hand(env, gm, state, actions)
     check_counts(counts, {
         "aggressive": {(0, PRE): 1, (1, PRE): 1, (1, FLOP): 1},
