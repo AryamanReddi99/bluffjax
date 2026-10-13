@@ -3,7 +3,7 @@
 num_timesteps: 1e7
 num_envs: 1024
 num_steps_per_env_per_update: 64
-num_epochs: 4  # as in the paper's PPO table and the Leduc/Hold'em PPO-NFSP configs
+num_epochs: 4  # 4 x 4 in every model-free config
 num_minibatches: 4
 
 # BR (PPO), trained only on decisions made while following the BR
