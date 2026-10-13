@@ -15,20 +15,43 @@ Deal
   up to 16 players.
 
 Order of play
-- Every player antes; the lowest door card (suits break ties, card // 13)
-  posts the bring-in, and the player after it acts first on 3rd street.
+- Every player antes (ante = 1/2). The player with the lowest door card
+  (suits break ties, card // 13) is the bring-in and acts first on 3rd
+  street; play then goes clockwise.
 - On 4th to 7th street the best hand showing acts first: pairs, two pair,
   trips and quads, then high cards (a 7th-street community card makes it a
   five-card board, ranked as a poker hand). Ties go to the tied player who
   comes first clockwise after the bring-in. The cards decide the bring-in, so
   no seat index is favoured.
 
-Betting: limit, bets of small_bet on 3rd and 4th street and big_bet after,
-at most allowed_raise_num raises per street. The bring-in is an incomplete
-bet: on 3rd street the first raise completes it to one small bet above the
-ante (it costs the player after the bring-in small_bet, not
-bring_in + small_bet), and each raise after that adds a small bet. Rewards are net chips divided by
-big_bet (big bets).
+Betting: limit, bets of small_bet (1) on 3rd and 4th street and big_bet (2)
+after, at most allowed_raise_num (4) raises per street.
+- 3rd street. The bring-in's first decision is to post the bring-in
+  (bring_in = 1/2; action call) or to complete to one small bet above the
+  ante (action raise; it costs small_bet); it can't fold or check there.
+  After a posted bring-in, the first raise completes it the same way (to one
+  small bet above the ante, costing the raiser small_bet, not
+  bring_in + small_bet). A completion, by the bring-in or after it posted,
+  is the street's first raise; each raise after it adds a small bet.
+- The bring-in is an opening bet, so the bring-in has no option: when every
+  other player has called it or folded, the street ends without the bring-in
+  acting again. After a completion or raise, betting goes on as usual and the
+  bring-in acts again when the action comes back to it. Nobody can check on
+  3rd street.
+- 4th to 7th street: the first player checks or bets; every bet or raise adds
+  one bet (small_bet on 4th street, big_bet from 5th). A street ends once
+  every player still in has acted since the last bet or raise and matched it.
+
+Actions: 0 call (at the bring-in's first decision: post the bring-in), 1 raise
+(bet, raise or complete), 2 fold, 3 check. Legal: call when facing a bet and
+at the bring-in's first decision; raise while the street has fewer than
+allowed_raise_num raises; fold everywhere except the bring-in's first
+decision; check when not facing a bet, except at the bring-in's first
+decision. Folding is allowed even when checking is free.
+
+Rewards: paid when the hand ends, in chips: the pot share won minus the
+player's own chips in (ante, bring-in, bets). Ties split the pot; folded
+players lose what they put in. 0 on every other step.
 
 Observation (for the player to act; seat j is the player j places clockwise
 from it, seat 0 is itself):
@@ -121,6 +144,11 @@ class SevenCardStud(AECEnv):
         candidates = (idx + jnp.arange(1, self.num_agents + 1)) % self.num_agents
         return candidates[jnp.argmax(~folded[candidates])]
 
+    def _bring_in_to_act(self, state: SevenCardStudState) -> BoolArray:
+        """The bring-in's first decision: 3rd street with only the antes in
+        (it posts the bring-in or completes; nobody acts before it)."""
+        return (state.stage == 0) & (jnp.max(state.chips_in) <= self.ante)
+
     def _after_bring_in(self, bring_in_idx: IntArray) -> IntArray:
         """All seats clockwise, starting after the bring-in."""
         return (bring_in_idx + 1 + jnp.arange(self.num_agents)) % self.num_agents
@@ -205,25 +233,25 @@ class SevenCardStud(AECEnv):
     @partial(jax.jit, static_argnums=(0,))
     def get_avail_actions(self, state: SevenCardStudState) -> BoolArray:
         """
-        Actions: 0=call, 1=raise, 2=fold, 3=check
-        Same logic as Texas Limit Hold'em.
+        Actions: 0=call, 1=raise, 2=fold, 3=check (legal ones in the module
+        docstring). At the bring-in's first decision exactly call (post the
+        bring-in) and raise (complete) are legal.
         """
         current_player = state.current_player_idx
         player_chips = state.chips_in[current_player]
         max_chips = jnp.max(state.chips_in)
+        bring_in_to_act = self._bring_in_to_act(state)
 
-        avail_actions = jnp.ones(4, dtype=bool)
+        can_call = (player_chips < max_chips) | bring_in_to_act
         can_raise = state.raise_nums[state.stage] < self.allowed_raise_num
-        avail_actions = avail_actions.at[1].set(can_raise)
-        can_call = player_chips < max_chips
-        avail_actions = avail_actions.at[0].set(can_call)
-        can_check = player_chips == max_chips
-        avail_actions = avail_actions.at[3].set(can_check)
-        return avail_actions
+        can_fold = ~bring_in_to_act
+        can_check = (player_chips == max_chips) & ~bring_in_to_act
+        return jnp.stack([can_call, can_raise, can_fold, can_check])
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, rng: PRNGKeyArray) -> tuple[SevenCardStudState, FloatArray]:
-        """Reset: shuffle, deal 3rd street, post antes and the bring-in."""
+        """Reset: shuffle, deal 3rd street, post the antes; the bring-in acts
+        first (it posts the bring-in or completes)."""
         rng_shuffle, _ = jax.random.split(rng)
         deck = jax.random.permutation(rng_shuffle, self.deck_size).astype(jnp.int32)
         num_dealt = 3 * self.num_agents
@@ -234,15 +262,12 @@ class SevenCardStud(AECEnv):
         )
 
         # Bring-in: lowest door card (slot 2)
-        bring_in_idx = _get_bring_in_idx(agent_cards[:, 2])
+        bring_in_idx = _get_bring_in_idx(agent_cards[:, 2]).astype(jnp.int32)
 
-        # Ante: each player posts ante; bring-in: bring_in_idx posts bring-in
+        # Antes; the bring-in posts its bring-in (or completes) as its first action
         chips_in = jnp.full(self.num_agents, self.ante, dtype=jnp.float32)
-        chips_in = chips_in.at[bring_in_idx].add(self.bring_in)
-
-        # First to act on 3rd street: the player after the bring-in
         folded = jnp.zeros(self.num_agents, dtype=bool)
-        current_player_idx = self._next_active(bring_in_idx, folded)
+        current_player_idx = bring_in_idx
 
         state = SevenCardStudState(
             deck=deck,
@@ -271,11 +296,13 @@ class SevenCardStud(AECEnv):
         SevenCardStudState, FloatArray, FloatArray, BoolArray, bool, dict[str, Any]
     ]:
         """
-        Execute one step. Actions: 0=call, 1=raise, 2=fold, 3=check.
+        Execute one step. Actions: 0=call, 1=raise, 2=fold, 3=check; at the
+        bring-in's first decision 0 posts the bring-in and 1 completes.
         """
         current_player = state.current_player_idx
         max_chips = jnp.max(state.chips_in)
         player_chips = state.chips_in[current_player]
+        bring_in_to_act = self._bring_in_to_act(state)
 
         # Raise amount: small bet for stage 0,1; big bet for stage 2,3,4
         raise_amount = jnp.where(
@@ -283,14 +310,20 @@ class SevenCardStud(AECEnv):
         )
         current_round_raises = state.raise_nums[state.stage]
 
+        # not_raise_num: players who have acted on the current bet since the
+        # last bet or raise (a raise sets it to 1, the raiser); the street
+        # ends when it reaches the players still in. Posting the bring-in is
+        # the street's opening bet (0 + 1 = 1, the bring-in), so the street
+        # ends once everyone else has called it or folded.
         def process_call():
-            diff = max_chips - player_chips
-            new_chips_in = state.chips_in.at[current_player].add(diff)
+            call_to = jnp.where(bring_in_to_act, self.ante + self.bring_in, max_chips)
+            new_chips_in = state.chips_in.at[current_player].set(call_to)
             return new_chips_in, state.raise_nums, state.not_raise_num + 1, state.folded
 
         def process_raise():
-            # While only the bring-in has been posted, a raise completes it
-            # to one small bet; otherwise it adds a bet to the current one.
+            # On 3rd street while no one has bet more than the bring-in
+            # (or before it is posted), a raise completes to one small bet
+            # above the ante; otherwise it adds a bet to the current one.
             completes_bring_in = (state.stage == 0) & (
                 max_chips < self.ante + self.small_bet
             )
@@ -371,8 +404,7 @@ class SevenCardStud(AECEnv):
             pot_total = jnp.sum(new_chips_in).astype(jnp.float32)
             num_winners = jnp.sum(winners).astype(jnp.float32)
             chips_gained = jnp.where(winners, pot_total / num_winners, 0.0)
-            payoffs = (chips_gained - new_chips_in.astype(jnp.float32)) / self.big_bet
-            return payoffs
+            return chips_gained - new_chips_in.astype(jnp.float32)  # net chips
 
         rewards = lax.cond(
             game_done,

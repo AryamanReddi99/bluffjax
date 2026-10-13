@@ -22,12 +22,13 @@ average-policy network (the observation is relative to the player to act).
   against the opponent (uniform random legal actions, or a checkpoint) in
   every other seat, with the learner's seat rotating over the hands from a
   random seat (see play_eval_games). Logged per policy: win, loss and draw
-  rates (net big bets positive, negative, zero), the win rate of the decided
-  hands (NaN if there were none), big bets per hand and hand length, as
+  rates (net chips positive, negative, zero), the win rate of the decided
+  hands (NaN if there were none), chips per hand and hand length, as
   {stat}_vs_{random|baseline} for the average policy and
   {stat}_br_vs_{random|baseline} for the BR.
 
-Units: the env pays big bets per hand; training and logged returns use them.
+Units: the env pays net chips per hand (antes 1/2, bring-in 1/2, bets 1 and
+2); training and the logged returns use them as they are.
 
 Game metrics (bluffjax.metrics.seven_card_stud): counted at every rollout
 step and logged every update for the decisions of the players following the
@@ -93,7 +94,7 @@ class Transition(NamedTuple):
     action_mask: BoolArray
     action: IntArray
     br_log_prob: FloatArray  # log-prob of the action under the BR (BR decisions)
-    reward: FloatArray  # (num_agents,) env reward for every player, big bets
+    reward: FloatArray  # (num_agents,) env reward for every player, chips
     done: BoolArray  # the hand ended at this step (the env auto-resets)
     timestep: IntArray  # steps into the hand after this step (hand length if done)
     value: FloatArray  # BR critic value of obs
@@ -294,10 +295,10 @@ Policy = Callable[[Any, FloatArray, BoolArray, PRNGKeyArray], IntArray]
 class EvalResult(NamedTuple):
     """Per hand, from the learner's point of view."""
 
-    win: FloatArray  # the learner won big bets (its return is positive)
-    loss: FloatArray  # the learner lost big bets
+    win: FloatArray  # the learner won chips (its return is positive)
+    loss: FloatArray  # the learner lost chips
     draw: FloatArray  # neither (e.g. a split pot that returned its stake)
-    ret: FloatArray  # the learner's net big bets of the hand
+    ret: FloatArray  # the learner's net chips of the hand
     length: FloatArray  # env steps
     seat: IntArray  # the learner's seat
 
@@ -319,7 +320,7 @@ def play_eval_games(
     up to one hand (and the cards decide the bring-in, so no seat index is
     favoured). Every hand is played with env.step_env (no auto-reset) until
     it is over. The env pays the result of a hand when it ends, so the
-    learner's return is its net big bets: a win if positive, a loss if
+    learner's return is its net chips: a win if positive, a loss if
     negative and a draw if zero.
     """
     num_agents = env.num_agents
@@ -385,7 +386,7 @@ def format_eval(evals: dict[str, float]) -> str:
         f"{name} W/L/D {evals[f'win_rate_{name}']:.3f}/"
         f"{evals[f'loss_rate_{name}']:.3f}/{evals[f'draw_rate_{name}']:.3f} "
         f"(win rate of decided hands {evals[f'win_rate_decided_{name}']:.3f}), "
-        f"big bets per hand {evals[f'avg_return_{name}']:+.3f}, "
+        f"chips per hand {evals[f'avg_return_{name}']:+.3f}, "
         f"length {evals[f'avg_episode_length_{name}']:.1f}"
         for name in names
     )
@@ -888,7 +889,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             avg_train_state = sl_state.train_state
             sl_loss_info = jax.tree_util.tree_map(lambda x: x.mean(), sl_loss_info)
 
-            # Self-play payoffs per finished hand in big bets, split by the
+            # Self-play payoffs per finished hand in chips, split by the
             # policy the player followed in that hand. Against the mixed
             # opponents the BR should win (the average policy then loses).
             hand_end = transitions.done[..., None]
@@ -1033,7 +1034,7 @@ def save_checkpoints(
     Both networks are ActorCriticDiscreteMLP(action_dim=4,
     hidden_dim=fc_dim_size), mapping the acting player's observation
     (env.obs_from_state(state), env.obs_dim floats, which depends on
-    env_kwargs.num_agents) to (action logits, value in big bets); the value
+    env_kwargs.num_agents) to (action logits, value in chips); the value
     head of the average policy is unused. Mask illegal actions
     (env.get_avail_actions(state)) before the softmax. Load either one as an
     evaluation baseline with compare_mode=checkpoint and

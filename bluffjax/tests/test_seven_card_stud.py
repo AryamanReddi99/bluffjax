@@ -87,8 +87,18 @@ def best_hand(cards):
     return max(five_card_key(c) for c in itertools.combinations(cards, 5))
 
 
+ANTE = BRING_IN = 0.5
+SMALL_BET, BIG_BET = 1, 2
+
+
 class RefStud:
-    """Plain-Python 7-Card Stud, written from the rules in the env docstring."""
+    """Plain-Python 7-Card Stud, written from the rules in the env docstring.
+
+    Betting keeps the set of players who still have to act on the current
+    bet (to_act): a street ends when it is empty. Posting the bring-in, a bet
+    or a raise leaves every other player still in to act; a call or check
+    removes the player, and so does a fold.
+    """
 
     def __init__(self, n: int, deck):
         self.n = n
@@ -101,13 +111,16 @@ class RefStud:
         self.folded = [False] * n
         door = [self.cards[p][2] for p in range(n)]
         self.bring_in = min(range(n), key=lambda p: (rank_of(door[p]), door[p] // 13))
-        self.chips = [0.5] * n
-        self.chips[self.bring_in] += 0.5
+        self.chips = [ANTE] * n  # the bring-in decides first: post or complete
         self.stage = 0
         self.raises = [0] * 5
-        self.not_raised = 0
+        self.to_act = set(range(n))
         self.done = False
-        self.current = self.next_active(self.bring_in)
+        self.current = self.bring_in
+
+    def bring_in_to_act(self):
+        """The bring-in's first decision: only the antes are in."""
+        return self.stage == 0 and max(self.chips) == ANTE
 
     def after(self, p):
         return [(p + 1 + i) % self.n for i in range(self.n)]
@@ -122,8 +135,13 @@ class RefStud:
         return SLOT_FACE_UP[slot] or self.community[SLOT_STREET[slot]]
 
     def legal(self):
+        """[call, raise, fold, check]; at the bring-in's first decision
+        call = post the bring-in and raise = complete."""
         c, top = self.current, max(self.chips)
-        return [self.chips[c] < top, self.raises[self.stage] < 4, True, self.chips[c] == top]
+        can_raise = self.raises[self.stage] < 4
+        if self.bring_in_to_act():
+            return [True, can_raise, False, False]
+        return [self.chips[c] < top, can_raise, True, self.chips[c] == top]
 
     def deal(self, street):
         players = self.active(self.after(self.bring_in))
@@ -149,26 +167,32 @@ class RefStud:
         return best
 
     def step(self, action):
+        """Returns the rewards: net chips at the end of the hand, else 0."""
         c, top = self.current, max(self.chips)
-        if action == 0:
+        others = set(self.active()) - {c}
+        if action == 0 and self.bring_in_to_act():  # post the bring-in: an opening bet
+            self.chips[c] = ANTE + BRING_IN
+            self.to_act = others
+        elif action == 0:  # call
             self.chips[c] = top
-            self.not_raised += 1
+            self.to_act.discard(c)
         elif action == 1:
-            if self.stage == 0 and top < 1.5:  # complete the bring-in to 1 small bet
-                self.chips[c] = 1.5
+            if self.stage == 0 and top < ANTE + SMALL_BET:  # complete to 1 small bet
+                self.chips[c] = ANTE + SMALL_BET
             else:
-                self.chips[c] = top + (2 if self.stage >= 2 else 1)
+                self.chips[c] = top + (BIG_BET if self.stage >= 2 else SMALL_BET)
             self.raises[self.stage] += 1
-            self.not_raised = 1
+            self.to_act = others
         elif action == 2:
             self.folded[c] = True
-        else:
-            self.not_raised += 1
+            self.to_act.discard(c)
+        else:  # check
+            self.to_act.discard(c)
         active = self.active()
-        round_over = self.not_raised >= len(active)
+        round_over = not self.to_act
         if round_over:
             self.stage += 1
-            self.not_raised = 0
+            self.to_act = set(active)
         self.done = len(active) <= 1 or self.stage >= 5
         if self.done:
             if len(active) == 1:
@@ -178,7 +202,7 @@ class RefStud:
                 winners = [p for p in active if hands[p] == max(hands.values())]
             pot = sum(self.chips)
             return [
-                ((pot / len(winners) if p in winners else 0.0) - self.chips[p]) / 2
+                (pot / len(winners) if p in winners else 0.0) - self.chips[p]
                 for p in range(self.n)
             ]
         if round_over:
@@ -488,20 +512,20 @@ def _table(env, hands):
         deck += [hands[p][street + 2] for p in order if hands[p][street + 2] >= 0]
     deck += [c for c in range(52) if c not in deck]
     assert sorted(deck) == list(range(52))
-    state, _ = env.reset(jax.random.PRNGKey(0))
+    state, _ = env.reset(jax.random.PRNGKey(0))  # antes in, the bring-in to act
     deck = jnp.array(deck, dtype=jnp.int32)
     agent_cards = jnp.full((n, 7), -1, jnp.int32).at[:, :3].set(deck[: 3 * n].reshape(n, 3))
     return state.replace(
         deck=deck,
         agent_cards=agent_cards,
         bring_in_idx=jnp.int32(bring_in),
-        chips_in=jnp.full(n, 0.5).at[bring_in].add(0.5),
-        current_player_idx=jnp.int32((bring_in + 1) % n),
+        current_player_idx=jnp.int32(bring_in),
     )
 
 
 def _first_to_act(env, state, street):
-    """Everyone calls or checks until street; returns who acts first there."""
+    """Everyone calls or checks (the bring-in posts) until street; returns the
+    state there (who acts first, the cards dealt)."""
     step = jax.jit(env.step_env)
     while int(state.stage) < street:
         avail = np.asarray(env.get_avail_actions(state))
@@ -646,45 +670,197 @@ CALL, RAISE, FOLD, CHECK = 0, 1, 2, 3
 
 
 def _play(env, state, actions):
+    """Steps actions in order; returns the state and the summed rewards."""
+    total = np.zeros(env.num_agents)
     for a in actions:
-        state, *_ = env.step_env(jax.random.PRNGKey(0), state, jnp.int32(a))
-    return state
+        assert bool(env.get_avail_actions(state)[a]), (a, _avail(env, state))
+        state, _, reward, _, _, _ = env.step_env(jax.random.PRNGKey(0), state, jnp.int32(a))
+        total += np.asarray(reward)
+    return state, total
 
 
-def test_first_raise_on_third_street_completes_the_bring_in():
-    """The bring-in (1/2) is an incomplete bet: the first raise on 3rd street
-    makes the bet one small bet above the ante (1/2 + 1 chips in), later raises
-    add a small bet each up to four raises, and 4th street is unaffected."""
+def _avail(env, state):
+    return np.asarray(env.get_avail_actions(state)).tolist()
+
+
+def _chips(n, ante=0.5, **extra):
+    """Chips in per seat: the ante, plus extra[f"p{seat}"]."""
+    chips = np.full(n, ante)
+    for seat, x in extra.items():
+        chips[int(seat[1:])] += x
+    return chips
+
+
+@pytest.mark.parametrize("n", (2, 3, 7, 10))
+def test_the_bring_in_decides_first(n):
+    """A hand starts with only the antes in and the bring-in (lowest door
+    card, suits break ties) to act. Its only legal actions are call, which
+    posts the bring-in (1/2), and raise, which completes to one small bet
+    above the ante (1 chip) and is the street's first raise. Either way the
+    next player faces a bet: call, raise or fold, no check."""
+    env = make("seven_card_stud", num_agents=n)
+    for seed in range(4):
+        start, obs = env.reset(jax.random.PRNGKey(seed))
+        b = int(start.bring_in_idx)
+        door = np.asarray(start.agent_cards[:, 2]).tolist()
+        assert b == min(range(n), key=lambda p: (rank_of(door[p]), door[p] // 13))
+        assert int(start.current_player_idx) == b
+        np.testing.assert_array_equal(start.chips_in, _chips(n))
+        assert _avail(env, start) == [True, True, False, False]
+        assert np.asarray(obs)[-n] == 1  # position 0 after the bring-in
+        posted, _ = _play(env, start, [CALL])
+        completed, _ = _play(env, start, [RAISE])
+        np.testing.assert_array_equal(posted.chips_in, _chips(n, **{f"p{b}": 0.5}))
+        np.testing.assert_array_equal(completed.chips_in, _chips(n, **{f"p{b}": 1.0}))
+        assert int(posted.raise_nums[0]) == 0 and int(completed.raise_nums[0]) == 1
+        for state in (posted, completed):
+            assert int(state.stage) == 0 and not bool(state.done)
+            assert int(state.current_player_idx) == (b + 1) % n
+            assert _avail(env, state) == [True, True, True, False]
+
+
+@pytest.mark.parametrize("n", (2, 3))
+def test_no_option_when_everyone_calls_the_bring_in(n):
+    """The bring-in is an opening bet: when every other player calls it, 3rd
+    street ends on the last call and 4th street is dealt; the bring-in
+    doesn't act again (no check or completion as a big blind would have).
+    The same when the others call or fold."""
+    env = make("seven_card_stud", num_agents=n)
+    for seed in range(3):
+        start, _ = env.reset(jax.random.PRNGKey(seed))
+        b = int(start.bring_in_idx)
+        state, _ = _play(env, start, [CALL])
+        for i in range(1, n):
+            assert int(state.stage) == 0 and int(state.current_player_idx) == (b + i) % n
+            state, _ = _play(env, state, [CALL])
+        assert int(state.stage) == 1 and not bool(state.done)
+        assert int(state.raise_nums[0]) == 0
+        np.testing.assert_array_equal(state.chips_in, np.ones(n))
+        assert (np.asarray(state.agent_cards[:, 3]) >= 0).all()  # 4th street dealt
+        assert _avail(env, state) == [False, True, True, True]
+        if n == 3:  # one call and one fold, in either order
+            for actions in ([CALL, FOLD], [FOLD, CALL]):
+                state, _ = _play(env, start, [CALL] + actions)
+                assert int(state.stage) == 1 and not bool(state.done)
+                assert int(state.folded.sum()) == 1 and not bool(state.folded[b])
+                assert float(state.chips_in.max()) == 1.0
+
+
+def test_the_bring_in_completes_and_raises_add_a_small_bet():
+    """3 players: the bring-in completes (1 chip, raise 1), every raise after
+    it adds a small bet up to the cap of four raises, after which only call
+    and fold are legal; the street ends when the last raise has been called
+    by everyone else, and on 4th street a bet is one small bet."""
     env = make("seven_card_stud", num_agents=3)
     start, _ = env.reset(jax.random.PRNGKey(0))
     b = int(start.bring_in_idx)
     p1, p2 = (b + 1) % 3, (b + 2) % 3
-    assert int(start.current_player_idx) == p1
-    np.testing.assert_array_equal(start.chips_in, np.full(3, 0.5) + 0.5 * (np.arange(3) == b))
-
-    # the player after the bring-in completes for 1 chip, re-raises add 1 each
-    state = _play(env, start, [RAISE])
-    assert float(state.chips_in[p1]) == 1.5 and int(state.raise_nums[0]) == 1
-    state = _play(env, state, [RAISE])
-    assert float(state.chips_in[p2]) == 2.5
-    state = _play(env, state, [RAISE, RAISE])  # bring-in, then p1: the cap
-    assert float(state.chips_in[b]) == 3.5 and float(state.chips_in[p1]) == 4.5
-    assert int(state.raise_nums[0]) == 4
-    assert not bool(env.get_avail_actions(state)[RAISE])
-
-    # everyone calls the bring-in, and the bring-in completes for 1/2
-    state = _play(env, start, [CALL, CALL])
-    np.testing.assert_array_equal(state.chips_in, np.ones(3))
-    state = _play(env, state, [RAISE])
-    assert float(state.chips_in[b]) == 1.5 and int(state.raise_nums[0]) == 1
-
-    # 4th street: a raise adds a full small bet to the current bet
-    state = _play(env, state, [CALL, CALL])
+    state = start
+    for k, (who, chips) in enumerate([(b, 1.5), (p1, 2.5), (p2, 3.5), (b, 4.5)]):
+        assert int(state.current_player_idx) == who
+        state, _ = _play(env, state, [RAISE])
+        assert float(state.chips_in[who]) == chips and int(state.raise_nums[0]) == k + 1
+    assert int(state.current_player_idx) == p1
+    assert _avail(env, state) == [True, False, True, False]  # capped
+    state, _ = _play(env, state, [CALL])
+    assert int(state.stage) == 0 and int(state.current_player_idx) == p2
+    assert _avail(env, state) == [True, False, True, False]
+    state, _ = _play(env, state, [CALL])
     assert int(state.stage) == 1
-    np.testing.assert_array_equal(state.chips_in, np.full(3, 1.5))
+    np.testing.assert_array_equal(state.chips_in, np.full(3, 4.5))
     first = int(state.current_player_idx)
-    state = _play(env, state, [RAISE])
-    assert float(state.chips_in[first]) == 2.5
+    assert _avail(env, state) == [False, True, True, True]
+    state, _ = _play(env, state, [RAISE])
+    assert float(state.chips_in[first]) == 5.5
+
+
+@pytest.mark.parametrize("n", (2, 3))
+def test_a_completion_after_the_bring_in_reopens_the_betting(n):
+    """The bring-in posts and the next player completes (1 chip, raise 1):
+    betting goes on, the bring-in acts again and may call, raise or fold.
+    Heads-up, raises then add a small bet each up to the cap; the street ends
+    when the last raise is called."""
+    env = make("seven_card_stud", num_agents=n)
+    start, _ = env.reset(jax.random.PRNGKey(2))
+    b = int(start.bring_in_idx)
+    p1 = (b + 1) % n
+    state, _ = _play(env, start, [CALL, RAISE])
+    np.testing.assert_array_equal(state.chips_in, _chips(n, **{f"p{b}": 0.5, f"p{p1}": 1.0}))
+    assert int(state.raise_nums[0]) == 1
+    if n == 3:
+        state, _ = _play(env, state, [CALL])
+    assert int(state.stage) == 0 and int(state.current_player_idx) == b
+    assert _avail(env, state) == [True, True, True, False]
+    called, _ = _play(env, state, [CALL])  # everyone has matched the completion
+    assert int(called.stage) == 1
+    np.testing.assert_array_equal(called.chips_in, np.full(n, 1.5))
+    if n == 2:
+        for k, (who, chips) in enumerate([(b, 2.5), (p1, 3.5), (b, 4.5)]):
+            assert int(state.current_player_idx) == who
+            state, _ = _play(env, state, [RAISE])
+            assert float(state.chips_in[who]) == chips and int(state.raise_nums[0]) == k + 2
+        assert _avail(env, state) == [True, False, True, False]  # four raises
+        state, _ = _play(env, state, [CALL])
+        assert int(state.stage) == 1
+        np.testing.assert_array_equal(state.chips_in, np.full(2, 4.5))
+
+
+def _hands_table(env, hands):
+    """_table with every player's 7 cards given as (rank, suit) pairs."""
+    return _table(env, [[card(r, s) for r, s in h] for h in hands])
+
+
+# player 0 brings in (2c) with three aces; player 1 has king high
+ACES = [
+    [(14, 0), (14, 1), (2, 0), (14, 2), (7, 1), (9, 3), (11, 0)],
+    [(3, 1), (4, 2), (13, 3), (8, 0), (10, 2), (12, 1), (5, 3)],
+]
+# both make the ace-high straight (no flush): a split pot
+SPLIT = [
+    [(14, 0), (13, 0), (2, 3), (12, 1), (11, 1), (10, 2), (3, 3)],
+    [(14, 1), (13, 1), (4, 2), (12, 0), (11, 0), (10, 3), (5, 2)],
+]
+
+
+def test_payoffs_are_net_chips():
+    """Rewards are net chips (not big bets), paid on the last step."""
+    env = make("seven_card_stud", num_agents=2)
+    start, _ = env.reset(jax.random.PRNGKey(0))
+    b = int(start.bring_in_idx)
+    o = 1 - b
+
+    def payoff(state, actions):
+        state, total = _play(env, state, actions)
+        assert bool(state.done)
+        return total.tolist()
+
+    # the bring-in posts or completes and the other player folds: +1/2 (the ante)
+    want = [0.0, 0.0]
+    want[b], want[o] = 0.5, -0.5
+    assert payoff(start, [CALL, FOLD]) == want
+    assert payoff(start, [RAISE, FOLD]) == want
+    # the bring-in folds to a completion: it loses the ante and the bring-in
+    want[b], want[o] = -1.0, 1.0
+    assert payoff(start, [CALL, RAISE, FOLD]) == want
+
+    # showdown after a bet and a call on every street and a raise on 7th:
+    # 1/2 ante + 1 (3rd) + 1 (4th) + 2 + 2 + 4 (7th) = 10.5 chips each
+    showdown = [CALL, RAISE, CALL] + [RAISE, CALL] * 4
+    showdown.insert(-1, RAISE)  # 7th street: bet, raise, call
+    state = _hands_table(env, ACES)
+    assert int(state.bring_in_idx) == 0
+    assert payoff(state, showdown) == [10.5, -10.5]
+    assert payoff(_hands_table(env, SPLIT), showdown) == [0.0, 0.0]
+
+    # 3 players: post, completion, fold, the bring-in folds
+    env3 = make("seven_card_stud", num_agents=3)
+    start, _ = env3.reset(jax.random.PRNGKey(0))
+    b = int(start.bring_in_idx)
+    state, total = _play(env3, start, [CALL, RAISE, FOLD, FOLD])
+    assert bool(state.done)
+    want = np.zeros(3)
+    want[b], want[(b + 1) % 3], want[(b + 2) % 3] = -1.0, 1.5, -0.5
+    np.testing.assert_array_equal(total, want)
 
 
 # ---------------------------------------------------------------- NFSP scripts
