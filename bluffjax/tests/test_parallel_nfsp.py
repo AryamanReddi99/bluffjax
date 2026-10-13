@@ -643,6 +643,32 @@ def test_real_run_mixing_targets_and_reservoir(common, monkeypatch, tmp_path, na
             games = ended & mode
             want = game_return[sl][games].sum() / max(games.sum(), 1)
             assert row[key] == pytest.approx(want, rel=1e-5, abs=1e-5)
+        # game metrics: game/ counts the decisions of the agents following the
+        # average policy in that game, game_br/ those following the BR
+        for prefix, mode in (("game", ~is_br[sl]), ("game_br", is_br[sl])):
+            if name.startswith("goofspiel"):
+                assert row[f"{prefix}/n_player_rounds"] == mode.sum()
+                assert row[f"{prefix}/n_player_games"] == (ended & mode).sum()
+                assert row[f"{prefix}/n_choices"] == (mode & ~ended).sum()
+            else:
+                assert row[f"{prefix}/n_decisions"] == mode.sum()
+    # results.jsonl holds exactly what wandb gets, with the seed and wall time
+    from bluffjax.examples.run_utils import read_results
+
+    records = read_results(str(tmp_path))
+    assert [r["seed_index"] for r in records] == [0] * U
+    assert _same_records(
+        [{k: v for k, v in r.items() if k not in ("seed_index", "wall_time")} for r in records],
+        logger.rows,
+    )
+
+
+def _same_records(a, b):
+    """Lists of logged dicts equal, NaN equal to NaN."""
+    same = lambda x, y: x == y or (isinstance(x, float) and isinstance(y, float) and x != x and y != y)
+    return len(a) == len(b) and all(
+        x.keys() == y.keys() and all(same(x[k], y[k]) for k in x) for x, y in zip(a, b)
+    )
 
 
 def _ramp_network(marks, returns_value):
@@ -691,11 +717,15 @@ def test_real_run_acts_with_the_drawn_policy(common, monkeypatch, tmp_path, name
         return reservoir(buffer, obs, action_mask, action, valid, rng)
 
     monkeypatch.setattr(mod, "reservoir_append", reservoir_spy)
-    _results_log(monkeypatch, mod, tmp_path)
+    (logger,) = _results_log(monkeypatch, mod, tmp_path)
     config = tiny_config(name, num_update_steps=2, compare=False, start_e=0.0, end_e=0.0)
     jax.block_until_ready(jax.jit(mod.make_train(config))(KEY, jnp.int32(0)))
     jax.effects_barrier()
     assert len(seen) == 2
+    if name.startswith("goofspiel"):  # both policies bid deterministically
+        for row in logger.rows:
+            assert row["game/bid_entropy"] == 0.0 and row["game_br/bid_entropy"] == 0.0
+            assert row["game/n_choices"] > 0 and row["game_br/n_choices"] > 0
     is_br = np.concatenate([r[0] for r in seen])
     mask = np.concatenate([r[1] for r in seen])
     action = np.concatenate([r[2] for r in seen])
@@ -706,6 +736,157 @@ def test_real_run_acts_with_the_drawn_policy(common, monkeypatch, tmp_path, name
     assert (distinct & is_br).sum() > 50 and (distinct & ~is_br).sum() > 300
     np.testing.assert_array_equal(action[is_br], highest[is_br])
     np.testing.assert_array_equal(action[~is_br], lowest[~is_br])
+
+
+@pytest.mark.parametrize("name", ["goofspiel_ppo_nfsp", "goofspiel_pqn_nfsp"])
+def test_real_run_bid_entropy_is_of_the_sampling_distribution(common, monkeypatch, tmp_path, name):
+    """The probs the Goofspiel scripts pass to the metrics are the distribution
+    each bid was sampled from: legal, normalised and calibrated (the most
+    likely bid is played as often as its probability says, for the average
+    policy and the BR separately, which here prefer opposite cards), and for
+    the PQN BR exactly the epsilon-greedy distribution (its bid entropy has
+    the closed form of epsilon / n on every legal card plus 1 - epsilon on the
+    greedy one)."""
+    from bluffjax.metrics.goofspiel import Metrics
+
+    mod = _scripts()[name]
+    eps = 0.5
+
+    class Spy(Metrics):
+        def step(self, carry, state, action, next_state, reward, done, info, probs=None):
+            carry, counts = super().step(carry, state, action, next_state, reward, done, info, probs)
+            mask = self.env.get_avail_actions(state)
+            p_top = probs.max(-1)
+            n = mask.sum(-1)
+            a, b = 1 - eps + eps / n, eps / n
+            eps_entropy = -(a * jnp.log(a) + (n - 1) * b * jnp.log(b)) / jnp.log(jnp.maximum(n, 2))
+            counts.update(
+                spy_hit=(action == probs.argmax(-1)).astype(jnp.float32),
+                spy_p_top=p_top,
+                spy_var=p_top * (1 - p_top),
+                spy_illegal=jnp.where(mask, 0.0, probs).sum(-1),
+                spy_norm_err=jnp.abs(probs.sum(-1) - 1.0),
+                spy_eps_entropy=jnp.where(n >= 2, eps_entropy, 0.0),
+            )
+            return carry, counts
+
+        def summarize(self, totals):
+            out = super().summarize(totals)
+            out.update({k: v for k, v in totals.items() if k.startswith("spy_")})
+            return out
+
+    monkeypatch.setattr(mod, "make_metrics", lambda env_id, env: Spy(env))
+    if "ppo" in name:  # the BR prefers high cards, the average policy low ones
+        monkeypatch.setattr(mod, "ActorCriticDiscreteMLP", _ramp_network([0.5, -0.5], True))
+    else:
+        monkeypatch.setattr(mod, "QNetworkDiscreteMLP", _ramp_network([0.5], False))
+        monkeypatch.setattr(mod, "ActorDiscreteMLP", _ramp_network([-0.5], False))
+    (logger,) = _results_log(monkeypatch, mod, tmp_path)
+    config = tiny_config(
+        name, num_update_steps=4, compare=False, anticipatory_eta=0.5, start_e=eps, end_e=eps
+    )
+    jax.block_until_ready(jax.jit(mod.make_train(config))(KEY, jnp.int32(0)))
+    jax.effects_barrier()
+    rows = logger.rows
+    for prefix in ("game", "game_br"):
+        total = lambda key: sum(row[f"{prefix}/{key}"] for row in rows)
+        assert total("spy_illegal") == 0.0
+        assert total("spy_norm_err") < 1e-5 * total("n_player_rounds")
+        assert total("n_choices") > 500
+        assert abs(total("spy_hit") - total("spy_p_top")) < 5 * np.sqrt(total("spy_var"))
+        # far from a uniform choice, so the check has power
+        assert total("spy_p_top") / total("n_player_rounds") > 0.3
+    if "pqn" in name:
+        for row in rows:
+            assert row["game_br/bid_entropy"] * row["game_br/n_choices"] == pytest.approx(
+                row["game_br/spy_eps_entropy"], rel=1e-5
+            )
+
+
+@pytest.mark.parametrize("name", SCRIPT_NAMES)
+def test_main_writes_results_and_checkpoints(common, monkeypatch, tmp_path, name):
+    """main() end to end on a tiny config: the run directory holds
+    config.yaml, results.jsonl (every update of both seeds, with env_steps
+    and the game/ and game_br/ metrics) and the half/ and full/ checkpoints,
+    which load strictly into the script's networks; the half ones are the
+    networks after exactly half_update_steps updates of the same run."""
+    import glob
+
+    from omegaconf import OmegaConf
+
+    from bluffjax.examples import run_utils
+    from bluffjax.metrics import make_metrics
+    from bluffjax.networks.mlp import ActorCriticDiscreteMLP, ActorDiscreteMLP, QNetworkDiscreteMLP
+
+    mod = _scripts()[name]
+    monkeypatch.setattr(mod, "RESULTS_LOG", None)
+    monkeypatch.setattr(mod, "EVALS", {})
+    game, algo = name.split("_")[:2]
+    cfg = OmegaConf.load(os.path.join(os.path.dirname(mod.__file__), f"config_{algo}_nfsp.yaml"))
+    del cfg["hydra"]
+    tiny = tiny_config(name)
+    U, T, N = 5, tiny["num_steps_per_env_per_update"], tiny["num_envs"]
+    overrides = {k: v for k, v in tiny.items() if k in cfg}
+    overrides.update(num_timesteps=U * N * T, save_dir=str(tmp_path / "runs"))
+    mod.main(OmegaConf.merge(cfg, OmegaConf.create(overrides)))
+
+    (run_dir,) = glob.glob(str(tmp_path / "runs" / f"{name}_*"))
+    found = {
+        os.path.relpath(os.path.join(d, f), run_dir)
+        for d, _, files in os.walk(run_dir) for f in files
+    }
+    assert found == {"config.yaml", "results.jsonl"} | {
+        f"{stage}/{net}_{i}.msgpack"
+        for stage in ("half", "full") for net in ("avg_policy", "br") for i in range(2)
+    }
+    config = OmegaConf.to_container(OmegaConf.load(os.path.join(run_dir, "config.yaml")))
+    assert config["run_dir"] == run_dir
+    assert config["num_update_steps"] == U and config["half_update_steps"] == 2
+
+    env = make(game, **config["env_kwargs"])
+    gm = make_metrics(game, env)
+    records = run_utils.read_results(run_dir)
+    assert len(records) == 2 * U
+    for i in range(2):
+        rows = [r for r in records if r["seed_index"] == i]
+        assert [r["update_step"] for r in rows] == list(range(U))
+        assert [r["env_steps"] for r in rows] == [(u + 1) * N * T for u in range(U)]
+        for u, row in enumerate(rows):
+            assert row["wall_time"] >= 0
+            for prefix in ("game", "game_br"):
+                assert all(f"{prefix}/{rate}" in row for rate in gm.rate_names)
+            n_key = "n_player_rounds" if game == "goofspiel" else "n_decisions"
+            assert row[f"game/{n_key}"] + row[f"game_br/{n_key}"] == T * N * env.num_agents
+            evaluated = u % config["compare_interval"] == 0 or u == U - 1
+            assert ("win_rate_avg_vs_random" in row) == evaluated
+
+    obs = jnp.zeros((env.obs_dim,))
+    A, H = env.num_actions, config["fc_dim_size"]
+    if algo == "ppo":
+        avg_net = br_net = ActorCriticDiscreteMLP(A, H)
+    else:
+        avg_net, br_net = ActorDiscreteMLP(A, H), QNetworkDiscreteMLP(A, H)
+    avg_t = avg_net.init(jax.random.PRNGKey(5), obs)
+    br_t = br_net.init(jax.random.PRNGKey(6), obs)
+    # the same run, stopped after half_update_steps updates
+    _results_log(monkeypatch, mod, tmp_path / "log_half", 2)
+    keys = jax.random.split(jax.random.PRNGKey(config["seed"]), 2)
+    half = jax.jit(
+        jax.vmap(functools.partial(mod.make_train(config), num_updates=config["half_update_steps"]))
+    )(keys, jnp.arange(2))
+    jax.effects_barrier()
+    for i in range(2):
+        ckpt = {
+            stage: common.load_checkpoint(run_dir, stage, i, avg_t, br_t)
+            for stage in ("half", "full")
+        }
+        at_half = jax.tree_util.tree_map(
+            lambda x: x[i], (half.avg_train_state.params, half.br_train_state.params)
+        )
+        assert _params_close(ckpt["half"].avg_params, at_half[0])
+        assert _params_close(ckpt["half"].br_params, at_half[1])
+        assert _max_diff(ckpt["half"].br_params, ckpt["full"].br_params) > 1e-4
+        assert _max_diff(ckpt["half"].avg_params, ckpt["full"].avg_params) > 1e-4
 
 
 def _params_close(a, b, atol=1e-6):

@@ -34,6 +34,15 @@ game.
   a checkpoint) in every other seat, the learner's seat rotating over the
   games; wins (unique top score), losses (another player scored more) and
   draws (the learner tied for the top score) are reported separately.
+- Game metrics (bluffjax/metrics/goofspiel.py: bid-prize Spearman
+  correlation, bid entropy, overbid margin, burn rate) of every update's
+  self-play rollout, credited to the players they describe: game/<metric>
+  over the players following the average policy in that game, game_br/
+  over those following the BR, each rate with its number of events (n_...).
+  The bid entropy is that of the distribution the bid was sampled from: the
+  average policy's softmax, or the BR's epsilon-greedy distribution (with
+  the epsilon of the update). The per-game part (Spearman) is carried across
+  updates in the runner state.
 
 Units: the env pays each round's prize value (1-13) to its winner and
 -value / (num_agents - 1) to every other player, so a game's return is the
@@ -91,6 +100,7 @@ from bluffjax.examples.parallel_nfsp_common import (
     Checkpoint,
     SLBufferState,
     draw_br_mode,
+    epsilon_greedy_probs,
     eval_metrics,
     evaluate_goofspiel,
     greedy_random_ties,
@@ -110,6 +120,7 @@ from bluffjax.examples.run_utils import (
     load_params,
     make_run_dir,
 )
+from bluffjax.metrics import Counts, make_metrics, masked_totals, prefixed
 from bluffjax.networks.mlp import (
     ActorCriticDiscreteMLP,
     ActorDiscreteMLP,
@@ -137,6 +148,7 @@ class Transition(NamedTuple):
     is_br: BoolArray  # the agent follows the BR in this game
     game_return: FloatArray  # env rewards of the game so far, this step included
     game_length: IntArray  # (num_envs,) steps of the game so far, this one included
+    game_counts: Counts  # game metrics of the step, credited per agent
 
 
 class RunnerState(NamedTuple):
@@ -148,6 +160,7 @@ class RunnerState(NamedTuple):
     br_mode: BoolArray  # (num_envs, num_agents) policy drawn for the current game
     game_return: FloatArray  # (num_envs, num_agents) rewards so far this game
     game_length: IntArray  # (num_envs,) steps so far this game
+    metric_carry: Any  # per-env carry of the game metrics (current game)
     half: Checkpoint  # networks after half_update_steps updates
     update_step: IntArray
     rng: PRNGKeyArray
@@ -178,6 +191,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     if config["batch_shuffle_dim"] % config["num_minibatches"]:
         raise ValueError("num_minibatches must divide the number of decisions per update")
     num_half = half_update_steps(config["num_update_steps"])
+    gm = make_metrics("goofspiel", env)  # bluffjax/metrics/goofspiel.py
     template_obs = jnp.zeros((env.obs_dim,), dtype=jnp.float32)
 
     br_network = QNetworkDiscreteMLP(
@@ -344,9 +358,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 avg_logits = avg_network.apply(
                     runner_state_inner.avg_train_state.params, obs_s
                 )
-                avg_action = jax.random.categorical(
-                    rng_avg, jnp.where(action_mask, avg_logits, -jnp.inf)
-                )
+                avg_logits_masked = jnp.where(action_mask, avg_logits, -jnp.inf)
+                avg_action = jax.random.categorical(rng_avg, avg_logits_masked)
 
                 # NFSP: every agent follows the policy it drew for this game.
                 is_br = br_mode_s
@@ -358,10 +371,27 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 # done without absorbing: cut off at the horizon, not over
                 truncated = done[:, None] & ~absorbing
 
+                # Game metrics of this step; the bid entropy is that of the
+                # distribution each player sampled its bid from (for the BR
+                # the epsilon-greedy one above).
+                probs = jnp.where(
+                    is_br[..., None],
+                    epsilon_greedy_probs(greedy_action, action_mask, eps),
+                    jax.nn.softmax(avg_logits_masked, axis=-1),
+                )
+                metric_carry, game_counts = jax.vmap(gm.step)(
+                    runner_state_inner.metric_carry,
+                    state_s,
+                    action,
+                    next_state,
+                    reward,
+                    done,
+                    info,
+                    probs,
+                )
+
                 game_return = runner_state_inner.game_return + reward
                 game_length = runner_state_inner.game_length + 1
-                # Game-specific per-step data (from state_s, action, info) can
-                # be added to the Transition here for logging.
                 transition = Transition(
                     obs=obs_s,
                     action_mask=action_mask,
@@ -373,6 +403,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     is_br=is_br,
                     game_return=game_return,
                     game_length=game_length,
+                    game_counts=game_counts,
                 )
                 runner_state_inner = runner_state_inner._replace(
                     state=next_state,
@@ -382,6 +413,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     ),
                     game_return=jnp.where(done[:, None], 0.0, game_return),
                     game_length=jnp.where(done, 0, game_length),
+                    metric_carry=metric_carry,
                     rng=rng_s,
                 )
                 return runner_state_inner, transition
@@ -624,6 +656,17 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             metric.update(pqn_loss_info)
             metric.update(sl_loss_info)
 
+            # Game metrics of this rollout, credited to the players they
+            # describe: game/ for the players following the average policy
+            # (NFSP's output strategy) in that game, game_br/ for those
+            # following the BR.
+            for prefix, mask in (
+                ("game", ~transitions.is_br),
+                ("game_br", transitions.is_br),
+            ):
+                totals = masked_totals(transitions.game_counts, mask)
+                metric.update(prefixed(prefix, gm.summarize(totals)))
+
             io_callback(logging_callback, None, seed, metric)
 
             # Half-budget checkpoint: the networks after num_half updates.
@@ -652,6 +695,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             br_mode=br_mode,
             game_return=jnp.zeros((num_envs, num_agents), dtype=jnp.float32),
             game_length=jnp.zeros((num_envs,), dtype=jnp.int32),
+            metric_carry=jax.tree_util.tree_map(
+                lambda x: jnp.broadcast_to(x, (num_envs,) + x.shape), gm.init_carry()
+            ),
             half=Checkpoint(avg_params, br_params),  # replaced after num_half updates
             update_step=jnp.array(0, dtype=jnp.int32),
             rng=rng,
