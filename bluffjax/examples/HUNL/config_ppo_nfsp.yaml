@@ -46,7 +46,7 @@ save_dir: ${repo_root:}/checkpoints/HUNL
 compare: true
 compare_mode: random  # "random" or "checkpoint"
 # ReBeL opponent, from hunl_rebel.py --config-name config_rebel_opponent, e.g.
-# ${repo_root:}/checkpoints/HUNL/<run>/full/value_net.msgpack (+ value_net.json alongside)
+# ${repo_root:}/checkpoints/HUNL/<run>/full/value_net_0.msgpack (+ value_net_0.json alongside)
 # (with compare_network_type actor_critic: a PPO-NFSP network file, e.g.
 # ${repo_root:}/checkpoints/HUNL/<run>/full/avg_policy_0.msgpack)
 compare_with: ""

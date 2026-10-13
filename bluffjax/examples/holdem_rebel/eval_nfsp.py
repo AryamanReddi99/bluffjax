@@ -6,7 +6,7 @@ in the NFSP scripts), plays n_deals mirrored deals (each deal from both seats)
 against the ReBeL opponent with test-time search, the same protocol as ReBeL's
 own final evaluation (holdem_rebel.agent.play_match / summarize). The ReBeL
 checkpoint is a value network file of a ReBeL run, e.g.
-<rebel_run_dir>/full/value_net.msgpack (its value_net.json alongside).
+<rebel_run_dir>/full/value_net_0.msgpack (its value_net_0.json alongside).
 
 Usage: python -m bluffjax.examples.holdem_rebel.eval_nfsp <nfsp_run_dir> <rebel_checkpoint.msgpack> [n_deals] [batch] [stage]
 stage is "full" (default) or "half". Writes <nfsp_run_dir>/eval_vs_rebel_{stage}.json.

@@ -30,7 +30,7 @@ deal from both seats) against simple opponents, logged as
 avg_return_vs_<opp> (ReBeL's mean reward per hand, in chips) and
 avg_return_se_vs_<opp> (its standard error over deals), with opp = random,
 always_call, always_raise (and always_allin in No-Limit) and, with
-compare_with, checkpoint (that ReBeL network); and the game metrics
+compare_with, baseline (that ReBeL network, as NFSP names it); and the game metrics
 (bluffjax.metrics.texas_limit_holdem / texas_nolimit_holdem) of ReBeL
 playing itself in the env with test-time search, over `metric_deals` deals
 played from both seats, logged as game/<name>. ReBeL's training data comes
@@ -375,7 +375,7 @@ def make_self_play_step(game: HoldemGame, tpl: Template, net: ValueNetwork, cfg:
         examples = jax.tree.map(lambda *xs: jnp.concatenate(xs), *examples)
         stats = {
             "subgames_solved": n_solved,
-            "hands_finished": jnp.sum(~cont),
+            "episodes_completed": jnp.sum(~cont),
             "folds": jnp.sum(kind == FOLD),
             "allin_chains": jnp.sum(to_chance & allin),
         }
@@ -551,7 +551,7 @@ def _train(game: HoldemGame, cfg: dict, run_dir: str, log: ResultsLog) -> None:
         out = {}
         opponents = [(name, i) for i, name in enumerate(heuristic_names)]
         if play_checkpoint is not None:
-            opponents.append(("checkpoint", None))
+            opponents.append(("baseline", None))  # the compare_with network, as in NFSP
         for name, idx in opponents:
             results = []
             for _ in range(max(1, num_deals // eval_batch)):
@@ -627,7 +627,7 @@ def _train(game: HoldemGame, cfg: dict, run_dir: str, log: ResultsLog) -> None:
                 f"{metrics['seconds_per_1e5_samples']:.1f}s/1e5 samples  per game-step: "
                 f"solves {metrics['subgames_solved'] / per_step:.2f} "
                 f"all-in {metrics['allin_chains'] / per_step:.2f} "
-                f"hands done {metrics['hands_finished'] / per_step:.2f}"
+                f"hands done {metrics['episodes_completed'] / per_step:.2f}"
             )
         if cfg["save_checkpoints"] and not half_saved and samples >= num_samples // 2:
             path = save("half", params, samples)

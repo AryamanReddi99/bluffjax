@@ -48,7 +48,7 @@ writes one record per seed to {run_dir}/results.jsonl (with seed_index and
 wall_time) and to the seed's wandb run: num_subgames (the subgames solved in
 self play so far, the sample counter), updates_completed, replay_size,
 root_value_p0, the mean value_loss (left out before training) and the
-games_finished of the updates since the last evaluation, exploitability,
+episodes_completed (self-play games finished) in the updates since the last evaluation, exploitability,
 value_vs_random and the policy metrics of the test-time policy, game/<name>
 (names and definitions in bluffjax.metrics.kuhn_poker). After training,
 {run_dir}/curves.json holds the config, the training time and every seed's
@@ -781,7 +781,7 @@ def make_train(
             )
             metrics = {
                 "value_loss": jnp.mean(losses),
-                "games_finished": jnp.sum(done),
+                "episodes_completed": jnp.sum(done),
             }
             # Half-budget checkpoint: the value network after num_half updates.
             take_half = runner_state.update_step + 1 == num_half
@@ -845,7 +845,7 @@ def make_train(
             )
             train_metrics = {
                 "value_loss": jnp.mean(block_metrics["value_loss"]),
-                "games_finished": jnp.sum(block_metrics["games_finished"]),
+                "episodes_completed": jnp.sum(block_metrics["episodes_completed"]),
             }
             return (runner_state, train_metrics), metrics
 
@@ -861,7 +861,7 @@ def make_train(
         # eval_interval updates.
         no_training = {
             "value_loss": jnp.float32(jnp.nan),
-            "games_finished": jnp.int32(0),
+            "episodes_completed": jnp.int32(0),
         }
         (runner_state, train_metrics), metrics = lax.scan(
             log_step,
