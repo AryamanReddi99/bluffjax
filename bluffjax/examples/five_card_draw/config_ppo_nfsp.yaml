@@ -46,8 +46,8 @@ project: bluffjax
 job_type: five_card_draw_ppo_nfsp
 wandb: false
 
-# optional checkpoint save
-save_final: true
+# half- and full-budget checkpoints in the run directory
+save_checkpoints: true
 save_dir: ${repo_root:}/checkpoints/five_card_draw
 
 # Hydra configs and logs go to outputs/ at the repo root

@@ -26,17 +26,24 @@ average-policy network.
 Units: the env pays raw chips per hand (stacks init_chips, blinds 1/2), and
 training and logging use them as they are.
 
-Checkpoints (save_final): see save_checkpoints. Baselines are loaded with
-load_params, which requires the exact parameter tree of compare_network_type.
+Game metrics (bluffjax.metrics.five_card_draw): counted at every rollout step
+and logged every update for the decisions of the players following the
+average policy in their hand (game/, NFSP's output strategy) and of those
+following the BR (game_br/). Their per-hand carry persists across updates,
+so hands that span two rollouts are counted once and exactly.
+
+Run directory and checkpoints: main() creates {save_dir}/{job_type}_{timestamp}/
+with config.yaml and results.jsonl (everything logged, as sent to wandb), and
+with save_checkpoints the networks after half and all of the updates (see
+save_checkpoints). Baselines are loaded with load_params, which requires the
+exact parameter tree of compare_network_type.
 """
 
 import datetime
-import os
 import time
 from typing import Callable, NamedTuple
 
 import distrax
-from flax import serialization
 from flax.training.train_state import TrainState
 import hydra
 import jax
@@ -56,6 +63,14 @@ from bluffjax.utils.typing import (
 )
 from bluffjax import make
 from bluffjax.environments.five_card_draw.five_card_draw import FiveCardDrawState
+from bluffjax.examples.run_utils import (
+    ResultsLog,
+    half_update_steps,
+    load_params,
+    make_run_dir,
+    save_seed_params,
+)
+from bluffjax.metrics import make_metrics, masked_totals, prefixed
 from bluffjax.networks.mlp import (
     ActorCriticDiscreteMLP,
     ActorDiscreteMLP,
@@ -65,6 +80,8 @@ from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
 WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
+# results.jsonl of the run (and wandb), created in main()
+RESULTS_LOG: ResultsLog | None = None
 # EVALUATIONS[seed] = [(env_steps, {metric name: chips per hand}), ...]
 EVALUATIONS: dict[int, list[tuple[int, dict[str, float]]]] = {}
 
@@ -81,6 +98,7 @@ class Transition(NamedTuple):
     is_br: BoolArray  # the acting player follows the BR in this hand
     br_mode: BoolArray  # (num_agents,) which players follow the BR in this hand
     hand_length: IntArray  # steps in the hand, at the step that ends it
+    game_counts: dict  # game-metric counts of this step, (num_agents, ...) each
 
 
 class SLBufferState(NamedTuple):
@@ -91,6 +109,13 @@ class SLBufferState(NamedTuple):
     size: IntArray
 
 
+class Checkpoint(NamedTuple):
+    """The two NFSP networks at one point of training."""
+
+    avg_params: Any  # average policy, NFSP's output strategy
+    br_params: Any  # best response
+
+
 class RunnerState(NamedTuple):
     br_train_state: TrainState
     avg_train_state: TrainState
@@ -99,6 +124,8 @@ class RunnerState(NamedTuple):
     obs: FloatArray
     done: BoolArray
     br_mode: BoolArray  # (num_envs, num_agents) policy drawn for the current hand
+    metric_carry: Any  # per-env game-metric carry of the current hand
+    half: Checkpoint  # networks after half_update_steps updates
     update_step: IntArray
     rng: PRNGKeyArray
 
@@ -251,32 +278,7 @@ def reservoir_append(
     )
 
 
-def load_params(path: str, template: Any, network_name: str) -> Any:
-    """Restores flax params written with serialization.to_bytes. The file must
-    hold exactly the parameter tree of `template` (same keys and shapes):
-    flax's from_bytes alone ignores extra keys, so e.g. a Q-network file
-    would load as an actor."""
-    with open(path, "rb") as f:
-        restored = serialization.msgpack_restore(f.read())
-
-    def shapes(tree):
-        leaves = jax.tree_util.tree_flatten_with_path(tree)[0]
-        return {jax.tree_util.keystr(k): np.shape(v) for k, v in leaves}
-
-    want = shapes(serialization.to_state_dict(template))
-    got = shapes(restored)
-    if want != got:
-        wrong = [k for k in want.keys() & got.keys() if want[k] != got[k]]
-        raise ValueError(
-            f"{path} does not hold {network_name} parameters: "
-            f"missing {sorted(want.keys() - got.keys())}, "
-            f"unexpected {sorted(got.keys() - want.keys())}, "
-            f"wrong shapes {[(k, got[k], want[k]) for k in sorted(wrong)]}"
-        )
-    return serialization.from_state_dict(template, restored)
-
-
-def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
+def make_train(config: dict) -> Callable[..., RunnerState]:
     env = make("five_card_draw", **config["env_kwargs"])
     action_dim = env.num_actions
     num_agents = env.num_agents
@@ -284,6 +286,8 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
         config["num_steps_per_env_per_update"] * config["num_envs"]
     )
     last_update = config["num_update_steps"] - 1
+    num_half = half_update_steps(config["num_update_steps"])
+    game_metrics = make_metrics("five_card_draw", env)
 
     # The average policy uses the same actor-critic module so that both
     # networks are evaluated the same way; only its actor is trained.
@@ -321,7 +325,7 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
         template = baseline_network.init(
             jax.random.PRNGKey(0), jnp.zeros((env.obs_dim,), dtype=jnp.float32)
         )
-        baseline_params = load_params(checkpoint_path, template, compare_network_type)
+        baseline_params = load_params(checkpoint_path, template)
         print(f"Loaded {compare_network_type} baseline from {checkpoint_path}")
 
     def linear_decay(count: int) -> float:
@@ -354,7 +358,7 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
         else:
             for name in eval_names + ("avg_eval_episode_length",):
                 metrics.pop(name, None)
-        WANDB_RUNS[seed_i].log(metrics)
+        RESULTS_LOG.log(metrics, seed_i)
 
     def init_sl_buffer(obs_dim: int) -> SLBufferState:
         capacity = config["sl_reservoir_capacity"]
@@ -462,7 +466,11 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
         eval_len = (avg_len.mean() + br_len.mean()) / 2
         return avg_chips.mean(), br_chips.mean(), eval_len
 
-    def train(rng: PRNGKeyArray, seed: int) -> RunnerState:
+    def train(
+        rng: PRNGKeyArray, seed: int, num_updates: int | None = None
+    ) -> RunnerState:
+        """Runs num_updates updates (default: all of them) of one seed. The
+        schedules always span config["num_update_steps"] updates."""
         rng, rng_reset, rng_br_init, rng_avg_init, rng_mode = jax.random.split(rng, 5)
         state, obs = jax.vmap(env.reset)(jax.random.split(rng_reset, config["num_envs"]))
         br_params = network.init(rng_br_init, obs)
@@ -528,6 +536,15 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
                 next_state, next_obs, reward, _, done, info = jax.vmap(env.step)(
                     jax.random.split(rng_step, config["num_envs"]), state, action
                 )
+                metric_carry, game_counts = jax.vmap(game_metrics.step)(
+                    runner_state.metric_carry,
+                    state,
+                    action,
+                    next_state,
+                    reward,
+                    done,
+                    info,
+                )
 
                 # A new hand starts after done (the env auto-resets): every
                 # player draws BR (prob. anticipatory_eta) or average policy.
@@ -548,12 +565,14 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
                     is_br=is_br,
                     br_mode=br_mode,
                     hand_length=info["timestep"],
+                    game_counts=game_counts,
                 )
                 runner_state = runner_state._replace(
                     state=next_state,
                     obs=next_obs,
                     done=done,
                     br_mode=next_br_mode,
+                    metric_carry=metric_carry,
                     rng=rng,
                 )
                 return runner_state, transition
@@ -824,14 +843,41 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
             }
             metric.update(ppo_loss_info)
             metric.update(sl_loss_info)
+            # Game metrics of this rollout's decisions, by the policy the
+            # credited player follows in that hand: average policy (game/,
+            # NFSP's output strategy) and BR (game_br/).
+            metric.update(
+                prefixed(
+                    "game",
+                    game_metrics.summarize(
+                        masked_totals(transitions.game_counts, ~transitions.br_mode)
+                    ),
+                )
+            )
+            metric.update(
+                prefixed(
+                    "game_br",
+                    game_metrics.summarize(
+                        masked_totals(transitions.game_counts, transitions.br_mode)
+                    ),
+                )
+            )
             jax.experimental.io_callback(
                 logging_callback, None, seed, metric, should_compare
             )
 
+            # Half-budget checkpoint: the networks after num_half updates.
+            take_half = update + 1 == num_half
+            half = jax.tree_util.tree_map(
+                lambda new, old: jnp.where(take_half, new, old),
+                Checkpoint(avg_train_state.params, br_train_state.params),
+                runner_state.half,
+            )
             runner_state = runner_state._replace(
                 br_train_state=br_train_state,
                 avg_train_state=avg_train_state,
                 sl_buffer=sl_buffer,
+                half=half,
                 update_step=update + 1,
                 rng=rng,
             )
@@ -845,45 +891,58 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
             obs=obs,
             done=jnp.zeros((config["num_envs"]), dtype=jnp.bool_),
             br_mode=br_mode,
+            metric_carry=jax.vmap(lambda _: game_metrics.init_carry())(
+                jnp.arange(config["num_envs"])
+            ),
+            half=Checkpoint(avg_params, br_params),  # replaced after num_half updates
             update_step=jnp.array(0, dtype=jnp.int32),
             rng=rng,
         )
         final_runner_state, _ = lax.scan(
-            update_step, initial_runner_state, None, config["num_update_steps"]
+            update_step,
+            initial_runner_state,
+            None,
+            config["num_update_steps"] if num_updates is None else num_updates,
         )
         return final_runner_state
 
     return train
 
 
-def save_checkpoints(config: dict, final_runner_state: RunnerState) -> str:
-    """Saves the networks of every seed after training.
+def save_checkpoints(
+    run_dir: str, num_seeds: int, half: Checkpoint, full: Checkpoint
+) -> str:
+    """Saves the networks of every seed at half and at the full budget.
 
-    Layout of {save_dir}/{job_type}_{timestamp}/:
-        avg_policy_{i}.msgpack  average policy of seed i (NFSP's output strategy)
-        br_{i}.msgpack          PPO best response of seed i
-        config.yaml             resolved config of the run
-    i = 0..num_seeds-1 indexes the vmapped seeds (wandb run "{seed}_{i}"). Each
-    file holds the flax params of one network, without a seed axis, written with
-    flax.serialization.to_bytes. Both networks are
-    ActorCriticDiscreteMLP(action_dim=37, hidden_dim=fc_dim_size) mapping a raw
-    env observation to (action logits, value); load either one as a baseline
-    with compare_network_type=actor_critic, and mask illegal actions before the
-    softmax. The value head of the average policy is unused.
+    Layout of the run directory (bluffjax.examples.run_utils.make_run_dir):
+        config.yaml                  resolved config of the run
+        results.jsonl                everything logged (see run_utils)
+        half/avg_policy_{i}.msgpack  after half_update_steps(num_update_steps)
+        half/br_{i}.msgpack          (= num_update_steps // 2) updates
+        full/avg_policy_{i}.msgpack  after all num_update_steps updates
+        full/br_{i}.msgpack
+    avg_policy is the average policy (NFSP's output strategy), br the PPO best
+    response. Both checkpoints come from the same run: the half one is the
+    state after exactly that many updates, with the learning-rate schedule
+    running over the whole run (config.yaml records num_update_steps and
+    half_update_steps). i = 0..num_seeds-1 indexes the vmapped seeds (wandb
+    run "{seed}_{i}"). Each file holds the flax params of one network, without
+    a seed axis, written with flax.serialization.to_bytes; restore one with
+    load_params(path, template), where template = network.init(rng, obs).
+    Both networks are ActorCriticDiscreteMLP(action_dim=37,
+    hidden_dim=fc_dim_size), mapping the acting player's observation
+    (env.obs_from_state(state), env.obs_dim = 57 + 6 * num_agents floats) to
+    (action logits, value in chips); the value head of the average policy is
+    unused. Mask illegal actions (env.get_avail_actions(state)) before the
+    softmax. Load either one as an evaluation baseline with
+    compare_mode=checkpoint and compare_network_type=actor_critic.
     """
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = os.path.join(config["save_dir"], f"{config['job_type']}_{timestamp}")
-    os.makedirs(run_dir, exist_ok=True)
-    networks = {
-        "avg_policy": final_runner_state.avg_train_state.params,
-        "br": final_runner_state.br_train_state.params,
-    }
-    for name, params in networks.items():
-        for i in range(config["num_seeds"]):
-            params_i = jax.tree_util.tree_map(lambda x: np.asarray(x[i]), params)
-            with open(os.path.join(run_dir, f"{name}_{i}.msgpack"), "wb") as f:
-                f.write(serialization.to_bytes(params_i))
-    OmegaConf.save(OmegaConf.create(config), os.path.join(run_dir, "config.yaml"))
+    for stage, checkpoint in (("half", half), ("full", full)):
+        for name, params in (
+            ("avg_policy", checkpoint.avg_params),
+            ("br", checkpoint.br_params),
+        ):
+            save_seed_params(run_dir, stage, name, params, range(num_seeds))
     return run_dir
 
 
@@ -902,7 +961,7 @@ def print_eval_summary() -> None:
 
 @hydra.main(version_base=None, config_path="./", config_name="config_ppo_nfsp")
 def main(config: dict) -> None:
-    global WANDB_RUNS
+    global WANDB_RUNS, RESULTS_LOG
     try:
         config = OmegaConf.to_container(config, resolve=True)
         config["num_update_steps"] = int(
@@ -910,6 +969,7 @@ def main(config: dict) -> None:
             // config["num_envs"]
             // config["num_steps_per_env_per_update"]
         )
+        config["half_update_steps"] = half_update_steps(config["num_update_steps"])
         config["num_gradient_steps"] = (
             config["num_update_steps"]
             * config["num_epochs"]
@@ -920,6 +980,8 @@ def main(config: dict) -> None:
             * config["num_envs"]
             * config["num_steps_per_env_per_update"]
         )
+        run_dir = make_run_dir(config)
+        print(f"Run directory: {run_dir}")
 
         rng = jax.random.PRNGKey(config["seed"])
         rng_seeds = jax.random.split(rng, config["num_seeds"])
@@ -949,6 +1011,7 @@ def main(config: dict) -> None:
             )
             for i in range(config["num_seeds"])
         ]
+        RESULTS_LOG = ResultsLog(run_dir, WANDB_RUNS)
 
         print("Running...")
         start = time.time()
@@ -959,8 +1022,16 @@ def main(config: dict) -> None:
             f"{run_time:.1f} s (all seeds in parallel, evaluation included)"
         )
         print_eval_summary()
-        if config["save_final"]:
-            run_dir = save_checkpoints(config, final_runner_state)
+        if config["save_checkpoints"]:
+            save_checkpoints(
+                run_dir,
+                config["num_seeds"],
+                final_runner_state.half,
+                Checkpoint(
+                    final_runner_state.avg_train_state.params,
+                    final_runner_state.br_train_state.params,
+                ),
+            )
             print(f"Saved checkpoints to {run_dir}")
     finally:
         for run in WANDB_RUNS:
