@@ -18,10 +18,36 @@ acting player's perfect-recall information state).
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
 - Evaluation: exact exploitability (leduc_exploitability) of the average and
-  BR policies every eval_interval updates and after the last update.
+  BR policies every eval_interval updates and after the last update, and at
+  the same points the exact behaviour metrics of bluffjax.metrics.leduc_holdem
+  (bluff rate and success, correct-fold rate, round-2 raise rates with and
+  without a pair; definitions there) of the average policy in self-play as
+  game/<name> and of the BR in self-play as game_br/<name>.
 
 Units: the env pays chips per hand. Training uses reward * reward_scale, and
 logged returns and exploitability are in chips.
+
+Run directory ({save_dir}/{job_type}_{timestamp}/, made when the run starts;
+see bluffjax.examples.run_utils):
+    config.yaml                  resolved config, with num_update_steps and
+                                 half_update_steps
+    results.jsonl                every logged record (what wandb gets, plus
+                                 seed_index and wall_time); each has
+                                 update_step and env_steps
+    half/avg_policy_{i}.msgpack  after half_update_steps(num_update_steps)
+    half/br_{i}.msgpack          (= num_update_steps // 2) updates
+    full/avg_policy_{i}.msgpack  after all num_update_steps updates
+    full/br_{i}.msgpack
+(checkpoints when save_checkpoints). Both checkpoints come from the same run,
+with the learning-rate schedule over the whole run; i = 0..num_seeds-1 is the
+vmapped seed (wandb run "{seed}_{i}"). Each file holds the flax params of one
+ActorCriticDiscreteMLP(action_dim=3, hidden_dim=fc_dim_size), without a seed
+axis; load with run_utils.load_params(path, network.init(rng, obs)). The
+network maps the acting player's observation (env.obs_from_state, 24 floats)
+to (action logits over fold/call/raise, value in units of reward_scale *
+chips); mask illegal actions (env.get_avail_actions) before the softmax. The
+average policy's value head is untrained. policy_array_from_network(
+network.apply, params, _INFOSET_LIST) gives the policy at every infoset.
 """
 
 import datetime
@@ -51,6 +77,14 @@ from bluffjax.environments.leduc_holdem.leduc_holdem import (
     MAX_ACTIONS_PER_ROUND,
     LeducHoldemState,
 )
+from bluffjax.examples.run_utils import (
+    CHECKPOINT_STAGES,
+    ResultsLog,
+    half_update_steps,
+    make_run_dir,
+    save_seed_params,
+)
+from bluffjax.metrics.leduc_holdem import log_metrics
 from bluffjax.networks.mlp import ActorCriticDiscreteMLP
 from bluffjax.utils.game_utils.leduc_exploitability import (
     _INFOSET_LIST,
@@ -62,6 +96,7 @@ from bluffjax.utils.jax_utils import pytree_norm
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
 WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
+RESULTS_LOG: ResultsLog | None = None  # results.jsonl and wandb, created in main()
 # EXPLOITABILITY[seed] = [(env_steps, {policy name: exploitability}), ...]
 EXPLOITABILITY: dict[int, list[tuple[int, dict[str, float]]]] = {}
 
@@ -88,6 +123,13 @@ class SLBufferState(NamedTuple):
     size: IntArray
 
 
+class Checkpoint(NamedTuple):
+    """The two NFSP networks at one point of training."""
+
+    avg_params: Any  # average policy, NFSP's output strategy
+    br_params: Any  # best response
+
+
 class RunnerState(NamedTuple):
     br_train_state: TrainState
     avg_train_state: TrainState
@@ -96,6 +138,7 @@ class RunnerState(NamedTuple):
     obs: FloatArray
     done: BoolArray
     br_mode: BoolArray  # (num_envs, num_agents) policy drawn for the current hand
+    half: Checkpoint  # networks after half_update_steps updates
     update_step: IntArray
     rng: PRNGKeyArray
 
@@ -248,7 +291,9 @@ def reservoir_append(
     )
 
 
-def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
+def make_train(config: dict) -> Callable[..., RunnerState]:
+    """train(rng, seed, num_updates=None): runs num_updates updates (default
+    all num_update_steps; fewer stops the same run early, for tests)."""
     env = make("leduc_holdem", **config["env_kwargs"])
     if env.horizon < 2 * MAX_ACTIONS_PER_ROUND:
         # A truncated hand pays 0, but exploitability is for the full game.
@@ -267,34 +312,42 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
     )
     eval_interval = config["eval_interval"]
     last_update = config["num_update_steps"] - 1
+    num_half = half_update_steps(config["num_update_steps"])
 
     def linear_decay(count: int) -> float:
         frac = 1.0 - count / config["num_gradient_steps"]
         return config["lr"] * frac
 
     def logging_callback(seed_val, metric_dict, policy_arrays) -> None:
-        """Logs the metrics; computes the exact exploitability when it is due."""
+        """Logs the metrics; computes the exact exploitability and behaviour
+        metrics when they are due."""
         seed_i = int(seed_val)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
         update = int(metrics["update_step"])
         if update % eval_interval == 0 or update == last_update:
-            expl = {
-                name: exploitability_from_policy_array(
-                    np.asarray(arr, dtype=np.float64), _KEY_TO_IDX
-                )
+            policies = {
+                name: np.asarray(arr, dtype=np.float64)
                 for name, arr in policy_arrays.items()
+            }
+            expl = {
+                name: exploitability_from_policy_array(arr, _KEY_TO_IDX)
+                for name, arr in policies.items()
             }
             env_steps = int(metrics["env_steps"])
             EXPLOITABILITY.setdefault(seed_i, []).append((env_steps, expl))
             metrics["exploitability_avg_policy"] = expl["avg_policy"]
             metrics["exploitability_br_policy"] = expl["br_policy"]
+            metrics.update(log_metrics("game", policies["avg_policy"]))
+            metrics.update(log_metrics("game_br", policies["br_policy"]))
             print(
                 f"seed {seed_i} update {update + 1}/{last_update + 1} "
                 f"({env_steps} env steps): exploitability average policy "
-                f"{expl['avg_policy']:.4f}, BR {expl['br_policy']:.4f}",
+                f"{expl['avg_policy']:.4f}, BR {expl['br_policy']:.4f}; average "
+                f"policy bluff rate {metrics['game/bluff_rate']:.3f}, "
+                f"correct folds {metrics['game/correct_fold_rate']:.3f}",
                 flush=True,
             )
-        WANDB_RUNS[seed_i].log(metrics)
+        RESULTS_LOG.log(metrics, seed_i)
 
     def init_sl_buffer(obs_dim: int) -> SLBufferState:
         capacity = config["sl_reservoir_capacity"]
@@ -321,7 +374,9 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
         denom = jnp.maximum(mask.sum(), 1.0)
         return (x * mask).sum() / denom
 
-    def train(rng: PRNGKeyArray, seed: int) -> RunnerState:
+    def train(
+        rng: PRNGKeyArray, seed: int, num_updates: int | None = None
+    ) -> RunnerState:
         rng, rng_reset, rng_br_init, rng_avg_init, rng_mode = jax.random.split(rng, 5)
         rng_resets = jax.random.split(rng_reset, config["num_envs"])
         state, obs = jax.vmap(env.reset, in_axes=(0))(rng_resets)
@@ -408,15 +463,11 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
                     br_mode=br_mode,
                     info=info,
                 )
-                runner_state = RunnerState(
-                    br_train_state=br_train_state,
-                    avg_train_state=avg_train_state,
-                    sl_buffer=runner_state.sl_buffer,
+                runner_state = runner_state._replace(
                     state=next_state,
                     obs=next_obs,
                     done=done,
                     br_mode=next_br_mode,
-                    update_step=runner_state.update_step,
                     rng=rng,
                 )
                 return runner_state, transition
@@ -705,6 +756,13 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
                 logging_callback, None, seed, metric, policy_arrays
             )
 
+            # Half-budget checkpoint: the networks after num_half updates.
+            take_half = runner_state.update_step + 1 == num_half
+            half = jax.tree_util.tree_map(
+                lambda new, old: jnp.where(take_half, new, old),
+                Checkpoint(avg_train_state.params, br_train_state.params),
+                runner_state.half,
+            )
             runner_state = RunnerState(
                 br_train_state=br_train_state,
                 avg_train_state=avg_train_state,
@@ -713,6 +771,7 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
                 obs=runner_state.obs,
                 done=runner_state.done,
                 br_mode=runner_state.br_mode,
+                half=half,
                 update_step=runner_state.update_step + 1,
                 rng=rng,
             )
@@ -726,15 +785,31 @@ def make_train(config: dict) -> Callable[[PRNGKeyArray, int], RunnerState]:
             obs=obs,
             done=jnp.zeros((config["num_envs"]), dtype=jnp.bool_),
             br_mode=br_mode,
+            half=Checkpoint(avg_params, br_params),  # replaced after num_half updates
             update_step=jnp.array(0, dtype=jnp.int32),
             rng=rng,
         )
         final_runner_state, _ = lax.scan(
-            update_step, initial_runner_state, None, config["num_update_steps"]
+            update_step,
+            initial_runner_state,
+            None,
+            config["num_update_steps"] if num_updates is None else num_updates,
         )
         return final_runner_state
 
     return train
+
+
+def save_checkpoints(
+    run_dir: str, num_seeds: int, half: Checkpoint, full: Checkpoint
+) -> None:
+    """Writes {half,full}/{avg_policy,br}_{i}.msgpack for every seed i (layout
+    and contents in the module docstring); params have a leading seed axis."""
+    for stage, checkpoint in zip(CHECKPOINT_STAGES, (half, full)):
+        save_seed_params(
+            run_dir, stage, "avg_policy", checkpoint.avg_params, range(num_seeds)
+        )
+        save_seed_params(run_dir, stage, "br", checkpoint.br_params, range(num_seeds))
 
 
 def print_exploitability_summary(names: list[str]) -> None:
@@ -750,7 +825,7 @@ def print_exploitability_summary(names: list[str]) -> None:
 
 @hydra.main(version_base=None, config_path="./", config_name="config_ppo_nfsp")
 def main(config: dict) -> None:
-    global WANDB_RUNS
+    global WANDB_RUNS, RESULTS_LOG
     try:
         config = OmegaConf.to_container(config, resolve=True)
         config["num_update_steps"] = int(
@@ -758,6 +833,7 @@ def main(config: dict) -> None:
             // config["num_envs"]
             // config["num_steps_per_env_per_update"]
         )
+        config["half_update_steps"] = half_update_steps(config["num_update_steps"])
         config["num_gradient_steps"] = (
             config["num_update_steps"]
             * config["num_epochs"]
@@ -769,17 +845,7 @@ def main(config: dict) -> None:
             * config["num_steps_per_env_per_update"]
         )
 
-        rng = jax.random.PRNGKey(config["seed"])
-        rng_seeds = jax.random.split(rng, config["num_seeds"])
-        exp_ids = jnp.arange(config["num_seeds"])
-
-        print("Starting compile...")
-        start = time.time()
-        train_vjit = (
-            jax.jit(jax.vmap(make_train(config))).lower(rng_seeds, exp_ids).compile()
-        )
-        print(f"Compile finished in {time.time() - start:.1f} s")
-
+        run_dir = make_run_dir(config)
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
@@ -797,16 +863,40 @@ def main(config: dict) -> None:
             )
             for i in range(config["num_seeds"])
         ]
+        RESULTS_LOG = ResultsLog(run_dir, WANDB_RUNS)
+        print(f"Run directory: {run_dir}")
+
+        rng = jax.random.PRNGKey(config["seed"])
+        rng_seeds = jax.random.split(rng, config["num_seeds"])
+        exp_ids = jnp.arange(config["num_seeds"])
+
+        print("Starting compile...")
+        start = time.time()
+        train_vjit = (
+            jax.jit(jax.vmap(make_train(config))).lower(rng_seeds, exp_ids).compile()
+        )
+        print(f"Compile finished in {time.time() - start:.1f} s")
 
         print("Running...")
         start = time.time()
-        jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
         run_time = time.time() - start
         print(
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "
             f"{run_time:.1f} s (all seeds in parallel, exploitability included)"
         )
         print_exploitability_summary(["avg_policy", "br_policy"])
+        if config["save_checkpoints"]:
+            save_checkpoints(
+                run_dir,
+                config["num_seeds"],
+                final_runner_state.half,
+                Checkpoint(
+                    final_runner_state.avg_train_state.params,
+                    final_runner_state.br_train_state.params,
+                ),
+            )
+            print(f"Saved checkpoints to {run_dir}")
     finally:
         for run in WANDB_RUNS:
             run.finish()
