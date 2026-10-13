@@ -29,10 +29,16 @@ eval_every: 1e6  # samples
 eval_deals: 128  # per opponent at each evaluation
 final_eval_deals: 2048  # per opponent at the end
 eval_batch_deals: 128  # deals played at once (GPU memory)
-compare_with: ""  # also play this ReBeL checkpoint, e.g. ${repo_root:}/checkpoints/HUNL/hunl_rebel_seed<seed>_<timestamp>.msgpack
+compare_with: ""  # also play this ReBeL checkpoint, e.g. ${repo_root:}/checkpoints/HUNL/<run>/full/value_net.msgpack (+ value_net.json)
+# Game metrics (logged as game/<name>) of ReBeL playing itself in the env at
+# every evaluation: deals, each played from both seats (whole batches of
+# eval_batch_deals); 0 turns them off
+metric_deals: 256
 
 log_every_chunks: 10
-save_final: true
+# value network after half and all of the samples, in the run directory
+# (see holdem_rebel/train.py)
+save_checkpoints: true
 save_dir: ${repo_root:}/checkpoints/HUNL
 
 env_name: hunl

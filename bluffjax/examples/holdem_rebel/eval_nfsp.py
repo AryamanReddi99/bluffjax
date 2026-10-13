@@ -1,12 +1,15 @@
 """Final evaluation of NFSP average policies against a ReBeL checkpoint.
 
-For every seed of an NFSP run (avg_policy_{i}.msgpack, NFSP's output strategy),
-plays n_deals mirrored deals (each deal from both seats) against the ReBeL
-opponent with test-time search, the same protocol as ReBeL's own final
-evaluation (holdem_rebel.agent.play_match / summarize).
+For every seed of an NFSP run (the run directory's {stage}/avg_policy_{i}.msgpack,
+NFSP's output strategy after half or all of the updates, see save_checkpoints
+in the NFSP scripts), plays n_deals mirrored deals (each deal from both seats)
+against the ReBeL opponent with test-time search, the same protocol as ReBeL's
+own final evaluation (holdem_rebel.agent.play_match / summarize). The ReBeL
+checkpoint is a value network file of a ReBeL run, e.g.
+<rebel_run_dir>/full/value_net.msgpack (its value_net.json alongside).
 
-Usage: python -m bluffjax.examples.holdem_rebel.eval_nfsp <nfsp_run_dir> <rebel_checkpoint.msgpack> [n_deals] [batch]
-Writes <nfsp_run_dir>/eval_vs_rebel.json.
+Usage: python -m bluffjax.examples.holdem_rebel.eval_nfsp <nfsp_run_dir> <rebel_checkpoint.msgpack> [n_deals] [batch] [stage]
+stage is "full" (default) or "half". Writes <nfsp_run_dir>/eval_vs_rebel_{stage}.json.
 """
 
 import json
@@ -17,11 +20,11 @@ import time
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax import serialization
 from omegaconf import OmegaConf
 
 from bluffjax import make
 from bluffjax.examples.holdem_rebel.agent import PolicyPlayer, load_rebel, play_match, summarize
+from bluffjax.examples.run_utils import checkpoint_path, load_params
 from bluffjax.networks.mlp import ActorCriticDiscreteMLP, ActorDiscreteMLP
 
 ENV_IDS = {"hul": "texas_limit_holdem", "hunl": "texas_nolimit_holdem"}
@@ -39,7 +42,7 @@ def avg_network(game: str, algo: str, action_dim: int, hidden: int):
     return base
 
 
-def main(run_dir: str, rebel_path: str, n_deals: int, batch: int) -> None:
+def main(run_dir: str, rebel_path: str, n_deals: int, batch: int, stage: str = "full") -> None:
     cfg = OmegaConf.to_container(OmegaConf.load(os.path.join(run_dir, "config.yaml")))
     game_name = cfg["env_name"]
     algo = "ppo" if "ppo" in cfg["job_type"] else "pqn"
@@ -63,8 +66,7 @@ def main(run_dir: str, rebel_path: str, n_deals: int, batch: int) -> None:
     )
     per_seed = []
     for i in range(cfg["num_seeds"]):
-        with open(os.path.join(run_dir, f"avg_policy_{i}.msgpack"), "rb") as f:
-            params = serialization.from_bytes(template, f.read())
+        params = load_params(checkpoint_path(run_dir, stage, "avg_policy", i), template)
         rng = jax.random.PRNGKey(10_000 + i)
         t0 = time.time()
         results = []
@@ -78,13 +80,14 @@ def main(run_dir: str, rebel_path: str, n_deals: int, batch: int) -> None:
               f"re-solves {res['resolves']}, unfinished {res['unfinished']}, {res['seconds']:.0f} s)", flush=True)
     means = np.array([r["mean"] for r in per_seed])
     summary = {
-        "run_dir": run_dir, "rebel_checkpoint": rebel_path, "rebel_samples": meta.get("samples"),
+        "run_dir": run_dir, "stage": stage, "rebel_checkpoint": rebel_path,
+        "rebel_samples": meta.get("samples"),
         "game": game_name, "algo": algo, "units": "BB per hand" if game_name == "hul" else "chips per hand",
         "deals_per_seed": n_deals, "mean_over_seeds": float(means.mean()),
         "se_over_seeds": float(means.std(ddof=1) / np.sqrt(len(means))) if len(means) > 1 else float("nan"),
         "per_seed": per_seed,
     }
-    with open(os.path.join(run_dir, "eval_vs_rebel.json"), "w") as f:
+    with open(os.path.join(run_dir, f"eval_vs_rebel_{stage}.json"), "w") as f:
         json.dump(summary, f, indent=1)
     print(f"{game_name} {algo}-NFSP vs ReBeL: {summary['mean_over_seeds']:+.4f} +- {summary['se_over_seeds']:.4f} "
           f"{summary['units']} over {len(means)} seeds")
@@ -92,4 +95,5 @@ def main(run_dir: str, rebel_path: str, n_deals: int, batch: int) -> None:
 
 if __name__ == "__main__":
     a = sys.argv
-    main(a[1], a[2], int(a[3]) if len(a) > 3 else 2048, int(a[4]) if len(a) > 4 else 128)
+    main(a[1], a[2], int(a[3]) if len(a) > 3 else 2048, int(a[4]) if len(a) > 4 else 128,
+         a[5] if len(a) > 5 else "full")

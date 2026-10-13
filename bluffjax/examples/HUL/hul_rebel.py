@@ -11,6 +11,12 @@ bluffjax/examples/holdem_rebel/.
     # evaluation opponent of the paper (5e6 samples):
     uv run --extra baselines python bluffjax/examples/HUL/hul_rebel.py \
         --config-name config_rebel_opponent
+
+One seed per process. The run writes {save_dir}/{job_type}_{timestamp}/
+with config.yaml, results.jsonl (evaluations and game metrics of ReBeL
+against itself, game/<name>) and the value network after half and all of
+the samples (half/value_net.msgpack, full/value_net.msgpack with their .json
+metadata); see bluffjax/examples/holdem_rebel/train.py.
 """
 
 import hydra
