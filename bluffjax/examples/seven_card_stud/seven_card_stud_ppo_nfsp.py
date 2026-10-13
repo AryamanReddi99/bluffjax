@@ -23,8 +23,9 @@ average-policy network (the observation is relative to the player to act).
   every other seat, with the learner's seat rotating over the hands from a
   random seat (see play_eval_games). Logged per policy: win, loss and draw
   rates (net big bets positive, negative, zero), the win rate of the decided
-  hands, big bets per hand and hand length, as
-  {stat}_{avg|br}_vs_{random|baseline}.
+  hands (NaN if there were none), big bets per hand and hand length, as
+  {stat}_vs_{random|baseline} for the average policy and
+  {stat}_br_vs_{random|baseline} for the BR.
 
 Units: the env pays big bets per hand; training and logged returns use them.
 
@@ -71,7 +72,7 @@ from bluffjax.examples.run_utils import (
     make_run_dir,
     save_seed_params,
 )
-from bluffjax.metrics import make_metrics, masked_totals, prefixed
+from bluffjax.metrics import make_metrics, masked_totals, prefixed, rate
 from bluffjax.networks.mlp import (
     ActorCriticDiscreteMLP,
     ActorDiscreteMLP,
@@ -358,13 +359,16 @@ def play_eval_games(
 
 
 def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
-    """Means over the evaluation hands; win_rate_decided excludes draws."""
+    """Means over the evaluation hands, as {stat}_{name}; win_rate_decided
+    excludes draws and is NaN if every hand was a draw (bluffjax.metrics.rate).
+    name is vs_{opponent} for the average policy and br_vs_{opponent} for the
+    BR."""
     decided = result.win.sum() + result.loss.sum()
     return {
         f"win_rate_{name}": result.win.mean(),
         f"loss_rate_{name}": result.loss.mean(),
         f"draw_rate_{name}": result.draw.mean(),
-        f"win_rate_decided_{name}": result.win.sum() / jnp.maximum(decided, 1.0),
+        f"win_rate_decided_{name}": rate(result.win.sum(), decided),
         f"avg_return_{name}": result.ret.mean(),
         f"avg_episode_length_{name}": result.length.mean(),
     }
@@ -529,12 +533,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     def run_compare_eval(
         rng: PRNGKeyArray, avg_params: Any, br_params: Any
     ) -> dict[str, FloatArray]:
-        """Evaluation metrics of the average policy and the BR."""
+        """Evaluation metrics of the average policy ({stat}_vs_{opponent})
+        and the BR ({stat}_br_vs_{opponent})."""
         rng_avg, rng_br = jax.random.split(rng)
         metrics = {}
-        for name, act, params, rng_eval in (
-            ("avg", sample_masked_action, avg_params, rng_avg),
-            ("br", sample_masked_action, br_params, rng_br),
+        for prefix, act, params, rng_eval in (
+            ("", sample_masked_action, avg_params, rng_avg),
+            ("br_", sample_masked_action, br_params, rng_br),
         ):
             result = play_eval_games(
                 env,
@@ -545,7 +550,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 config["compare_episodes"],
                 rng_eval,
             )
-            metrics.update(eval_metrics(f"{name}_vs_{opponent}", result))
+            metrics.update(eval_metrics(f"{prefix}vs_{opponent}", result))
         return metrics
 
     def train(
@@ -895,13 +900,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "env_steps": (runner_state.update_step + 1)
                 * config["num_envs"]
                 * config["num_steps_per_env_per_update"],
-                "hands_completed": transitions.done.sum(),
+                "episodes_completed": transitions.done.sum(),
                 "ep_length_avg": (transitions.timestep * transitions.done).sum()
                 / num_hands,
-                "br_return_per_hand": (transitions.reward * br_hands).sum()
-                / jnp.maximum(br_hands.sum(), 1),
-                "avg_return_per_hand": (transitions.reward * avg_hands).sum()
+                "return_per_episode": (transitions.reward * avg_hands).sum()
                 / jnp.maximum(avg_hands.sum(), 1),
+                "return_per_episode_br": (transitions.reward * br_hands).sum()
+                / jnp.maximum(br_hands.sum(), 1),
                 "br_action_frac_rollout": transitions.is_br.mean(),
                 "ppo_sample_frac": train_mask.mean(),
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
@@ -934,8 +939,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 )
             )
 
-            # update comes from the scan (not the per-seed state), so it isn't
-            # batched over seeds and the cond really skips the evaluation.
+            # update is the scan's update index, the same for every seed (never
+            # batched under the vmap over seeds), so the cond really skips the
+            # evaluation in the other updates.
             evaluated = compare_enabled & (
                 (update % compare_interval == 0) | (update == last_update)
             )
@@ -1063,20 +1069,12 @@ def main(config: dict) -> None:
             * config["num_envs"]
             * config["num_steps_per_env_per_update"]
         )
+        train = make_train(config)  # completes config (batch_shuffle_dim)
+
+        # The run directory and the results log come first, so that
+        # results.jsonl fills while the run trains (wall_time counts from
+        # here, compilation included).
         run_dir = make_run_dir(config)
-        print(f"Run directory: {run_dir}")
-
-        rng = jax.random.PRNGKey(config["seed"])
-        rng_seeds = jax.random.split(rng, config["num_seeds"])
-        exp_ids = jnp.arange(config["num_seeds"])
-
-        print("Starting compile...")
-        start = time.time()
-        train_vjit = (
-            jax.jit(jax.vmap(make_train(config))).lower(rng_seeds, exp_ids).compile()
-        )
-        print(f"Compile finished in {time.time() - start:.1f} s")
-
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
@@ -1095,10 +1093,21 @@ def main(config: dict) -> None:
             for i in range(config["num_seeds"])
         ]
         RESULTS_LOG = ResultsLog(run_dir, WANDB_RUNS)
+        print(f"Run directory: {run_dir}")
+
+        rng = jax.random.PRNGKey(config["seed"])
+        rng_seeds = jax.random.split(rng, config["num_seeds"])
+        exp_ids = jnp.arange(config["num_seeds"])
+
+        print("Starting compile...")
+        start = time.time()
+        train_vjit = jax.jit(jax.vmap(train)).lower(rng_seeds, exp_ids).compile()
+        print(f"Compile finished in {time.time() - start:.1f} s")
 
         print("Running...")
         start = time.time()
         final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        jax.effects_barrier()  # every update's record is in results.jsonl
         run_time = time.time() - start
         print(
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "

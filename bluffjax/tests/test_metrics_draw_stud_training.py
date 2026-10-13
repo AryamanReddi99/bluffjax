@@ -135,7 +135,7 @@ def test_game_metrics_plumbing(monkeypatch, name):
         assert row["game_br/decisions"] / decisions == pytest.approx(
             row["br_action_frac_rollout"], abs=1e-6
         )
-        hands = row["hands_completed"]
+        hands = row["episodes_completed"]
         assert hands > 0
         assert row["game/hands"] + row["game_br/hands"] == P * hands
         assert row["game/length"] + row["game_br/length"] == pytest.approx(
@@ -171,7 +171,7 @@ def _check_game_metrics(name: str, records: list[dict]) -> None:
                 assert math.isnan(value) or 0 <= value <= 5, (key, value)
             else:
                 assert math.isnan(value) or 0 <= value <= 1, (key, value)
-        hands = row["hands_completed"]
+        hands = row["episodes_completed"]
         if _game(name) == "seven_card_stud":
             # every hand is credited to both players, under either policy
             assert row["game/n_hands"] + row["game_br/n_hands"] == 2 * hands
@@ -187,7 +187,8 @@ def _check_game_metrics(name: str, records: list[dict]) -> None:
             assert sum(row[key] for row in records) > 0
 
 
-# logged per policy as {stat}_{avg|br}_vs_{random|baseline}
+# logged as {stat}_vs_{random|baseline} for the average policy and
+# {stat}_br_vs_{random|baseline} for the BR
 EVAL_STATS = (
     "win_rate", "loss_rate", "draw_rate", "win_rate_decided", "avg_return",
     "avg_episode_length",
@@ -196,14 +197,17 @@ EVAL_STATS = (
 
 def _check_eval_metrics(row: dict, opponent: str) -> None:
     """The evaluation metrics of both policies, and nothing else with _vs_."""
-    names = [f"{policy}_vs_{opponent}" for policy in ("avg", "br")]
+    names = [f"{policy}vs_{opponent}" for policy in ("", "br_")]
     assert {k for k in row if "_vs_" in k} == {
         f"{stat}_{name}" for stat in EVAL_STATS for name in names
     }
     for name in names:
         total = sum(row[f"{x}_rate_{name}"] for x in ("win", "loss", "draw"))
         assert total == pytest.approx(1.0, abs=1e-6)
-        assert 0.0 <= row[f"win_rate_decided_{name}"] <= 1.0
+        if row[f"draw_rate_{name}"] < 1.0:
+            assert 0.0 <= row[f"win_rate_decided_{name}"] <= 1.0
+        else:  # no decided hand
+            assert math.isnan(row[f"win_rate_decided_{name}"])
         assert row[f"avg_episode_length_{name}"] >= 1.0
 
 

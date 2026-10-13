@@ -1,9 +1,15 @@
 """
-Parts shared by the PPO-NFSP and PQN-NFSP scripts of the simultaneous-move
-games, Goofspiel (bluffjax/examples/goofspiel) and Kemps
-(bluffjax/examples/kemps): the per-agent training targets, the NFSP reservoir
-buffer and per-game policy mixing, the half- and full-budget checkpoints with
-strict loading, the head-to-head evaluation with seat rotation, and logging.
+Parts shared by the training scripts in bluffjax/examples. The PPO-NFSP and
+PQN-NFSP scripts of the simultaneous-move games, Goofspiel
+(bluffjax/examples/goofspiel) and Kemps (bluffjax/examples/kemps), use all of
+it: the per-agent training targets, the NFSP reservoir buffer and per-game
+policy mixing, the half- and full-budget checkpoints with strict loading, the
+head-to-head evaluation with seat rotation, and logging. The Hold'em NFSP
+scripts (bluffjax/examples/HUL, bluffjax/examples/HUNL) use its evaluation
+metrics (EvalResult, eval_metrics); the Kuhn Poker and Leduc Hold'em scripts
+(bluffjax/examples/kuhn, bluffjax/examples/leduc) use them too, through
+bluffjax/examples/kuhn_leduc_eval.py, with the sampling helpers and the
+final-evaluation summary (print_final_evals).
 
 In a ParallelEnv every agent acts at every step: observations, action masks,
 actions, rewards and absorbing flags carry a num_agents axis after the env
@@ -29,6 +35,7 @@ from bluffjax.examples.run_utils import (
     save_seed_params,
 )
 from bluffjax.examples.run_utils import checkpoint_path as _checkpoint_path
+from bluffjax.metrics import rate
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 
 
@@ -511,13 +518,16 @@ def evaluate_kemps(
 
 
 def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
-    """Means over the evaluation games; win_rate_decided excludes draws."""
+    """Means over the evaluation games, as {stat}_{name}; win_rate_decided
+    excludes draws and is NaN if every game was a draw (bluffjax.metrics.rate).
+    name is vs_{opponent} for the output policy (NFSP's average policy) and
+    br_vs_{opponent} for NFSP's best response."""
     decided = result.win.sum() + result.loss.sum()
     return {
         f"win_rate_{name}": result.win.mean(),
         f"loss_rate_{name}": result.loss.mean(),
         f"draw_rate_{name}": result.draw.mean(),
-        f"win_rate_decided_{name}": result.win.sum() / jnp.maximum(decided, 1.0),
+        f"win_rate_decided_{name}": rate(result.win.sum(), decided),
         f"avg_return_{name}": result.ret.mean(),
         f"avg_episode_length_{name}": result.length.mean(),
     }

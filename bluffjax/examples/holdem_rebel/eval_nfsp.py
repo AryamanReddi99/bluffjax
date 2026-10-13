@@ -30,15 +30,16 @@ from bluffjax.networks.mlp import ActorCriticDiscreteMLP, ActorDiscreteMLP
 ENV_IDS = {"hul": "texas_limit_holdem", "hunl": "texas_nolimit_holdem"}
 
 
-def avg_network(game: str, algo: str, action_dim: int, hidden: int):
-    """The average-policy network exactly as save_checkpoints documents it."""
+def avg_network(game: str, algo: str, env, action_dim: int, hidden: int):
+    """The average-policy network exactly as save_checkpoints documents it (for
+    No-Limit, with the chip counts scaled by the env's starting stack)."""
     base = (ActorCriticDiscreteMLP if algo == "ppo" else ActorDiscreteMLP)(
         action_dim=action_dim, hidden_dim=hidden
     )
     if game == "hunl":
-        from bluffjax.examples.HUNL.hunl_ppo_nfsp import ChipScaledInput
+        from bluffjax.examples.HUNL.hunl_ppo_nfsp import chip_scaled
 
-        return ChipScaledInput(base, 52, 100.0)
+        return chip_scaled(base, env)
     return base
 
 
@@ -49,7 +50,7 @@ def main(run_dir: str, rebel_path: str, n_deals: int, batch: int, stage: str = "
     env = make(ENV_IDS[game_name], **cfg.get("env_kwargs", {}))
     sample_state, _ = env.reset(jax.random.PRNGKey(0))
     action_dim = int(env.get_avail_actions(sample_state).shape[-1])  # as in the NFSP scripts
-    net = avg_network(game_name, algo, action_dim, cfg["fc_dim_size"])
+    net = avg_network(game_name, algo, env, action_dim, cfg["fc_dim_size"])
     template = net.init(jax.random.PRNGKey(0), jnp.zeros((env.obs_dim,), jnp.float32))
 
     rebel, rebel_params, meta = load_rebel(rebel_path)

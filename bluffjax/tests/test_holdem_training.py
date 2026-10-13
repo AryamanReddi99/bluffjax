@@ -6,7 +6,8 @@
   evaluation results only when evaluated, the metric carry persists across
   rollouts, the half checkpoint is the networks after exactly
   half_update_steps updates, and half/ and full/ load strictly into the
-  scripts' networks (also as the actor-critic evaluation opponent);
+  scripts' networks (also as the actor-critic evaluation opponent); the
+  No-Limit networks see the chip counts divided by the starting stack;
 - their evaluation (holdem_rebel.agent.play_hands): exactly compare_episodes
   complete hands per policy, every deal from both seats, every
   compare_interval updates and after the last, logged from exactly those
@@ -97,8 +98,11 @@ def networks(name, env, hidden):
     else:
         avg, br = ActorDiscreteMLP(A, hidden), QNetworkDiscreteMLP(A, hidden)
     if name.startswith("hunl"):
-        wrap = _module(name).ChipScaledInput
-        avg, br = wrap(avg, 52, 100.0), wrap(br, 52, 100.0)
+        # chip_scaled: the two chip counts (features 52 and 53) divided by the
+        # 100-chip stack, the MLP's parameters under "net"
+        from bluffjax.networks.scaled_input import ScaledInput
+
+        avg, br = (ScaledInput(net=net, start=52, stop=54, factor=1 / 100) for net in (avg, br))
     return avg, br
 
 
@@ -109,8 +113,9 @@ EVAL_STATS = (
 
 
 def eval_names(opponent):
-    """The evaluation metrics of both policies against `opponent`."""
-    return {f"{stat}_{p}_vs_{opponent}" for stat in EVAL_STATS for p in ("avg", "br")} | {
+    """The evaluation metrics of both policies against `opponent`: the
+    average policy's {stat}_vs_{opponent} and the BR's {stat}_br_vs_{opponent}."""
+    return {f"{stat}_{p}vs_{opponent}" for stat in EVAL_STATS for p in ("", "br_")} | {
         "eval_unfinished_hands"
     }
 
@@ -149,7 +154,8 @@ def eval_summary(h):
     """The logged metrics of one evaluation, computed from its hands."""
     r = h.rewards
     win, loss = (r > 0).mean(), (r < 0).mean()
-    return (r.mean(), win, loss, (r == 0).mean(), win / max(win + loss, 1e-9), h.hand_length.mean())
+    decided = win / (win + loss) if win + loss > 0 else np.nan
+    return (r.mean(), win, loss, (r == 0).mean(), decided, h.hand_length.mean())
 
 
 def check_eval_rows(rows, records, opponent, num_hands):
@@ -158,17 +164,20 @@ def check_eval_rows(rows, records, opponent, num_hands):
     from_rows = []
     for r in rows:
         assert int(r["eval_unfinished_hands"]) == 0
-        for p in ("avg", "br"):
-            stats = [r[f"{stat}_{p}_vs_{opponent}"] for stat in EVAL_STATS]
+        for p in ("", "br_"):  # the average policy, the BR
+            stats = [r[f"{stat}_{p}vs_{opponent}"] for stat in EVAL_STATS]
             ret, win, loss, draw, decided, length = stats
             for rate in (win, loss, draw):  # a whole number of hands (float32 rates)
                 assert rate * num_hands == pytest.approx(round(rate * num_hands), abs=0.01)
             assert win + loss + draw == pytest.approx(1.0)
-            assert decided == pytest.approx(win / max(win + loss, 1e-9))
+            if win + loss > 0:
+                assert decided == pytest.approx(win / (win + loss))
+            else:  # every hand a split pot: no decided hand
+                assert math.isnan(decided)
             from_rows.append((ret, win, loss, draw, decided, length))
     from_hands = [eval_summary(h) for h in records]
     assert len(from_hands) == len(from_rows)
-    key = lambda t: tuple(round(float(x), 3) for x in t)  # noqa: E731
+    key = lambda t: tuple(-1.0 if math.isnan(x) else round(float(x), 3) for x in t)  # noqa: E731
     for got, want in zip(sorted(from_rows, key=key), sorted(from_hands, key=key)):
         np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
 
@@ -212,7 +221,7 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
         assert r["wall_time"] >= 0
         # every compare_interval updates (0, 3) and after the last one (4)
         evaluated = r["update_step"] in (0, 3, 4)
-        assert bool(r["evaluated"]) == evaluated
+        assert "evaluated" not in r  # the flag isn't logged
         names = {k for k in r if "_vs_" in k or k.startswith("eval_")}
         assert names == (eval_names("random") if evaluated else set())
         for prefix in ("game", "game_br"):
@@ -227,8 +236,8 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
     if name.startswith("hul"):
         for r in rows:
             hands = r["game/n_hands"] + r["game_br/n_hands"]
-            assert hands == 2 * r["hands_completed"]
-            assert r["game/n_hands_sb"] + r["game_br/n_hands_sb"] == r["hands_completed"]
+            assert hands == 2 * r["episodes_completed"]
+            assert r["game/n_hands_sb"] + r["game_br/n_hands_sb"] == r["episodes_completed"]
     assert sum(r["game/n_aggressive"] + r["game_br/n_aggressive"] for r in rows) > 0
     assert sum(r["game_br/n_aggressive"] for r in rows) > 0
 
@@ -236,7 +245,7 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
     # each, and the logged metrics are those of exactly these hands
     assert len(records) == 2 * 3 * 2
     check_eval_hands(records, config["compare_episodes"])
-    check_eval_rows([r for r in rows if r["evaluated"]], records, "random",
+    check_eval_rows([r for r in rows if "win_rate_vs_random" in r], records, "random",
                     config["compare_episodes"])
 
     # the evaluation doesn't change training
@@ -315,6 +324,28 @@ def test_nfsp_run_log_metrics_and_checkpoints(name, monkeypatch, tmp_path):
             assert row["eval_unfinished_hands"] == 0
 
 
+@pytest.mark.parametrize("name", ["hunl_ppo_nfsp", "hunl_pqn_nfsp"])
+def test_hunl_networks_see_chips_divided_by_the_stack(name):
+    """chip_scaled divides exactly the two chip counts of the observation
+    (features 52 and 53) by the env's starting stack; the card indicators
+    pass through."""
+    import flax.linen as nn
+
+    class Identity(nn.Module):
+        @nn.compact
+        def __call__(self, x):
+            return x
+
+    env = make("texas_nolimit_holdem", num_agents=2, init_chips=80)
+    _, obs = env.reset(KEY)
+    obs = obs.at[52:54].set(jnp.array([7.0, 30.0]))
+    net = _module(name).chip_scaled(Identity(), env)
+    out = np.asarray(net.apply(net.init(KEY, obs), obs))
+    assert out.shape == (env.obs_dim,) == (54,)
+    np.testing.assert_allclose(out[52:54], [7.0 / 80, 30.0 / 80])
+    np.testing.assert_array_equal(out[:52], np.asarray(obs[:52]))
+
+
 @pytest.mark.parametrize("name", ["hul_ppo_nfsp", "hunl_pqn_nfsp"])
 def test_nfsp_game_metrics_follow_the_policy(name, monkeypatch, tmp_path):
     """With every player on the average policy (eta 0) game_br/ has no
@@ -391,7 +422,7 @@ def test_eval_random_against_random_is_symmetric(name, monkeypatch, tmp_path):
     records = spy_play_hands(mod, monkeypatch, learner=random_player)
     run_dir, _ = run(mod, config, monkeypatch)
     rows = read_results(run_dir)
-    assert len(rows) == 4 and all(r["evaluated"] for r in rows)
+    assert len(rows) == 4 and all("win_rate_vs_random" in r for r in rows)
     assert len(records) == 2 * 2 * 2  # policies x updates x seeds
     check_eval_hands(records, n)
     check_eval_rows(rows, records, "random", n)
@@ -401,11 +432,11 @@ def test_eval_random_against_random_is_symmetric(name, monkeypatch, tmp_path):
     win, loss = (returns > 0).mean(), (returns < 0).mean()
     assert abs(win - loss) < 4 * np.sqrt((win + loss) / returns.size)
     for r in rows:
-        for p in ("avg", "br"):
-            w, l = r[f"win_rate_{p}_vs_random"], r[f"loss_rate_{p}_vs_random"]
+        for p in ("", "br_"):  # the average policy, the BR
+            w, l = r[f"win_rate_{p}vs_random"], r[f"loss_rate_{p}vs_random"]
             assert abs(w - l) < 5 * np.sqrt((w + l) / n)
-            assert abs(r[f"avg_return_{p}_vs_random"]) < 5 * returns.std() / np.sqrt(n)
-            assert r[f"win_rate_decided_{p}_vs_random"] == pytest.approx(0.5, abs=0.06)
+            assert abs(r[f"avg_return_{p}vs_random"]) < 5 * returns.std() / np.sqrt(n)
+            assert r[f"win_rate_decided_{p}vs_random"] == pytest.approx(0.5, abs=0.06)
 
 
 def tiny_rebel_checkpoint(game_name, path):

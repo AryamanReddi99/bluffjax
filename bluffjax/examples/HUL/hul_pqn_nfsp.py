@@ -113,7 +113,7 @@ class Transition(NamedTuple):
     action: IntArray
     reward: FloatArray  # (num_agents,) env reward for every player, env units
     done: BoolArray  # the hand ended at this step (the env auto-resets)
-    q_max: FloatArray  # max over legal actions of Q(obs), scaled reward units
+    q_max: FloatArray  # max over legal actions of Q(obs), env reward units (chips)
     player_idx: IntArray
     info: dict[str, Any]
     is_br: BoolArray  # the acting player follows the BR in this hand
@@ -478,19 +478,20 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         br_net: QNetworkDiscreteMLP,
         avg_net: ActorDiscreteMLP,
     ) -> dict[str, FloatArray]:
-        """Evaluation of the average policy (p = avg, sampling from the
-        actor) and the BR (p = br, greedy in Q).
+        """Evaluation of the average policy (p = "", NFSP's output policy,
+        sampling from the actor) and the BR (p = "br_", greedy in Q).
 
         Each plays exactly compare_episodes complete hands against the
         opponent (o = random or baseline), in mirrored pairs (play_hands).
         Per policy, with the learner's result r of a hand in chips:
-            avg_return_{p}_vs_{o}         mean r per hand
-            win_rate_{p}_vs_{o}           share of hands with r > 0
-            loss_rate_{p}_vs_{o}          r < 0
-            draw_rate_{p}_vs_{o}          r = 0 (a split pot)
-            win_rate_decided_{p}_vs_{o}   wins / (wins + losses)
-            avg_episode_length_{p}_vs_{o} actions (env steps) per hand
-        and eval_unfinished_hands, the hands of both policies stopped at the
+            avg_return_{p}vs_{o}          mean r per hand
+            win_rate_{p}vs_{o}            share of hands with r > 0
+            loss_rate_{p}vs_{o}           r < 0
+            draw_rate_{p}vs_{o}           r = 0 (a split pot)
+            win_rate_decided_{p}vs_{o}    wins / (wins + losses), NaN if none
+            avg_episode_length_{p}vs_{o}  actions (env steps) per hand
+        (e.g. win_rate_vs_random and win_rate_br_vs_random) and
+        eval_unfinished_hands, the hands of both policies stopped at the
         ReBeL opponent's solve limit (0 for opponents without search; such
         a hand would count as a draw).
         """
@@ -506,8 +507,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         )
         metrics = {}
         unfinished = jnp.int32(0)
-        for name, player, params, rng_eval in zip(
-            ("avg", "br"),
+        for prefix, player, params, rng_eval in zip(
+            ("", "br_"),
             (avg_player, br_player),
             (avg_params, br_params),
             jax.random.split(rng),
@@ -524,7 +525,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 ret=r,
                 length=hands.hand_length,
             )
-            metrics.update(eval_metrics(f"{name}_vs_{opponent}", result))
+            metrics.update(eval_metrics(f"{prefix}vs_{opponent}", result))
             unfinished += jnp.sum(~hands.finished)
         metrics["eval_unfinished_hands"] = unfinished
         return metrics
@@ -722,9 +723,10 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             )
             last_q_max = jnp.max(jnp.where(last_mask, last_q_vals, -jnp.inf), axis=-1)
 
-            # Per-player Q(lambda) targets in scaled reward units. Q-learning is
-            # off-policy, so (as in NFSP) every decision with a known outcome
-            # trains the Q-network; the trace is cut at average-policy decisions.
+            # Per-player Q(lambda) targets in env reward units (chips).
+            # Q-learning is off-policy, so (as in NFSP) every decision with a
+            # known outcome trains the Q-network; the trace is cut at
+            # average-policy decisions.
             targets, valid = per_player_q_lambda_targets(
                 transitions.q_max,
                 transitions.reward,
@@ -966,6 +968,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
                 "sl_buffer_seen": sl_buffer.seen.astype(jnp.float32),
                 "update_step": runner_state.update_step,
+                # the flag that logging_callback reads (not logged itself)
                 "evaluated": should_compare,
             }
             metric.update(eval_results)
@@ -983,11 +986,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     "env_steps": (runner_state.update_step + 1)
                     * config["num_envs"]
                     * config["num_steps_per_env_per_update"],
-                    "hands_completed": transitions.done.sum(),
-                    "br_return_per_hand": (transitions.reward * br_hands).sum()
-                    / jnp.maximum(br_hands.sum(), 1),
-                    "avg_return_per_hand": (transitions.reward * avg_hands).sum()
+                    "episodes_completed": transitions.done.sum(),
+                    "return_per_episode": (transitions.reward * avg_hands).sum()
                     / jnp.maximum(avg_hands.sum(), 1),
+                    "return_per_episode_br": (transitions.reward * br_hands).sum()
+                    / jnp.maximum(br_hands.sum(), 1),
                     "q_sample_frac": train_mask.mean(),
                     "epsilon": epsilon_schedule(
                         jnp.asarray(runner_state.update_step, dtype=jnp.float32)
@@ -1087,12 +1090,13 @@ def send_to_log(seed: IntArray, metric: dict[str, Any]) -> None:
 
 def logging_callback(float_names, int_names, bool_names, seed_val, packed) -> None:
     """Logs one update of one seed to results.jsonl and wandb; the
-    evaluation results only in the updates that evaluated."""
+    evaluation results only in the updates that evaluated (metric
+    "evaluated", a flag that isn't logged)."""
     float_values, int_values = (np.asarray(x) for x in packed)
     metrics = dict(zip(float_names, float_values)) | dict(zip(int_names, int_values))
     for k in bool_names:
         metrics[k] = bool(metrics[k])
-    if not metrics["evaluated"]:
+    if not metrics.pop("evaluated"):
         metrics = {k: v for k, v in metrics.items() if not is_eval_metric(k)}
     RESULTS_LOG.log(metrics, int(seed_val))
 
@@ -1163,14 +1167,11 @@ def main(config: dict) -> None:
         exp_ids = jnp.arange(config["num_seeds"])
 
         train_fn = make_train(config)
+
+        # The run directory and the results log come first, so that
+        # results.jsonl fills while the run trains (wall_time counts from
+        # here, compilation included).
         run_dir = make_run_dir(config)
-        print(f"Run directory: {run_dir}")
-
-        print("Starting compile...")
-        start = time.time()
-        train_vjit = jax.jit(jax.vmap(train_fn)).lower(rng_seeds, exp_ids).compile()
-        print(f"Compile finished in {time.time() - start:.1f} s")
-
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
@@ -1189,10 +1190,17 @@ def main(config: dict) -> None:
             for i in range(config["num_seeds"])
         ]
         RESULTS_LOG = ResultsLog(run_dir, WANDB_RUNS)
+        print(f"Run directory: {run_dir}")
+
+        print("Starting compile...")
+        start = time.time()
+        train_vjit = jax.jit(jax.vmap(train_fn)).lower(rng_seeds, exp_ids).compile()
+        print(f"Compile finished in {time.time() - start:.1f} s")
 
         print("Running...")
         start = time.time()
         final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        jax.effects_barrier()  # every update's record is in results.jsonl
         run_time = time.time() - start
         print(
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "

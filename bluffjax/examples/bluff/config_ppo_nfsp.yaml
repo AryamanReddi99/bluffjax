@@ -1,3 +1,5 @@
+# 1e8 env samples per seed (1525 updates of 1024 envs x 64 steps), 5 seeds;
+# the half/ checkpoint is after 762 updates (~5e7 samples)
 num_timesteps: 1e8  # the half/ checkpoint is taken after half the updates
 num_envs: 1024
 num_steps_per_env_per_update: 64
@@ -40,7 +42,7 @@ compare: true
 compare_mode: random  # "random" or "checkpoint"
 # checkpoint mode: a file written by save_checkpoints, e.g.
 # ${repo_root:}/checkpoints/bluff/<run>/full/avg_policy_0.msgpack
-compare_with: null
+compare_with: ""
 compare_network_type: actor_critic # "actor_critic", "q_network", or "actor"
 compare_episodes: 10  # complete games against random, for each policy
 compare_interval: 1  # updates between evaluations (and after the last)

@@ -14,9 +14,15 @@ updates and after the last one. Checked here:
   values: as many wins as losses with two players, and a mean return of 0 in
   the zero-sum games (poker);
 - the PPO-NFSP and PQN-NFSP evaluators of a game are the same;
+- a rate with no games behind it is NaN: the win rate of the decided games
+  when every game is a draw, Werewolf's win rate as a team the learner
+  didn't play;
 - a tiny training run evaluates in every update with compare_interval 1,
   plays compare_episodes complete games per policy (counted as above) and
-  logs the same metric names in the PPO-NFSP and PQN-NFSP scripts.
+  logs the same metric names in the PPO-NFSP and PQN-NFSP scripts;
+- vmapped over seeds, as main() runs it, the evaluation is played only every
+  compare_interval updates and after the last one (the condition isn't
+  batched over seeds, so the cond doesn't turn into running both branches).
 """
 
 import copy
@@ -39,7 +45,8 @@ ENV_KWARGS = {
     "seven_card_stud": dict(num_agents=2),
     "werewolf": dict(num_agents=6, num_werewolves=2, horizon=200),
 }
-# logged per policy as {stat}_{avg|br}_vs_{random|baseline}
+# logged as {stat}_vs_{random|baseline} for the average policy and
+# {stat}_br_vs_{random|baseline} for the BR
 EVAL_STATS = (
     "win_rate",
     "loss_rate",
@@ -177,10 +184,34 @@ def test_ppo_and_pqn_evaluate_the_same_way(game):
     b = _np(_play(game, "pqn", env, 40, KEY))
     assert a._fields == b._fields
     jax.tree_util.tree_map(np.testing.assert_array_equal, a._asdict(), b._asdict())
-    ma = _np(ppo.eval_metrics("avg_vs_random", a))
-    mb = _np(pqn.eval_metrics("avg_vs_random", b))
+    ma = _np(ppo.eval_metrics("vs_random", a))
+    mb = _np(pqn.eval_metrics("vs_random", b))
     assert ma.keys() == mb.keys()
     jax.tree_util.tree_map(np.testing.assert_array_equal, ma, mb)
+
+
+@pytest.mark.parametrize("game,algo", SCRIPTS)
+def test_rates_without_games_are_nan(game, algo):
+    eval_metrics = _eval_metrics(game, algo)
+    env = make(game, **ENV_KWARGS[game])
+    result = _play(game, algo, env, 4, KEY)
+    zeros, ones = jnp.zeros(4), jnp.ones(4)
+    draws = result._replace(win=zeros, loss=zeros, draw=ones)
+    metrics = _np(eval_metrics("br_vs_random", draws))
+    assert np.isnan(metrics["win_rate_decided_br_vs_random"])
+    assert metrics["draw_rate_br_vs_random"] == 1.0
+    assert metrics["win_rate_br_vs_random"] == metrics["loss_rate_br_vs_random"] == 0.0
+    decided = result._replace(
+        win=jnp.array([1.0, 0.0, 1.0, 1.0]), loss=jnp.array([0.0, 1.0, 0.0, 0.0]),
+        draw=zeros,
+    )
+    metrics = _np(eval_metrics("vs_random", decided))
+    np.testing.assert_allclose(metrics["win_rate_decided_vs_random"], 0.75)
+    if game == "werewolf":
+        for team, other, side in (("werewolf", "human", ones), ("human", "werewolf", zeros)):
+            metrics = _np(eval_metrics("vs_random", decided._replace(werewolf=side)))
+            np.testing.assert_allclose(metrics[f"win_rate_as_{team}_vs_random"], 0.75)
+            assert np.isnan(metrics[f"win_rate_as_{other}_vs_random"])
 
 
 # ---------------------------------------------------------------- training runs
@@ -233,7 +264,8 @@ def tiny_config(game, algo, num_updates, **overrides):
 
 def _expected_eval_keys(game):
     stats = EVAL_STATS + (WEREWOLF_STATS if game == "werewolf" else ())
-    return {f"{stat}_{policy}_vs_random" for stat in stats for policy in ("avg", "br")}
+    # the average policy ({stat}_vs_random) and the BR ({stat}_br_vs_random)
+    return {f"{stat}_{policy}vs_random" for stat in stats for policy in ("", "br_")}
 
 
 @pytest.mark.parametrize("game,algo", SCRIPTS)
@@ -279,12 +311,36 @@ def test_training_run_evaluates_every_update(game, algo, monkeypatch):
     assert [r["update_step"] for r in log.rows] == list(range(U))
     for r in log.rows:
         assert {k for k in r if "_vs_" in k} == _expected_eval_keys(game)
-        for policy in ("avg", "br"):
-            name = f"{policy}_vs_random"
+        for name in ("vs_random", "br_vs_random"):  # average policy, BR
             assert r[f"avg_return_{name}"] == pytest.approx(1.0)
             total = sum(r[f"{x}_rate_{name}"] for x in ("win", "loss", "draw"))
             assert total == pytest.approx(1.0, abs=1e-6)
             assert r[f"avg_episode_length_{name}"] >= 1.0
+
+
+@pytest.mark.parametrize("game,algo", SCRIPTS)
+def test_vmapped_run_evaluates_only_every_compare_interval(game, algo, monkeypatch):
+    mod = _module(game, algo)
+    U, E, seeds = 3, 2, 2  # evaluations after updates 0 and 2
+    config = tiny_config(game, algo, U, compare=True, compare_episodes=E, compare_interval=2)
+    name = _evaluator_name(game)
+    real = getattr(mod, name)
+    played = []  # games played, summed over the seeds and policies
+
+    def spy(*args):
+        result = real(*args)
+        jax.debug.callback(lambda ret: played.append(np.asarray(ret).size), result.ret)
+        return result
+
+    monkeypatch.setattr(mod, name, spy)
+    log = Recorder()
+    monkeypatch.setattr(mod, "RESULTS_LOG", log)
+    train = jax.vmap(mod.make_train(config))
+    jax.block_until_ready(jax.jit(train)(jax.random.split(KEY, seeds), jnp.arange(seeds)))
+    jax.effects_barrier()
+    assert sum(played) == 2 * seeds * 2 * E  # 2 evaluations, 2 policies
+    evaluated = sorted(int(r["update_step"]) for r in log.rows if "win_rate_vs_random" in r)
+    assert evaluated == [0, 0, 2, 2]
 
 
 @pytest.mark.parametrize("algo", ["ppo", "pqn"])

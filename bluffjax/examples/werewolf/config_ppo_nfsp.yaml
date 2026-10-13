@@ -1,3 +1,5 @@
+# 1e8 env samples per seed (1525 updates of 1024 envs x 64 steps), 5 seeds;
+# the half/ checkpoint is after 762 updates (~5e7 samples)
 num_timesteps: 1e8  # the half/ checkpoint is taken after half the updates
 num_envs: 1024
 num_steps_per_env_per_update: 64

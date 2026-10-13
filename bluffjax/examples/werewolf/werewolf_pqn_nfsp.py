@@ -32,8 +32,9 @@ player to act and holds its role (and, for a werewolf, its teammates).
   one, so it plays the werewolves in half of them (see play_eval_games).
   Logged per policy: win, loss and draw (no
   winner at the horizon) rates, the win rate of the decided games, the
-  return and the game length, and the win rates by the learner's team, as
-  {stat}_{avg|br}_vs_{random|baseline}.
+  return and the game length, and the win rates by the learner's team (a
+  rate with no games behind it is NaN), as {stat}_vs_{random|baseline} for
+  the average policy and {stat}_br_vs_{random|baseline} for the BR.
 - Game metrics (bluffjax.metrics.werewolf: villager vote, elimination and
   accusation accuracy, seer information use, doctor save rate, votes received
   by werewolves and villagers) are counted at every rollout step and logged
@@ -52,12 +53,10 @@ save_checkpoints.
 """
 
 import datetime
-import os
 import time
 from typing import Any, Callable, NamedTuple
 
 import distrax
-from flax import serialization
 from flax.training.train_state import TrainState
 import hydra
 import jax
@@ -80,10 +79,11 @@ from bluffjax.examples.run_utils import (
     CHECKPOINT_STAGES,
     ResultsLog,
     half_update_steps,
+    load_params,
     make_run_dir,
     save_seed_params,
 )
-from bluffjax.metrics import make_metrics, masked_totals, prefixed
+from bluffjax.metrics import make_metrics, masked_totals, prefixed, rate
 from bluffjax.networks.mlp import (
     ActorCriticDiscreteMLP,
     ActorDiscreteMLP,
@@ -290,35 +290,6 @@ def reservoir_append(
     )
 
 
-def load_params(path: str, template: Any, what: str) -> Any:
-    """Loads one network's flax params saved by save_checkpoints. Fails unless
-    the file holds exactly the template's parameter tree and shapes."""
-    if not path or not os.path.isfile(path):
-        raise FileNotFoundError(f"{what} checkpoint not found: '{path}'")
-    with open(path, "rb") as f:
-        restored = serialization.msgpack_restore(f.read())
-
-    def leaves(tree):
-        flat, _ = jax.tree_util.tree_flatten_with_path(tree)
-        return {jax.tree_util.keystr(p): tuple(np.shape(v)) for p, v in flat}
-
-    got = leaves(restored)
-    expected = leaves(serialization.to_state_dict(template))
-    if got != expected:
-        missing = sorted(set(expected) - set(got))
-        extra = sorted(set(got) - set(expected))
-        shapes = sorted(
-            f"{k}: {got[k]} != {expected[k]}"
-            for k in set(got) & set(expected)
-            if got[k] != expected[k]
-        )
-        raise ValueError(
-            f"{path} does not hold {what} parameters (missing {missing}, "
-            f"unexpected {extra}, shape mismatches {shapes})"
-        )
-    return serialization.from_state_dict(template, restored)
-
-
 # act(params, obs, action_mask, rng) -> action, for one observation
 Policy = Callable[[Any, FloatArray, BoolArray, PRNGKeyArray], IntArray]
 
@@ -403,23 +374,26 @@ def play_eval_games(
 
 
 def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
-    """Means over the evaluation games; win_rate_decided excludes draws, and
-    win_rate_as_werewolf / win_rate_as_human are the win rates of the games
-    in which the learner played that team (learner_werewolf_frac: the share
-    of games it played the werewolves, 1/2 for an even number of games)."""
+    """Means over the evaluation games, as {stat}_{name}; win_rate_decided
+    excludes draws, and win_rate_as_werewolf / win_rate_as_human are the win
+    rates of the games in which the learner played that team
+    (learner_werewolf_frac: the share of games it played the werewolves, 1/2
+    for an even number of games). A rate with no games behind it (no decided
+    game, or no game on that team) is NaN (bluffjax.metrics.rate). name is
+    vs_{opponent} for the average policy and br_vs_{opponent} for the BR."""
     decided = result.win.sum() + result.loss.sum()
     werewolf, human = result.werewolf, 1.0 - result.werewolf
     return {
         f"win_rate_{name}": result.win.mean(),
         f"loss_rate_{name}": result.loss.mean(),
         f"draw_rate_{name}": result.draw.mean(),
-        f"win_rate_decided_{name}": result.win.sum() / jnp.maximum(decided, 1.0),
+        f"win_rate_decided_{name}": rate(result.win.sum(), decided),
         f"avg_return_{name}": result.ret.mean(),
         f"avg_episode_length_{name}": result.length.mean(),
-        f"win_rate_as_werewolf_{name}": (result.win * werewolf).sum()
-        / jnp.maximum(werewolf.sum(), 1.0),
-        f"win_rate_as_human_{name}": (result.win * human).sum()
-        / jnp.maximum(human.sum(), 1.0),
+        f"win_rate_as_werewolf_{name}": rate(
+            (result.win * werewolf).sum(), werewolf.sum()
+        ),
+        f"win_rate_as_human_{name}": rate((result.win * human).sum(), human.sum()),
         f"learner_werewolf_frac_{name}": werewolf.mean(),
     }
 
@@ -484,9 +458,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         template = baseline_network.init(
             jax.random.PRNGKey(0), jnp.zeros((env.obs_dim,), dtype=jnp.float32)
         )
-        baseline_params = load_params(
-            config["compare_with"], template, f"{compare_network_type} baseline"
-        )
+        baseline_params = load_params(config["compare_with"], template)
         print(f"Loaded {compare_network_type} baseline from {config['compare_with']}")
 
     def linear_decay(count: int) -> float:
@@ -570,12 +542,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         br_params: Any,
         opponent_params: Any,
     ) -> dict[str, FloatArray]:
-        """Evaluation metrics of the average policy and the greedy BR."""
+        """Evaluation metrics of the average policy ({stat}_vs_{opponent})
+        and the greedy BR ({stat}_br_vs_{opponent})."""
         rng_avg, rng_br = jax.random.split(rng)
         metrics = {}
-        for name, act, params, rng_eval in (
-            ("avg", avg_act, avg_params, rng_avg),
-            ("br", br_act, br_params, rng_br),
+        for prefix, act, params, rng_eval in (
+            ("", avg_act, avg_params, rng_avg),
+            ("br_", br_act, br_params, rng_br),
         ):
             result = play_eval_games(
                 env,
@@ -586,7 +559,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 config["compare_episodes"],
                 rng_eval,
             )
-            metrics.update(eval_metrics(f"{name}_vs_{opponent}", result))
+            metrics.update(eval_metrics(f"{prefix}vs_{opponent}", result))
         return metrics
 
     def logging_callback(seed_val, update, evaluated, metric_dict) -> None:
@@ -977,7 +950,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "env_steps": (runner_state.update_step + 1)
                 * config["num_envs"]
                 * config["num_steps_per_env_per_update"],
-                "games_completed": transitions.done.sum(),
+                "episodes_completed": transitions.done.sum(),
                 "ep_length_avg": jnp.where(
                     transitions.done, transitions.game_length, 0
                 ).sum()
@@ -991,8 +964,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "returns_human_team_avg": per_game(transitions.reward, ended_human),
                 "returns_werewolf_team_avg": per_game(transitions.reward, ended_ww),
                 # Against the mixed opponents the BR should win more often.
-                "br_return_per_game": per_game(transitions.reward, br_games),
-                "avg_return_per_game": per_game(transitions.reward, avg_games),
+                "return_per_episode": per_game(transitions.reward, avg_games),
+                "return_per_episode_br": per_game(transitions.reward, br_games),
                 "br_action_frac_rollout": transitions.is_br.mean(),
                 "q_sample_frac": train_mask.mean(),
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
@@ -1131,8 +1104,9 @@ def save_checkpoints(
     fc_dim_size) -> action logits; BR QNetworkDiscreteMLP(action_dim,
     fc_dim_size) -> Q-values in env reward units (its policy is the argmax
     over legal actions). action_dim is env.num_actions. Load one with
-    run_utils.load_params (or load_params below) and a template
-    network.init(rng, obs), and mask illegal actions (env.get_avail_actions).
+    run_utils.load_params (which checks the tree, shapes and dtypes) and a
+    template network.init(rng, obs), and mask illegal actions
+    (env.get_avail_actions).
     As an evaluation opponent (compare_mode=checkpoint) use
     compare_network_type=actor for avg_policy_{i} and q_network for br_{i}.
     """
@@ -1180,17 +1154,11 @@ def main(config: dict) -> None:
             * config["num_steps_per_env_per_update"]
         )
 
-        rng = jax.random.PRNGKey(config["seed"])
-        rng_seeds = jax.random.split(rng, config["num_seeds"])
-        exp_ids = jnp.arange(config["num_seeds"])
+        train = make_train(config)  # completes config (batch_shuffle_dim)
 
-        print("Starting compile...")
-        start = time.time()
-        train_vjit = (
-            jax.jit(jax.vmap(make_train(config))).lower(rng_seeds, exp_ids).compile()
-        )
-        print(f"Compile finished in {time.time() - start:.1f} s")
-
+        # The run directory and the results log come first, so that
+        # results.jsonl fills while the run trains (wall_time counts from
+        # here, compilation included).
         run_dir = make_run_dir(config)
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
@@ -1212,9 +1180,19 @@ def main(config: dict) -> None:
         RESULTS_LOG = ResultsLog(run_dir, WANDB_RUNS)
         print(f"Run directory: {run_dir}")
 
+        rng = jax.random.PRNGKey(config["seed"])
+        rng_seeds = jax.random.split(rng, config["num_seeds"])
+        exp_ids = jnp.arange(config["num_seeds"])
+
+        print("Starting compile...")
+        start = time.time()
+        train_vjit = jax.jit(jax.vmap(train)).lower(rng_seeds, exp_ids).compile()
+        print(f"Compile finished in {time.time() - start:.1f} s")
+
         print("Running...")
         start = time.time()
         final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        jax.effects_barrier()  # every update's record is in results.jsonl
         run_time = time.time() - start
         print(
             f"Trained {config['num_seeds']} seed(s) x {env_steps} env steps in "

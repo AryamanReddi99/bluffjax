@@ -19,6 +19,7 @@ from bluffjax.examples.run_utils import (
     save_seed_params,
 )
 from bluffjax.examples.run_utils import checkpoint_path as _checkpoint_path
+from bluffjax.metrics import rate
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 
 
@@ -289,13 +290,16 @@ def play_games(
 
 
 def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
-    """Means over the evaluation games; win_rate_decided excludes draws."""
+    """Means over the evaluation games, as {stat}_{name}; win_rate_decided
+    excludes draws and is NaN if every game was a draw (bluffjax.metrics.rate).
+    name is vs_{opponent} for the average policy and br_vs_{opponent} for the
+    BR."""
     decided = result.win.sum() + result.loss.sum()
     return {
         f"win_rate_{name}": result.win.mean(),
         f"loss_rate_{name}": result.loss.mean(),
         f"draw_rate_{name}": result.draw.mean(),
-        f"win_rate_decided_{name}": result.win.sum() / jnp.maximum(decided, 1.0),
+        f"win_rate_decided_{name}": rate(result.win.sum(), decided),
         f"avg_return_{name}": result.ret.mean(),
         f"avg_episode_length_{name}": result.length.mean(),
     }

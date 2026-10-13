@@ -38,9 +38,10 @@ save_dir: ${repo_root:}/checkpoints/HUL
 
 # evaluation: the average and best-response policies each play
 # compare_episodes complete hands against the opponent (each deal from both
-# seats), logging avg_return_ (chips per hand), win_rate_, loss_rate_,
-# draw_rate_, win_rate_decided_ and avg_episode_length_ of
-# {avg,br}_vs_{random,baseline} (see run_compare_eval in the script)
+# seats), logging avg_return (chips per hand), win_rate, loss_rate,
+# draw_rate, win_rate_decided and avg_episode_length as {stat}_vs_random (or
+# _vs_baseline) for the average policy and {stat}_br_vs_random for the BR
+# (see run_compare_eval in the script)
 compare: true
 compare_mode: random  # "random" or "checkpoint"
 # ReBeL opponent, from hul_rebel.py --config-name config_rebel_opponent, e.g.
@@ -49,9 +50,10 @@ compare_mode: random  # "random" or "checkpoint"
 # ${repo_root:}/checkpoints/HUL/<run>/full/avg_policy_0.msgpack)
 compare_with: ""
 compare_network_type: rebel  # "rebel" (searches at test time) or "actor_critic"
-# ReBeL's search is expensive: one evaluation (compare_episodes 10, 2 seeds,
-# 64 CFR iterations, RTX 3080) takes ~0.6 s, ~15 min of a 1525-update run
-# with compare_interval 1 (against random: ~5 ms per evaluation)
+# ReBeL's search is expensive: one evaluation (compare_episodes 10, 64 CFR
+# iterations, RTX 3080) of the 5 seeds (evaluated together) takes ~1.3 s,
+# ~33 min of a 1525-update run with compare_interval 1 (~0.6 s with 2 seeds;
+# against random: ~5 ms per evaluation)
 compare_episodes: 10  # complete games (hands) for each policy, each deal from both seats
 compare_cfr_iters: null  # ReBeL CFR iterations per subgame when acting; null = as trained
 compare_solve_chunk: 16  # ReBeL subgames solved at once per seed (GPU memory)

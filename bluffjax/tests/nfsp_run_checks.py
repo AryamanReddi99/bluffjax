@@ -4,11 +4,13 @@ test_metrics_werewolf.py).
 
 check_training_run runs the script's hydra main() on CPU with a tiny config
 and checks:
-- results.jsonl has one record per update and seed, with env_steps and every
-  game/ and game_br/ rate and event count, and the evaluation against random
-  (win, loss and draw rates, win rate of decided games, return and length of
-  both policies) exactly in the updates where it runs: every compare_interval
-  (2) updates and after the last one;
+- results.jsonl has one record per update and seed, with env_steps, the
+  rollout's episodes_completed, ep_length_avg, return_per_episode and
+  return_per_episode_br, every game/ and game_br/ rate and event count, and
+  the evaluation against random (win, loss and draw rates, win rate of
+  decided games (NaN without one), return and length of both policies)
+  exactly in the updates where it runs: every compare_interval (2) updates
+  and after the last one;
 - the game/ and game_br/ masks are the policies of the credited players: an
   extra count credited to the player to act sums, under each mask, to the
   decisions of that policy (br_action_frac_rollout), and in a separate run
@@ -32,7 +34,8 @@ import pytest
 
 KEY = jax.random.PRNGKey(0)
 NUM_ENVS, NUM_STEPS = 8, 16
-# logged per policy as {stat}_{avg|br}_vs_{random|baseline}
+# logged as {stat}_vs_{random|baseline} for the average policy and
+# {stat}_br_vs_{random|baseline} for the BR
 EVAL_STATS = (
     "win_rate",
     "loss_rate",
@@ -211,6 +214,12 @@ def check_training_run(
     decisions = NUM_ENVS * NUM_STEPS
     for r in records:
         assert r["env_steps"] == (r["update_step"] + 1) * decisions
+        for key in (
+            "episodes_completed", "ep_length_avg", "return_per_episode",
+            "return_per_episode_br",
+        ):
+            assert key in r, key
+        assert "evaluated" not in r  # a flag, not logged
         for prefix in ("game", "game_br"):
             for key in metrics_cls.rate_names + tuple(count_names):
                 assert f"{prefix}/{key}" in r, (prefix, key)
@@ -222,13 +231,15 @@ def check_training_run(
         if not evaluated:
             assert not [k for k in r if "_vs_" in k]
         else:
-            for policy in ("avg", "br"):
-                name = f"{policy}_vs_random"
+            for name in ("vs_random", "br_vs_random"):  # average policy, BR
                 for stat in EVAL_STATS:
                     assert f"{stat}_{name}" in r, (stat, name)
                 total = sum(r[f"{x}_rate_{name}"] for x in ("win", "loss", "draw"))
                 assert total == pytest.approx(1.0, abs=1e-6)
-                assert 0.0 <= r[f"win_rate_decided_{name}"] <= 1.0
+                if r[f"draw_rate_{name}"] < 1.0:
+                    assert 0.0 <= r[f"win_rate_decided_{name}"] <= 1.0
+                else:  # no decided game
+                    assert math.isnan(r[f"win_rate_decided_{name}"])
                 assert r[f"avg_episode_length_{name}"] >= 1.0
         # masked by the credited player's policy: the decisions of each policy
         assert r["game/acting"] + r["game_br/acting"] == decisions
