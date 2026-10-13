@@ -34,20 +34,49 @@ csrc/liars_dice):
 Deviations from the paper: there is no policy network or warm start, which
 the paper lists as optional. An action that a player's policy never takes
 with any card in their range leaves that player's range unchanged.
+
+Evaluation: before training, every log_interval updates and after the last
+update, the exact exploitability of the test-time policy and its exact Kuhn
+policy metrics (bluffjax.metrics.kuhn_poker; policy_array converts the
+policy to kuhn_exploitability's (12, 2) table).
+
+Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
+(run_utils.make_run_dir, with config.yaml) before training. Every evaluation
+writes one record per seed to {run_dir}/results.jsonl (with seed_index and
+wall_time) and to the seed's wandb run: num_subgames (the subgames solved in
+self play so far, the sample counter), update_step, replay_size,
+root_value_p0, the mean value_loss (left out before training) and the
+games_finished of the updates since the last evaluation, exploitability and
+the policy metrics of the test-time policy, game/<name> (names and
+definitions in bluffjax.metrics.kuhn_poker). After training, {run_dir}/curves.json holds the
+config, the training time and every seed's num_subgames, exploitability,
+value_loss (null before training) and root_value_p0 at the evaluations.
+
+Checkpoints (save_checkpoints), for every seed i = 0..num_seeds-1 (the wandb
+run "{seed}_{i}"):
+    {run_dir}/half/value_network_{i}.msgpack  after half_update_steps(num_update_steps)
+    {run_dir}/full/value_network_{i}.msgpack  after all num_update_steps updates
+both from the same run. Each holds the flax params of the
+ValueNetwork(hidden_dim=value_hidden_dim), written with
+flax.serialization.to_bytes. It maps a PBS encoding (encode_pbs: one-hot
+public state and both players' ranges, PBS_DIM floats) to the infostate
+values (2, 3) in chips: values[i, c] is player i's expected return holding
+card c. ReBeL's policy is test_time_policy(network_value_fn(network, params),
+subgame_structure(max_depth), cfr_iterations), with max_depth and
+cfr_iterations from config.yaml. Restore one with
+run_utils.load_params(path, network.init(rng, jnp.zeros(PBS_DIM))).
 """
 
 import datetime
 import json
 import os
 import time
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 import flax.linen as nn
-from flax import serialization
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 import hydra
-from hydra.core.hydra_config import HydraConfig
 import jax
 from jax import lax
 import jax.numpy as jnp
@@ -56,14 +85,22 @@ from omegaconf import OmegaConf
 import optax
 import wandb
 
+from bluffjax.examples.run_utils import (
+    ResultsLog,
+    half_update_steps,
+    make_run_dir,
+    save_seed_params,
+)
+from bluffjax.metrics import prefixed
+from bluffjax.metrics.kuhn_poker import policy_metrics
 from bluffjax.utils.typing import BoolArray, FloatArray, IntArray, PRNGKeyArray
 from bluffjax.utils.game_utils.kuhn_exploitability import (
     ACTION_BET,
     ACTION_PASS,
-    exploitability,
+    INFOSETS,
+    exploitability_from_policy_array,
     get_current_player,
     get_returns,
-    infoset_key,
     is_terminal,
 )
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
@@ -580,16 +617,21 @@ def test_time_policy(
     )
 
 
+def policy_array(policy: np.ndarray) -> np.ndarray:
+    """A (9, 3, 2) policy over (public node, card) as kuhn_exploitability's
+    (12, 2) policy array, rows in INFOSETS order, each row normalized."""
+    policy = np.asarray(policy, dtype=np.float64)
+    rows = []
+    for key in INFOSETS:
+        history = tuple(ACTION_PASS if c == "p" else ACTION_BET for c in key[1:])
+        row = policy[HISTORIES.index(history), int(key[0])]
+        rows.append(row / row.sum())
+    return np.stack(rows)
+
+
 def policy_exploitability(policy: np.ndarray) -> float:
     """Exploitability of a (9, 3, 2) policy over (public node, card)."""
-    policy = np.asarray(policy, dtype=np.float64)
-    table = {
-        infoset_key(card, HISTORIES[node]): policy[node, card]
-        / policy[node, card].sum()
-        for node in PUBLIC_STATES
-        for card in range(NUM_CARDS)
-    }
-    return float(exploitability(lambda key: table[key]))
+    return float(exploitability_from_policy_array(policy_array(policy)))
 
 
 # =============================================================================
@@ -611,6 +653,7 @@ class RunnerState(NamedTuple):
     train_state: TrainState
     replay_buffer: ReplayBuffer
     pbs: PBS
+    half_params: Any  # value network after half_update_steps(num_update_steps)
     update_step: IntArray
     rng: PRNGKeyArray
 
@@ -631,6 +674,7 @@ def make_train(
         raise ValueError("replay_capacity must be at least num_subgames_per_update")
     if config["num_update_steps"] % log_interval != 0:
         raise ValueError("num_update_steps must be a multiple of log_interval")
+    num_half = half_update_steps(config["num_update_steps"])
 
     network = ValueNetwork(hidden_dim=config["value_hidden_dim"])
     # The learning rate halves every value_lr_halving_interval updates (as in
@@ -728,10 +772,18 @@ def make_train(
                 "value_loss": jnp.mean(losses),
                 "games_finished": jnp.sum(done),
             }
+            # Half-budget checkpoint: the value network after num_half updates.
+            take_half = runner_state.update_step + 1 == num_half
+            half_params = jax.tree.map(
+                lambda new, old: jnp.where(take_half, new, old),
+                train_state.params,
+                runner_state.half_params,
+            )
             runner_state = RunnerState(
                 train_state=train_state,
                 replay_buffer=buffer,
                 pbs=pbs,
+                half_params=half_params,
                 update_step=runner_state.update_step + 1,
                 rng=rng,
             )
@@ -757,8 +809,12 @@ def make_train(
             def logging_callback(exp_id, metrics, policy):
                 log_dict = {k: np.array(v) for k, v in metrics.items()}
                 log_dict = {k: v for k, v in log_dict.items() if np.isfinite(v)}
-                log_dict["exploitability"] = policy_exploitability(policy)
-                WANDB_RUNS[int(exp_id)].log(log_dict)
+                table = policy_array(policy)
+                log_dict["exploitability"] = float(
+                    exploitability_from_policy_array(table)
+                )
+                log_dict.update(prefixed("game", policy_metrics(table)))
+                RESULTS_LOG.log(log_dict, int(exp_id))
 
             jax.experimental.io_callback(
                 logging_callback, None, exp_id, metrics, policy
@@ -783,6 +839,7 @@ def make_train(
             train_state=train_state,
             replay_buffer=replay_buffer,
             pbs=pbs,
+            half_params=params,  # replaced after num_half updates
             update_step=jnp.int32(0),
             rng=rng,
         )
@@ -810,27 +867,20 @@ def make_train(
 
 
 WANDB_RUNS: list = []  # one wandb run per vmapped seed, created in main()
+RESULTS_LOG: ResultsLog | None = None  # results.jsonl and wandb, set in main()
 
 
-@hydra.main(version_base=None, config_path="./", config_name="config_rebel")
-def main(config: dict) -> None:
+def run(config: dict) -> str:
+    """Trains config["num_seeds"] seeds in parallel, logging to results.jsonl
+    and wandb, saves the curves and checkpoints and returns the run directory."""
+    global WANDB_RUNS, RESULTS_LOG
+    config["half_update_steps"] = half_update_steps(config["num_update_steps"])
+    run_dir = make_run_dir(config)
     try:
-        config = OmegaConf.to_container(config, resolve=True)
-        rng = jax.random.PRNGKey(config["seed"])
-        rng_seeds = jax.random.split(rng, config["num_seeds"])
-        exp_ids = jnp.arange(config["num_seeds"])
-
-        print("Starting compile...")
-        train_vjit = (
-            jax.jit(jax.vmap(make_train(config))).lower(rng_seeds, exp_ids).compile()
-        )
-        print("Compile finished...")
-
         job_type = f"{config['job_type']}_{config['env_name']}"
         group = f"{config['env_name']}" + datetime.datetime.now().strftime(
             "_%Y-%m-%d_%H-%M-%S"
         )
-        global WANDB_RUNS
         WANDB_RUNS = [
             wandb.init(
                 project=config["project"],
@@ -844,14 +894,27 @@ def main(config: dict) -> None:
             )
             for i in range(config["num_seeds"])
         ]
+        RESULTS_LOG = ResultsLog(run_dir, WANDB_RUNS)
+        print(f"Run directory: {run_dir}")
+
+        rng = jax.random.PRNGKey(config["seed"])
+        rng_seeds = jax.random.split(rng, config["num_seeds"])
+        exp_ids = jnp.arange(config["num_seeds"])
+
+        print("Starting compile...")
+        train_vjit = (
+            jax.jit(jax.vmap(make_train(config))).lower(rng_seeds, exp_ids).compile()
+        )
+        print("Compile finished...")
 
         print("Running...")
         start_time = time.time()
         runner_state, metrics = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        jax.effects_barrier()  # every logging callback has run
         runtime = time.time() - start_time
         print(f"Training took {runtime:.1f}s")
 
-        # Exploitability curve of each seed, saved next to the Hydra logs.
+        # Exploitability curve of each seed.
         curves = []
         for i in range(config["num_seeds"]):
             value_loss = np.asarray(metrics["value_loss"][i])
@@ -871,27 +934,32 @@ def main(config: dict) -> None:
             print(
                 f"Seed {i}: final exploitability {curves[i]['exploitability'][-1]:.5f}"
             )
-        curves_path = os.path.join(HydraConfig.get().runtime.output_dir, "curves.json")
+        curves_path = os.path.join(run_dir, "curves.json")
         with open(curves_path, "w") as f:
             json.dump(
                 {"config": config, "runtime_seconds": runtime, "seeds": curves}, f
             )
         print(f"Saved exploitability curves to {curves_path}")
 
-        if config["save_final"]:
-            os.makedirs(config["save_dir"], exist_ok=True)
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            save_path = os.path.join(
-                config["save_dir"], f"kuhn_rebel_{timestamp}.msgpack"
+        if config["save_checkpoints"]:
+            seeds = range(config["num_seeds"])
+            save_seed_params(
+                run_dir, "half", "value_network", runner_state.half_params, seeds
             )
-            params = jax.tree.map(lambda x: x[0], runner_state.train_state.params)
-            with open(save_path, "wb") as f:
-                f.write(serialization.to_bytes(params))
-            print(f"Saved value network to {save_path}")
+            save_seed_params(
+                run_dir, "full", "value_network", runner_state.train_state.params, seeds
+            )
+            print(f"Saved value networks to {run_dir}")
     finally:
-        for run in WANDB_RUNS:
-            run.finish()
+        for wandb_run in WANDB_RUNS:
+            wandb_run.finish()
         print("Finished.")
+    return run_dir
+
+
+@hydra.main(version_base=None, config_path="./", config_name="config_rebel")
+def main(config: dict) -> None:
+    run(OmegaConf.to_container(config, resolve=True))
 
 
 if __name__ == "__main__":

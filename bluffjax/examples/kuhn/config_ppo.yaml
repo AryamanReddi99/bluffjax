@@ -14,8 +14,14 @@ vf_coef: 1.0
 max_grad_norm: 0.1
 fc_dim_size: 64
 
-# exact exploitability every eval_interval updates and after the last one
+# exact exploitability and Kuhn policy metrics (game/) every eval_interval
+# updates and after the last one
 eval_interval: 1
+
+# run directory {save_dir}/{job_type}_{timestamp}/ with config.yaml,
+# results.jsonl and the half/ and full/ checkpoints (see the script docstring)
+save_dir: ${repo_root:}/checkpoints/kuhn
+save_checkpoints: true
 
 env_name: kuhn_poker
 seed: 0

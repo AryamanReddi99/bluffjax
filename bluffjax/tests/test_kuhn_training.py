@@ -24,6 +24,7 @@ import pytest
 
 from bluffjax import make
 from bluffjax.examples.kuhn import kuhn_ppo, kuhn_ppo_nfsp, kuhn_pqn, kuhn_pqn_nfsp
+from bluffjax.examples.run_utils import ResultsLog
 from bluffjax.utils.game_utils import kuhn_exploitability as ke
 
 GAE_FNS = {
@@ -436,7 +437,7 @@ def _check_per_hand(is_br, dones, players):
 
 
 @pytest.mark.parametrize("name", ["kuhn_ppo_nfsp", "kuhn_pqn_nfsp"])
-def test_nfsp_mixing_per_hand(monkeypatch, name: str) -> None:
+def test_nfsp_mixing_per_hand(monkeypatch, tmp_path, name: str) -> None:
     mod = {"kuhn_ppo_nfsp": kuhn_ppo_nfsp, "kuhn_pqn_nfsp": kuhn_pqn_nfsp}[name]
     seen = {"targets": [], "reservoir": []}
 
@@ -477,7 +478,7 @@ def test_nfsp_mixing_per_hand(monkeypatch, name: str) -> None:
             start_e=1.0, end_e=0.05, exploration_fraction=0.5, q_lambda=0.9
         )
     logger = _Recorder()
-    monkeypatch.setattr(mod, "WANDB_RUNS", [logger])
+    monkeypatch.setattr(mod, "RESULTS_LOG", ResultsLog(str(tmp_path), [logger]))
     jax.block_until_ready(
         jax.jit(mod.make_train(config))(jax.random.PRNGKey(0), jnp.int32(0))
     )
