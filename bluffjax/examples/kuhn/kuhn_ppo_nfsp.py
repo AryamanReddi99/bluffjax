@@ -38,16 +38,17 @@ Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
 one record per seed, to the seed's wandb run and to {run_dir}/results.jsonl
 (with seed_index and wall_time): env_steps, update_step and the training
 statistics. Every compare_interval updates and after the last one it also
-holds the evaluation against random of the average policy, name avg_vs_random,
-and of the BR, br_vs_random: win_rate_<name>, loss_rate_<name>,
-draw_rate_<name>, win_rate_decided_<name> (wins among the hands won or lost),
-avg_return_<name> (chips per hand) and avg_episode_length_<name> (env steps
-per hand), over compare_episodes hands each. Every eval_interval updates and
-after the last one the record also holds exploitability_avg_policy and
-exploitability_br_policy, value_avg_vs_random and value_br_vs_random (the
-exact expectation of avg_return_avg_vs_random and avg_return_br_vs_random) and
-the policy metrics of the average policy, game/<name>, and of the BR,
-game_br/<name> (names and definitions in bluffjax.metrics.kuhn_poker).
+holds the evaluation against random of the average policy, name vs_random, and
+of the BR, br_vs_random: win_rate_<name>, loss_rate_<name>, draw_rate_<name>,
+win_rate_decided_<name> (wins among the hands won or lost), avg_return_<name>
+(chips per hand) and avg_episode_length_<name> (env steps per hand), over
+compare_episodes hands each. Every eval_interval updates and after the last
+one the record also holds exploitability and exploitability_br (of the average
+policy and of the BR), value_vs_random and value_br_vs_random (the exact
+expectation of avg_return_vs_random and avg_return_br_vs_random) and the
+policy metrics of the average policy, game/<name>, and of the BR,
+game_br/<name> (names and definitions in bluffjax.metrics.kuhn_poker). The
+average policy is NFSP's output and has the plain names; the BR's add br.
 
 Checkpoints (save_checkpoints), for every seed i = 0..num_seeds-1 (the wandb
 run "{seed}_{i}"):
@@ -364,9 +365,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             }
             EXPLOITABILITY.setdefault(seed_i, []).append((env_steps, expl))
             VALUE_VS_RANDOM.setdefault(seed_i, []).append((env_steps, value))
-            metrics["exploitability_avg_policy"] = expl["avg_policy"]
-            metrics["exploitability_br_policy"] = expl["br_policy"]
-            metrics["value_avg_vs_random"] = value["avg_policy"]
+            metrics["exploitability"] = expl["avg_policy"]
+            metrics["exploitability_br"] = expl["br_policy"]
+            metrics["value_vs_random"] = value["avg_policy"]
             metrics["value_br_vs_random"] = value["br_policy"]
             metrics.update(prefixed("game", policy_metrics(policies["avg_policy"])))
             metrics.update(prefixed("game_br", policy_metrics(policies["br_policy"])))
@@ -762,13 +763,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "env_steps": (runner_state.update_step + 1)
                 * config["num_envs"]
                 * config["num_steps_per_env_per_update"],
-                "hands_completed": transitions.done.sum(),
-                "hand_length": (transitions.info["timestep"] * transitions.done).sum()
+                "episodes_completed": transitions.done.sum(),
+                "ep_length_avg": (transitions.info["timestep"] * transitions.done).sum()
                 / num_hands,
-                "br_return_per_hand": (transitions.reward * br_hands).sum()
-                / jnp.maximum(br_hands.sum(), 1),
-                "avg_return_per_hand": (transitions.reward * avg_hands).sum()
+                "return_per_episode": (transitions.reward * avg_hands).sum()
                 / jnp.maximum(avg_hands.sum(), 1),
+                "return_per_episode_br": (transitions.reward * br_hands).sum()
+                / jnp.maximum(br_hands.sum(), 1),
                 "br_action_frac_rollout": transitions.is_br.mean(),
                 "ppo_sample_frac": train_mask.mean(),
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
@@ -794,7 +795,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     maybe_vs_random_metrics(
                         env,
                         {
-                            "avg_vs_random": (act, avg_train_state.params),
+                            "vs_random": (act, avg_train_state.params),
                             "br_vs_random": (act, br_train_state.params),
                         },
                         compare_episodes,

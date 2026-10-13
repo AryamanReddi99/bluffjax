@@ -35,19 +35,20 @@ Events (counted at decisions of the betting tree):
 
 Metrics, every event credited to the player who acts (the bluffer for a
 successful bluff), with the expected count per hand of the denominator as
-n_<denominator>:
+n_<denominator>_per_hand (an expectation per hand, not a total over the hands
+of an update as the other games' n_<x> counts):
 - bluff_rate = E[aggressive actions with a hand that would lose at showdown]
-  / E[aggressive actions]                                      (n_aggressive)
+  / E[aggressive actions]                             (n_aggressive_per_hand)
 - bluff_success = E[bluffs whose next action, the opponent's reply to the
-  raise, is a fold] / E[bluffs]                                    (n_bluffs)
+  raise, is a fold] / E[bluffs]                           (n_bluffs_per_hand)
 - correct_fold_rate = E[folds by a player whose hand would have lost at
-  showdown] / E[folds]                                              (n_folds)
+  showdown] / E[folds]                                     (n_folds_per_hand)
 - pair_raise_rate = E[raises] / E[decisions], over the round-2 decisions where
   raising is legal and the player's private card pairs the public card
-                                                         (n_paired_decisions)
+                                                (n_paired_decisions_per_hand)
 - unpaired_raise_rate: the same over the round-2 decisions where raising is
   legal and the private card doesn't pair the public card
-                                                       (n_unpaired_decisions)
+                                              (n_unpaired_decisions_per_hand)
 A rate with no events (zero expected denominator, e.g. a policy that never
 folds) is NaN. policy_metrics returns every metric for both seats together
 (<name>) and for each seat's own decisions (<name>_p0, <name>_p1); the
@@ -66,11 +67,11 @@ NUM_ACTIONS = 3
 
 # rate -> the expected count it divides by
 DENOMINATORS: dict[str, str] = {
-    "bluff_rate": "n_aggressive",
-    "bluff_success": "n_bluffs",
-    "correct_fold_rate": "n_folds",
-    "pair_raise_rate": "n_paired_decisions",
-    "unpaired_raise_rate": "n_unpaired_decisions",
+    "bluff_rate": "n_aggressive_per_hand",
+    "bluff_success": "n_bluffs_per_hand",
+    "correct_fold_rate": "n_folds_per_hand",
+    "pair_raise_rate": "n_paired_decisions_per_hand",
+    "unpaired_raise_rate": "n_unpaired_decisions_per_hand",
 }
 RATE_NAMES: tuple[str, ...] = tuple(DENOMINATORS)
 #: the totals of both seats, in logging order (each rate, then its count)
@@ -198,8 +199,8 @@ def policy_metrics(policy_p0, policy_p1=None) -> dict[str, float]:
     seat 1 playing policy_p1 (default: self-play, policy_p1 = policy_p0).
 
     Returns {<name>: both seats, <name>_p0: seat 0's decisions, <name>_p1:
-    seat 1's decisions} for every rate and n_<denominator> (expected count
-    per hand) in TOTAL_NAMES.
+    seat 1's decisions} for every rate and n_<denominator>_per_hand
+    (expected count per hand) in TOTAL_NAMES.
     """
     t = _tables()
     policies = [normalize_policy(policy_p0)]
@@ -226,15 +227,17 @@ def policy_metrics(policy_p0, policy_p1=None) -> dict[str, float]:
     bluffs = aggressive * t.would_lose
     folds = weight * probs[..., FOLD]
     events = {
-        "n_aggressive": aggressive,
-        "n_bluffs": bluffs,
-        "n_successful_bluffs": bluffs * padded[:, t.raise_reply, FOLD],
-        "n_folds": folds,
-        "n_correct_folds": folds * t.would_lose,
-        "n_paired_decisions": weight * t.paired_opportunity,
-        "n_paired_raises": weight * t.paired_opportunity * probs[..., RAISE],
-        "n_unpaired_decisions": weight * t.unpaired_opportunity,
-        "n_unpaired_raises": weight * t.unpaired_opportunity * probs[..., RAISE],
+        "n_aggressive_per_hand": aggressive,
+        "n_bluffs_per_hand": bluffs,
+        "n_successful_bluffs_per_hand": bluffs * padded[:, t.raise_reply, FOLD],
+        "n_folds_per_hand": folds,
+        "n_correct_folds_per_hand": folds * t.would_lose,
+        "n_paired_decisions_per_hand": weight * t.paired_opportunity,
+        "n_paired_raises_per_hand": weight * t.paired_opportunity * probs[..., RAISE],
+        "n_unpaired_decisions_per_hand": weight * t.unpaired_opportunity,
+        "n_unpaired_raises_per_hand": (
+            weight * t.unpaired_opportunity * probs[..., RAISE]
+        ),
     }
     assert all(e.shape == (2, num_rows) for e in events.values())
     by_seat = {
@@ -243,11 +246,11 @@ def policy_metrics(policy_p0, policy_p1=None) -> dict[str, float]:
     }
     by_seat[""] = {k: by_seat["_p0"][k] + by_seat["_p1"][k] for k in events}
     numerators = {
-        "bluff_rate": "n_bluffs",
-        "bluff_success": "n_successful_bluffs",
-        "correct_fold_rate": "n_correct_folds",
-        "pair_raise_rate": "n_paired_raises",
-        "unpaired_raise_rate": "n_unpaired_raises",
+        "bluff_rate": "n_bluffs_per_hand",
+        "bluff_success": "n_successful_bluffs_per_hand",
+        "correct_fold_rate": "n_correct_folds_per_hand",
+        "pair_raise_rate": "n_paired_raises_per_hand",
+        "unpaired_raise_rate": "n_unpaired_raises_per_hand",
     }
     out = {}
     for suffix in ("", "_p0", "_p1"):

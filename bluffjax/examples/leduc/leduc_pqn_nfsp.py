@@ -41,15 +41,16 @@ Units: the env pays chips per hand; training (Q-values), the logged returns
 and the exploitability are in chips.
 
 Logged evaluation metrics (returns in chips): every compare_interval updates
-and after the last one, for the average policy (name avg_vs_random) and the
+and after the last one, for the average policy (name vs_random) and the
 greedy BR (br_vs_random), win_rate_<name>, loss_rate_<name>, draw_rate_<name>
-(split pots), win_rate_decided_<name> (wins among the hands won or lost),
-avg_return_<name> (per hand) and avg_episode_length_<name> (env steps per
-hand) over compare_episodes hands each; every eval_interval updates and after
-the last one, exploitability_avg_policy, exploitability_br_policy,
-value_avg_vs_random and value_br_vs_random (the exact expectation of
-avg_return_avg_vs_random and avg_return_br_vs_random) and the game/ and
-game_br/ metrics.
+(split pots), win_rate_decided_<name> (wins among the hands won or lost, NaN
+without any), avg_return_<name> (per hand) and avg_episode_length_<name> (env
+steps per hand) over compare_episodes hands each; every eval_interval updates
+and after the last one, exploitability and exploitability_br (of the average
+policy and of the greedy BR), value_vs_random and value_br_vs_random (the
+exact expectation of avg_return_vs_random and avg_return_br_vs_random) and
+the game/ and game_br/ metrics. The average policy is NFSP's output and has
+the plain names; the BR's add br.
 
 Run directory ({save_dir}/{job_type}_{timestamp}/, made when the run starts;
 see bluffjax.examples.run_utils):
@@ -147,7 +148,7 @@ class Transition(NamedTuple):
     action: IntArray
     reward: FloatArray  # (num_agents,) env reward for every player, chips
     done: BoolArray  # the hand ended at this step (the env auto-resets)
-    q_max: FloatArray  # max over legal actions of Q(obs), scaled reward units
+    q_max: FloatArray  # max over legal actions of Q(obs), chips
     player_idx: IntArray
     info: dict[str, Any]
     is_br: BoolArray  # the acting player follows the BR in this hand
@@ -395,9 +396,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             }
             EXPLOITABILITY.setdefault(seed_i, []).append((env_steps, expl))
             VALUE_VS_RANDOM.setdefault(seed_i, []).append((env_steps, value))
-            metrics["exploitability_avg_policy"] = expl["avg_policy"]
-            metrics["exploitability_br_policy"] = expl["br_policy"]
-            metrics["value_avg_vs_random"] = value["avg_policy"]
+            metrics["exploitability"] = expl["avg_policy"]
+            metrics["exploitability_br"] = expl["br_policy"]
+            metrics["value_vs_random"] = value["avg_policy"]
             metrics["value_br_vs_random"] = value["br_policy"]
             metrics.update(log_metrics("game", policies["avg_policy"]))
             metrics.update(log_metrics("game_br", policies["br_policy"]))
@@ -572,9 +573,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             )
             last_q_max = jnp.max(jnp.where(last_mask, last_q_vals, -jnp.inf), axis=-1)
 
-            # Per-player Q(lambda) targets in scaled reward units. Q-learning is
-            # off-policy, so (as in NFSP) every decision with a known outcome
-            # trains the Q-network; the trace is cut at average-policy decisions.
+            # Per-player Q(lambda) targets in chips. Q-learning is off-policy,
+            # so (as in NFSP) every decision with a known outcome trains the
+            # Q-network; the trace is cut at average-policy decisions.
             targets, valid = per_player_q_lambda_targets(
                 transitions.q_max,
                 transitions.reward,
@@ -743,13 +744,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "env_steps": (runner_state.update_step + 1)
                 * config["num_envs"]
                 * config["num_steps_per_env_per_update"],
-                "hands_completed": transitions.done.sum(),
-                "hand_length": (transitions.info["timestep"] * transitions.done).sum()
+                "episodes_completed": transitions.done.sum(),
+                "ep_length_avg": (transitions.info["timestep"] * transitions.done).sum()
                 / num_hands,
-                "br_return_per_hand": (transitions.reward * br_hands).sum()
-                / jnp.maximum(br_hands.sum(), 1),
-                "avg_return_per_hand": (transitions.reward * avg_hands).sum()
+                "return_per_episode": (transitions.reward * avg_hands).sum()
                 / jnp.maximum(avg_hands.sum(), 1),
+                "return_per_episode_br": (transitions.reward * br_hands).sum()
+                / jnp.maximum(br_hands.sum(), 1),
                 "br_action_frac_rollout": transitions.is_br.mean(),
                 "q_sample_frac": train_mask.mean(),
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
@@ -777,7 +778,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     maybe_vs_random_metrics(
                         env,
                         {
-                            "avg_vs_random": (
+                            "vs_random": (
                                 softmax_policy(avg_network.apply),
                                 avg_train_state.params,
                             ),

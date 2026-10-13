@@ -8,19 +8,27 @@ player 0's strategy updated in the same iteration), updates the traversing
 player's regrets and adds its strategy, weighted by its own reach probability,
 to its average strategy.
 
-Logs, after iteration 1, every --log_every iterations, after half of the
-iterations and after the last one: the exact exploitability of the average
-strategy, its exact expected return per hand against uniformly random legal
-play averaged over both seats as value_vs_random
-(leduc_exploitability.value_vs_random) and its exact behaviour metrics in
-self-play as game/<name> (bluffjax.metrics.leduc_holdem: bluff rate and
-success, correct-fold rate, round-2 raise rates with and without a pair;
+Logs, after iteration 1, every --eval_interval iterations, after half of the
+iterations (the half checkpoint) and after the last one: the exact
+exploitability of the average strategy, its exact expected return per hand
+against uniformly random legal play averaged over both seats as
+value_vs_random (leduc_exploitability.value_vs_random) and its exact behaviour
+metrics in self-play as game/<name> (bluffjax.metrics.leduc_holdem: bluff rate
+and success, correct-fold rate, round-2 raise rates with and without a pair;
 definitions there). Each record has the iteration count. CFR is deterministic,
-so a run is one solve (seed index 0, one wandb run).
+so a run is one solve (seed index 0, one wandb run "{seed}_0"; --seed only
+names it).
+
+Flags (the same as kuhn_cfr.py; kuhn_deep_cfr.py and leduc_deep_cfr.py add
+--num_seeds and their own hyperparameters): --iterations, --eval_interval,
+--seed, --save_dir, --job_type, --wandb, --project, --save_checkpoints. With
+--wandb the run logs to project --project, group {env_name}_{timestamp}, job
+type {job_type}_{env_name} (env_name leduc_poker), as the RL scripts do.
 
 Run directory ({save_dir}/{job_type}_{timestamp}/, made when the run starts;
 see bluffjax.examples.run_utils):
-    config.yaml                     the arguments, with half_iterations
+    config.yaml                     the flags, with env_name, num_seeds (1),
+                                    half_iterations and run_dir
     results.jsonl                   every logged record (what wandb gets, plus
                                     seed_index and wall_time)
     half/average_policy.msgpack     average strategy after half_iterations =
@@ -56,6 +64,7 @@ from __future__ import annotations
 import argparse
 import datetime
 from collections import defaultdict
+from typing import Sequence
 
 import numpy as np
 import wandb
@@ -70,6 +79,8 @@ from bluffjax.examples.run_utils import (
 from bluffjax.metrics.leduc_holdem import log_metrics
 from bluffjax.utils.game_utils import leduc_exploitability as leduc
 from bluffjax.utils.paths import REPO_ROOT
+
+ENV_NAME = "leduc_poker"
 
 
 class CFRSolver:
@@ -260,13 +271,14 @@ def load_average_policy(path: str) -> np.ndarray:
 
 def run_cfr(
     iterations: int,
-    log_every: int,
+    eval_interval: int,
     results_log: ResultsLog | None = None,
     run_dir: str | None = None,
 ) -> CFRSolver:
-    """Runs CFR, logging after iteration 1, every log_every iterations, after
-    half_update_steps(iterations) and at the end; with run_dir, saves the
-    average strategy after half and all of the iterations."""
+    """Runs CFR, evaluating after iteration 1, every eval_interval
+    iterations, after half_update_steps(iterations) and at the end; with
+    run_dir, saves the average strategy after half and all of the
+    iterations."""
     solver = CFRSolver()
     num_half = half_update_steps(iterations)
 
@@ -281,7 +293,7 @@ def run_cfr(
         solver.run_iteration()
         if it == num_half:
             save("half", it)
-        if it == 1 or it % log_every == 0 or it == num_half or it == iterations:
+        if it == 1 or it % eval_interval == 0 or it == num_half or it == iterations:
             policy = solver.average_policy_array()
             expl = leduc.exploitability_from_policy_array(policy, leduc._KEY_TO_IDX)
             value = leduc.value_vs_random_from_policy_array(
@@ -306,49 +318,62 @@ def run_cfr(
     return solver
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CFR on Leduc Poker.")
-    parser.add_argument("--iterations", type=int, default=100)
-    parser.add_argument("--log_every", type=int, default=10)
+    parser.add_argument("--iterations", type=int, default=100, help="CFR iterations")
+    parser.add_argument(
+        "--eval_interval",
+        type=int,
+        default=10,
+        help="evaluate after iteration 1, every this many iterations, after "
+        "half of them and after the last",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0, help="names the run (CFR is deterministic)"
+    )
+    parser.add_argument(
+        "--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "leduc")
+    )
+    parser.add_argument("--job_type", type=str, default="leduc_cfr")
+    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--project", type=str, default="bluffjax")
     parser.add_argument(
         "--save_checkpoints",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="average strategy after half and all of the iterations",
     )
-    parser.add_argument(
-        "--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "leduc")
-    )
-    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--project", type=str, default="bluffjax")
-    parser.add_argument("--job_type", type=str, default="leduc_cfr")
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
+def run(args: argparse.Namespace) -> str:
+    """Runs CFR with logging and checkpoints; returns the run directory."""
     config = {
         **vars(args),
-        "env_name": "leduc_poker",
+        "env_name": ENV_NAME,
+        "num_seeds": 1,
         "half_iterations": half_update_steps(args.iterations),
     }
     run_dir = make_run_dir(config)
-    wandb_run = wandb.init(
-        project=config["project"],
-        group=config["env_name"] + datetime.datetime.now().strftime("_%Y-%m-%d_%H-%M-%S"),
-        job_type=f"{config['job_type']}_{config['env_name']}",
-        name="0",  # one deterministic run (seed index 0)
-        config=config,
-        mode=None if config["wandb"] else "disabled",
-        dir=str(REPO_ROOT),
-        reinit="create_new",
-    )
+    group = f"{ENV_NAME}_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    wandb_runs = [
+        wandb.init(
+            project=args.project,
+            group=group,
+            job_type=f"{args.job_type}_{ENV_NAME}",
+            name=f"{args.seed}_0",  # one deterministic run (seed index 0)
+            config=config,
+            mode=None if args.wandb else "disabled",
+            dir=str(REPO_ROOT),
+            reinit="create_new",
+        )
+    ]
     try:
         print(f"Run directory: {run_dir}")
-        results_log = ResultsLog(run_dir, [wandb_run])
+        results_log = ResultsLog(run_dir, wandb_runs)
         solver = run_cfr(
             args.iterations,
-            args.log_every,
+            args.eval_interval,
             results_log,
             run_dir if args.save_checkpoints else None,
         )
@@ -362,7 +387,13 @@ def main(argv: list[str] | None = None) -> None:
         if args.save_checkpoints:
             print(f"Saved checkpoints to {run_dir}")
     finally:
-        wandb_run.finish()
+        for wandb_run in wandb_runs:
+            wandb_run.finish()
+    return run_dir
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    run(parse_args(argv))
 
 
 if __name__ == "__main__":

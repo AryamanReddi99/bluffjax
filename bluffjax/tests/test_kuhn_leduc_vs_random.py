@@ -474,7 +474,7 @@ def test_monte_carlo_matches_exact_value(request, game, greedy, seed):
 def test_metrics_names_and_due(kuhn):
     act = kle.softmax_policy(obs_apply)
     params = obs_params(0, 9, 2)
-    policies = {"avg_vs_random": (act, params), "br_vs_random": (act, params)}
+    policies = {"vs_random": (act, params), "br_vs_random": (act, params)}
     n = 10
 
     @jax.jit
@@ -496,7 +496,7 @@ def test_metrics_names_and_due(kuhn):
         assert -2.0 <= metrics[f"avg_return_{name}"] <= 2.0
     zeros = run(jax.random.PRNGKey(0), False)
     assert all(float(v) == 0.0 for v in zeros.values())
-    for key in ("value_vs_random", "value_avg_vs_random", "exploitability"):
+    for key in ("value_vs_random", "value_br_vs_random", "exploitability"):
         assert not kle.is_sampled_metric(key)
     # the key is a stream of its own
     rng = jax.random.PRNGKey(3)

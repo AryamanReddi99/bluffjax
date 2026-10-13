@@ -31,30 +31,38 @@ Network inputs are OpenSpiel's kuhn_poker information_state_tensor, which is
 perfect recall: each of the 12 infosets has a distinct tensor. Exploitability
 is exact.
 
-Seeds: --num_seeds runs run one after the other in one run directory; seed
-index i uses seed + i.
+Seeds: --num_seeds runs (default 5) one after the other in one run
+directory; seed index i uses seed --seed + i and has its own wandb run
+"{seed}_{i}".
+
+Flags shared with kuhn_cfr.py, leduc_cfr.py and leduc_deep_cfr.py, with the
+same meaning: --iterations, --eval_interval, --seed, --num_seeds (Deep CFR),
+--save_dir, --job_type, --wandb, --project, --save_checkpoints. With --wandb
+the runs log to project --project, group {env_name}_{timestamp}, job type
+{job_type}_{env_name} (env_name kuhn_poker), as the RL scripts do.
 
 Evaluation: the average-strategy (policy) network is trained after iteration
-1, every eval_every iterations, after iteration iterations // 2 (the half
-checkpoint) and after the last; each time its exact exploitability, its exact
-expected return per hand against uniformly random play averaged over both
-seats (value_vs_random, kuhn_exploitability.value_vs_random) and the exact
-Kuhn policy metrics (bluffjax.metrics.kuhn_poker) are logged. Its training key
-depends only on the iteration, so these intermediate networks don't change the
-run.
+1, every --eval_interval iterations, after half_iterations =
+half_update_steps(iterations) iterations (the half checkpoint) and after the
+last; each time its exact exploitability, its exact expected return per hand
+against uniformly random play averaged over both seats (value_vs_random,
+kuhn_exploitability.value_vs_random) and the exact Kuhn policy metrics
+(bluffjax.metrics.kuhn_poker) are logged. Its training key depends only on the
+iteration, so these intermediate networks don't change the run.
 
 Logging: main() creates the run directory {save_dir}/{job_type}_{timestamp}/
-(run_utils.make_run_dir, with config.yaml holding the flags) before running.
-Every iteration writes one record per seed to {run_dir}/results.jsonl (with
-seed_index and wall_time), and to the seed's wandb run with --wandb:
-iteration, traversals (the traversals so far, both players) and each player's
-final advantage-network loss; at the evaluations also exploitability,
-value_vs_random, policy_loss and the policy metrics of the policy network,
-game/<name> (names and definitions in bluffjax.metrics.kuhn_poker).
+(run_utils.make_run_dir) before running; config.yaml holds the flags with
+env_name, half_iterations and run_dir. Every iteration writes one record per
+seed to {run_dir}/results.jsonl (with seed_index and wall_time) and to the
+seed's wandb run: iteration, traversals (the traversals so far, both players)
+and each player's final advantage-network loss; at the evaluations also
+exploitability, value_vs_random, policy_loss and the policy metrics of the
+policy network, game/<name> (names and definitions in
+bluffjax.metrics.kuhn_poker).
 
 Checkpoints (on unless --no-save_checkpoints), for every seed index i:
     {run_dir}/half/avg_policy_{i}.msgpack  policy network trained after
-                                           iteration iterations // 2
+                                           half_iterations iterations
     {run_dir}/full/avg_policy_{i}.msgpack  policy network trained after the
                                            last iteration
 both from the same run. Each holds the flax params of MLP(hidden_sizes, 2)
@@ -81,6 +89,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import wandb
 
 from bluffjax.examples.run_utils import (
     ResultsLog,
@@ -105,6 +114,7 @@ from bluffjax.utils.game_utils.kuhn_exploitability import (
 from bluffjax.utils.paths import REPO_ROOT
 from bluffjax.utils.typing import BoolArray, FloatArray, PRNGKeyArray, PyTree
 
+ENV_NAME = "kuhn_poker"
 NUM_ACTIONS = 2  # pass, bet
 NUM_CARDS = 3
 MAX_GAME_LENGTH = 3  # pass bet pass/bet
@@ -297,14 +307,14 @@ def make_train(
 
 # --- Deep CFR Solver ---
 class DeepCFRSolver:
-    def __init__(self, config: argparse.Namespace) -> None:
+    def __init__(self, config: argparse.Namespace, seed: int | None = None) -> None:
+        """seed defaults to config.seed."""
         self._config = config
         self._iteration = 0
+        seed = config.seed if seed is None else seed
         # Traversal and reservoir sampling on the host, network training on device
-        self._rng = np.random.default_rng(config.seed)
-        self._advantage_key, self._policy_key = jax.random.split(
-            jax.random.key(config.seed)
-        )
+        self._rng = np.random.default_rng(seed)
+        self._advantage_key, self._policy_key = jax.random.split(jax.random.key(seed))
 
         self._advantage_memories = [
             ReservoirBuffer(config.memory_capacity) for _ in range(2)
@@ -433,22 +443,22 @@ class DeepCFRSolver:
 
 def run_deep_cfr(
     config: argparse.Namespace,
-    results_log: ResultsLog | None = None,
     seed_index: int = 0,
+    results_log: ResultsLog | None = None,
     run_dir: str | None = None,
 ) -> dict:
-    """Runs Deep CFR with config.seed, evaluating the average-strategy network
-    after iteration 1, every `eval_every` iterations, after iteration
-    iterations // 2 and at the end. Every iteration is logged to results_log
-    (if given) as seed index seed_index; with run_dir, the policy networks
-    after iterations // 2 and after the last iteration are saved there as
-    half/ and full/avg_policy_{seed_index}."""
+    """Runs Deep CFR with seed config.seed + seed_index, evaluating the
+    average-strategy network after iteration 1, every `eval_interval`
+    iterations, after half_update_steps(iterations) and at the end. Every
+    iteration is logged to results_log (if given) as seed index seed_index;
+    with run_dir, the policy networks after half and all of the iterations
+    are saved there as {half,full}/avg_policy_{seed_index}."""
     start = time.time()
     eval_seconds = 0.0
-    solver = DeepCFRSolver(config)
+    solver = DeepCFRSolver(config, config.seed + seed_index)
     num_half = half_update_steps(config.iterations)
     if run_dir is not None and num_half < 1:
-        raise ValueError("the half checkpoint needs at least 2 iterations")
+        raise ValueError("the half checkpoint needs --iterations >= 2")
     results = {
         "iterations": [],
         "exploitability": [],
@@ -467,7 +477,7 @@ def run_deep_cfr(
         }
         if (
             it == 1
-            or it % config.eval_every == 0
+            or it % config.eval_interval == 0
             or it == num_half
             or it == config.iterations
         ):
@@ -490,8 +500,9 @@ def run_deep_cfr(
             results["exploitability"].append(expl)
             results["policy_loss"].append(loss)
             print(
-                f"Iteration {it:4d}: exploitability = {expl:.6f}, "
-                f"value vs random = {value:+.6f}"
+                f"seed index {seed_index} iteration {it:4d}: exploitability = "
+                f"{expl:.6f}, value vs random = {value:+.6f}",
+                flush=True,
             )
             if run_dir is not None and it in (num_half, config.iterations):
                 stage = "half" if it == num_half else "full"
@@ -509,14 +520,21 @@ def run_deep_cfr(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deep CFR on Kuhn Poker.")
+    parser.add_argument("--iterations", type=int, default=50, help="CFR iterations T")
+    parser.add_argument(
+        "--eval_interval",
+        type=int,
+        default=5,
+        help="evaluate after iteration 1, every this many iterations, after "
+        "half of them and after the last",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--num_seeds",
         type=int,
         default=5,
-        help="seeds run one after the other; seed index i uses seed + i",
+        help="runs one after the other; seed index i uses seed --seed + i",
     )
-    parser.add_argument("--iterations", type=int, default=50, help="CFR iterations T")
     parser.add_argument(
         "--traversals",
         type=int,
@@ -532,82 +550,79 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--advantage_train_steps", type=int, default=200)
     parser.add_argument("--policy_train_steps", type=int, default=5000)
     parser.add_argument("--memory_capacity", type=int, default=100_000)
-    parser.add_argument("--eval_every", type=int, default=5)
+    parser.add_argument(
+        "--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "kuhn")
+    )
+    parser.add_argument("--job_type", type=str, default="kuhn_deep_cfr")
+    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--project", type=str, default="bluffjax")
+    parser.add_argument(
+        "--save_checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="policy network after half and all of the iterations",
+    )
     parser.add_argument(
         "--output",
         type=str,
         default=None,
         help="also write every seed's results to this JSON file",
     )
-    parser.add_argument(
-        "--save_checkpoints",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="save the half and full policy networks",
-    )
-    parser.add_argument("--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "kuhn"))
-    parser.add_argument("--job_type", type=str, default="kuhn_deep_cfr")
-    parser.add_argument("--wandb", action="store_true", help="log to wandb")
-    parser.add_argument("--project", type=str, default="bluffjax")
     return parser.parse_args(argv)
 
 
-def run(config: argparse.Namespace) -> str:
-    """Runs config.num_seeds seeds one after the other with logging and
+def run(args: argparse.Namespace) -> str:
+    """Runs args.num_seeds seeds one after the other with logging and
     checkpoints; returns the run directory."""
-    run_config = vars(config).copy()
-    run_config["half_iterations"] = half_update_steps(config.iterations)
-    run_dir = make_run_dir(run_config)
-    wandb_runs = []
-    if config.wandb:
-        import wandb
-
-        group = "kuhn_poker" + datetime.datetime.now().strftime("_%Y-%m-%d_%H-%M-%S")
-        wandb_runs = [
-            wandb.init(
-                project=config.project,
-                group=group,
-                job_type=config.job_type,
-                name=f"{config.seed}_{i}",
-                config=run_config,
-                dir=str(REPO_ROOT),
-                reinit="create_new",
-            )
-            for i in range(config.num_seeds)
-        ]
+    config = {
+        **vars(args),
+        "env_name": ENV_NAME,
+        "half_iterations": half_update_steps(args.iterations),
+    }
+    run_dir = make_run_dir(config)
+    group = f"{ENV_NAME}_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    wandb_runs = [
+        wandb.init(
+            project=args.project,
+            group=group,
+            job_type=f"{args.job_type}_{ENV_NAME}",
+            name=f"{args.seed}_{i}",
+            config=config,
+            mode=None if args.wandb else "disabled",
+            dir=str(REPO_ROOT),
+            reinit="create_new",
+        )
+        for i in range(args.num_seeds)
+    ]
     try:
         results_log = ResultsLog(run_dir, wandb_runs)
         print(f"Run directory: {run_dir}")
         print("Deep CFR for Kuhn Poker")
         all_results = []
-        for i in range(config.num_seeds):
-            seed_config = argparse.Namespace(**{**vars(config), "seed": config.seed + i})
+        for i in range(args.num_seeds):
             print("=" * 50)
-            print(f"Seed index {i} (seed {seed_config.seed})")
+            print(f"seed index {i} (seed {args.seed + i})")
             results = run_deep_cfr(
-                seed_config,
-                results_log,
-                i,
-                run_dir if config.save_checkpoints else None,
+                args, i, results_log, run_dir if args.save_checkpoints else None
             )
+            all_results.append({"seed": args.seed + i, "seed_index": i, **results})
             print(f"Final exploitability: {results['final_exploitability']:.6f}")
             print(
                 f"Runtime: {results['runtime_seconds']:.1f}s "
                 f"({results['eval_seconds']:.1f}s evaluating)"
             )
-            all_results.append({"seed": seed_config.seed, **results})
-        print("=" * 50)
         finals = [r["final_exploitability"] for r in all_results]
+        print("=" * 50)
         print(
-            f"Final exploitability: mean {np.mean(finals):.6f} std "
+            f"final exploitability: mean {np.mean(finals):.6f} std "
             f"{np.std(finals):.6f} over {len(finals)} seed(s)"
         )
-        if config.save_checkpoints:
+        if args.save_checkpoints:
             print(f"Saved checkpoints to {run_dir}")
-        if config.output:
-            with open(config.output, "w") as f:
+        if args.output:
+            with open(args.output, "w") as f:
                 json.dump(
-                    {"game": "kuhn_poker", "config": run_config, "seeds": all_results},
+                    {"game": ENV_NAME, "config": config, "seeds": all_results},
                     f,
                     indent=2,
                 )
@@ -617,8 +632,8 @@ def run(config: argparse.Namespace) -> str:
     return run_dir
 
 
-def main() -> None:
-    run(parse_args())
+def main(argv: Sequence[str] | None = None) -> None:
+    run(parse_args(argv))
 
 
 if __name__ == "__main__":

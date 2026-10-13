@@ -15,12 +15,22 @@ For every script:
   script's networks; the half checkpoint is the state after exactly
   half_update_steps(budget) updates of the same run (a run stopped there
   gives the same networks) and the full one the final state.
+- The rollout statistics of the RL scripts have the names shared by every
+  game (episodes_completed, ep_length_avg, return_per_episode[_br] for NFSP,
+  first_player_return_per_episode and abs_return_per_episode in self-play);
+  the output policy's exact evaluation is exploitability / value_vs_random,
+  NFSP's BR adds br.
+- CFR and Deep CFR evaluate after iteration 1, every eval_interval, at the
+  half point and at the end, and have the flags, config.yaml and wandb names
+  shared with the Kuhn scripts and the RL scripts.
 """
 
 import functools
 import glob
 import os
 import sys
+
+import yaml
 
 import jax
 import jax.numpy as jnp
@@ -57,9 +67,14 @@ EVAL_PREFIXES = (
 )
 # checkpoint name -> name of its evaluation against random (and value_<name>)
 VS_RANDOM = {
-    "avg_policy": "avg_vs_random", "br": "br_vs_random", "policy": "vs_random",
+    "avg_policy": "vs_random", "br": "br_vs_random", "policy": "vs_random",
     "q_network": "vs_random",
 }
+# rollout statistics of every update (names shared with the other games)
+NFSP_STATS = {"episodes_completed", "ep_length_avg", "return_per_episode",
+              "return_per_episode_br"}
+SELF_PLAY_STATS = {"episodes_completed", "ep_length_avg",
+                   "first_player_return_per_episode", "abs_return_per_episode"}
 
 
 def _greedy(apply):
@@ -163,14 +178,18 @@ def test_rl_script_run(monkeypatch, tmp_path, name):
         assert [r["update_step"] for r in rows] == list(range(U))
         assert [r["env_steps"] for r in rows] == [64 * (u + 1) for u in range(U)]
         names = {VS_RANDOM[n] for n in nets}
+        stats = NFSP_STATS if "nfsp" in name else SELF_PLAY_STATS
+        exact = {"exploitability", "exploitability_br"} if "nfsp" in name else {"exploitability"}
         for u, row in enumerate(rows):
+            assert stats <= set(row)
+            assert 2.0 <= row["ep_length_avg"] <= 8.0 and row["episodes_completed"] > 0
             game_keys = {k for k in row if k.split("/")[0] in ("game", "game_br")}
             value_keys = {
                 k for k in row if k.startswith("value_") and k.endswith("_vs_random")
             }
             if u in EVAL_UPDATES:
                 assert game_keys == {f"{p}/{n}" for p in prefixes for n in TOTAL_NAMES}
-                assert any(k.startswith("exploitability") for k in row)
+                assert {k for k in row if k.startswith("exploitability")} == exact
                 assert value_keys == {f"value_{n}" for n in names}
             else:
                 assert not game_keys
@@ -251,7 +270,7 @@ def test_rl_script_run(monkeypatch, tmp_path, name):
 
 def test_cfr_run(tmp_path):
     leduc_cfr.main(
-        ["--iterations", "6", "--log_every", "4", "--save_dir", str(tmp_path),
+        ["--iterations", "6", "--eval_interval", "4", "--save_dir", str(tmp_path),
          "--save_checkpoints"]
     )
     (run_dir,) = glob.glob(f"{tmp_path}/leduc_cfr_*")
@@ -320,8 +339,61 @@ def test_cfr_checkpoint_rows_identify_infosets(tmp_path):
         leduc_cfr.load_average_policy(path)
 
 
+# Flags, config.yaml and wandb names shared by the CFR and Deep CFR scripts of
+# Kuhn and Leduc (bluffjax/tests/test_kuhn_runs.py checks the Kuhn ones)
+SHARED_FLAGS = {
+    "iterations", "eval_interval", "seed", "save_dir", "job_type", "wandb",
+    "project", "save_checkpoints",
+}
+
+
+class _WandbRun:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def log(self, metrics):
+        pass
+
+    def finish(self):
+        pass
+
+
+@pytest.mark.parametrize("name", ["leduc_cfr", "leduc_deep_cfr"])
+def test_cfr_flags_config_and_wandb(monkeypatch, tmp_path, name):
+    mod = {"leduc_cfr": leduc_cfr, "leduc_deep_cfr": leduc_deep_cfr}[name]
+    defaults = vars(mod.parse_args([]))
+    deep = name == "leduc_deep_cfr"
+    assert SHARED_FLAGS | ({"num_seeds"} if deep else set()) <= set(defaults)
+    assert defaults["job_type"] == name and defaults["project"] == "bluffjax"
+    assert defaults["seed"] == 0 and defaults["wandb"] is False
+    assert defaults["save_checkpoints"] is True
+    assert (defaults["iterations"], defaults["eval_interval"]) == ((50, 5) if deep else (100, 10))
+    assert defaults["save_dir"].endswith(os.path.join("checkpoints", "leduc"))
+    assert mod.parse_args(["--wandb"]).wandb and not mod.parse_args(["--no-wandb"]).wandb
+    runs = []
+    monkeypatch.setattr(mod.wandb, "init", lambda **kw: runs.append(_WandbRun(**kw)) or runs[-1])
+    argv = ["--iterations", "2", "--seed", "3", "--save_dir", str(tmp_path), "--wandb"]
+    if deep:
+        argv += ["--num_seeds", "2", "--traversals", "2", "--hidden_sizes", "4",
+                 "--batch_size", "4", "--advantage_train_steps", "1",
+                 "--policy_train_steps", "1", "--memory_capacity", "50"]
+    mod.main(argv)
+    (run_dir,) = glob.glob(f"{tmp_path}/{name}_*")
+    with open(os.path.join(run_dir, "config.yaml")) as f:
+        config = yaml.safe_load(f)
+    assert config["env_name"] == "leduc_poker" and config["seed"] == 3
+    assert config["num_seeds"] == (2 if deep else 1) and config["half_iterations"] == 1
+    assert SHARED_FLAGS <= set(config)
+    assert [r.kwargs["name"] for r in runs] == (["3_0", "3_1"] if deep else ["3_0"])
+    for r in runs:
+        assert r.kwargs["project"] == "bluffjax" and r.kwargs["mode"] is None
+        assert r.kwargs["job_type"] == f"{name}_leduc_poker"
+        assert r.kwargs["group"].startswith("leduc_poker_")
+        assert r.kwargs["config"]["env_name"] == "leduc_poker"
+
+
 DEEP_CFR_ARGS = [
-    "--traversals", "5", "--eval_every", "3", "--policy_train_steps", "20",
+    "--traversals", "5", "--eval_interval", "3", "--policy_train_steps", "20",
     "--advantage_train_steps", "10", "--batch_size", "16", "--memory_capacity", "500",
     "--hidden_sizes", "8", "8", "--save_checkpoints",
 ]

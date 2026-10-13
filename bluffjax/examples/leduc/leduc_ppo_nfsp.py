@@ -37,15 +37,16 @@ Units: the env pays chips per hand; training, the logged returns and the
 exploitability are in chips.
 
 Logged evaluation metrics (returns in chips): every compare_interval updates
-and after the last one, for the average policy (name avg_vs_random) and the BR
+and after the last one, for the average policy (name vs_random) and the BR
 (br_vs_random), win_rate_<name>, loss_rate_<name>, draw_rate_<name> (split
-pots), win_rate_decided_<name> (wins among the hands won or lost),
-avg_return_<name> (per hand) and avg_episode_length_<name> (env steps per
-hand) over compare_episodes hands each; every eval_interval updates and after
-the last one, exploitability_avg_policy, exploitability_br_policy,
-value_avg_vs_random and value_br_vs_random (the exact expectation of
-avg_return_avg_vs_random and avg_return_br_vs_random) and the game/ and
-game_br/ metrics.
+pots), win_rate_decided_<name> (wins among the hands won or lost, NaN without
+any), avg_return_<name> (per hand) and avg_episode_length_<name> (env steps
+per hand) over compare_episodes hands each; every eval_interval updates and
+after the last one, exploitability and exploitability_br (of the average
+policy and of the BR), value_vs_random and value_br_vs_random (the exact
+expectation of avg_return_vs_random and avg_return_br_vs_random) and the
+game/ and game_br/ metrics. The average policy is NFSP's output and has the
+plain names; the BR's add br.
 
 Run directory ({save_dir}/{job_type}_{timestamp}/, made when the run starts;
 see bluffjax.examples.run_utils):
@@ -141,7 +142,7 @@ class Transition(NamedTuple):
     br_log_prob: FloatArray  # log-prob of the action under the BR (BR decisions)
     reward: FloatArray  # (num_agents,) env reward for every player, chips
     done: BoolArray  # the hand ended at this step (the env auto-resets)
-    value: FloatArray  # BR critic value of obs, in scaled reward units
+    value: FloatArray  # BR critic value of obs, chips
     player_idx: IntArray
     is_br: BoolArray  # the acting player follows the BR in this hand
     br_mode: BoolArray  # (num_agents,) which players follow the BR in this hand
@@ -382,9 +383,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             }
             EXPLOITABILITY.setdefault(seed_i, []).append((env_steps, expl))
             VALUE_VS_RANDOM.setdefault(seed_i, []).append((env_steps, value))
-            metrics["exploitability_avg_policy"] = expl["avg_policy"]
-            metrics["exploitability_br_policy"] = expl["br_policy"]
-            metrics["value_avg_vs_random"] = value["avg_policy"]
+            metrics["exploitability"] = expl["avg_policy"]
+            metrics["exploitability_br"] = expl["br_policy"]
+            metrics["value_vs_random"] = value["avg_policy"]
             metrics["value_br_vs_random"] = value["br_policy"]
             metrics.update(log_metrics("game", policies["avg_policy"]))
             metrics.update(log_metrics("game_br", policies["br_policy"]))
@@ -544,8 +545,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
             _, last_val = network.apply(br_train_state.params, runner_state.obs)
 
-            # Per-player GAE in scaled reward units. PPO is on-policy: the BR
-            # actor and critic train on BR decisions whose outcome is known.
+            # Per-player GAE in chips. PPO is on-policy: the BR actor and
+            # critic train on BR decisions whose outcome is known.
             advantages, targets, valid = per_player_gae(
                 transitions.value,
                 transitions.reward,
@@ -780,13 +781,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "env_steps": (runner_state.update_step + 1)
                 * config["num_envs"]
                 * config["num_steps_per_env_per_update"],
-                "hands_completed": transitions.done.sum(),
-                "hand_length": (transitions.info["timestep"] * transitions.done).sum()
+                "episodes_completed": transitions.done.sum(),
+                "ep_length_avg": (transitions.info["timestep"] * transitions.done).sum()
                 / num_hands,
-                "br_return_per_hand": (transitions.reward * br_hands).sum()
-                / jnp.maximum(br_hands.sum(), 1),
-                "avg_return_per_hand": (transitions.reward * avg_hands).sum()
+                "return_per_episode": (transitions.reward * avg_hands).sum()
                 / jnp.maximum(avg_hands.sum(), 1),
+                "return_per_episode_br": (transitions.reward * br_hands).sum()
+                / jnp.maximum(br_hands.sum(), 1),
                 "br_action_frac_rollout": transitions.is_br.mean(),
                 "ppo_sample_frac": train_mask.mean(),
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
@@ -811,7 +812,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     maybe_vs_random_metrics(
                         env,
                         {
-                            "avg_vs_random": (
+                            "vs_random": (
                                 softmax_policy(network.apply),
                                 avg_train_state.params,
                             ),
