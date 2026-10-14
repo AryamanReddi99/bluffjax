@@ -1,0 +1,263 @@
+{
+ "every_pair_all_episodes_complete": true,
+ "random_vs_random": {
+  "win": 0.5625,
+  "loss": 0.4375,
+  "draw": 0.0,
+  "return": 1.0625,
+  "win_se": NaN,
+  "return_se": NaN,
+  "pairs": 1,
+  "episodes": 32
+ },
+ "antisymmetry_max_abs_z_return": 1.906634597986328,
+ "antisymmetry_n_abs_z_return_above_3": 0,
+ "antisymmetry": [
+  {
+   "a": "PPO-NFSP (half)",
+   "b": "PPO-NFSP (full)",
+   "return_ab": -0.4175,
+   "return_ba": -0.365,
+   "z_return": -1.047944610655932,
+   "z_win_vs_loss": -0.1539981007018072
+  },
+  {
+   "a": "PPO-NFSP (half)",
+   "b": "PQN-NFSP (half)",
+   "return_ab": -0.80375,
+   "return_ba": 0.47375,
+   "z_return": -0.428760593160959,
+   "z_win_vs_loss": -0.6279858256227538
+  },
+  {
+   "a": "PPO-NFSP (half)",
+   "b": "PQN-NFSP (full)",
+   "return_ab": -1.78,
+   "return_ba": 1.405,
+   "z_return": -0.5435822613009705,
+   "z_win_vs_loss": 0.525897805586419
+  },
+  {
+   "a": "PPO-NFSP (half)",
+   "b": "ReBeL (half)",
+   "return_ab": -1.09875,
+   "return_ba": 1.45875,
+   "z_return": 0.7478554132390443,
+   "z_win_vs_loss": 0.17713584147068467
+  },
+  {
+   "a": "PPO-NFSP (half)",
+   "b": "ReBeL (full)",
+   "return_ab": -1.6325,
+   "return_ba": 1.27875,
+   "z_return": -0.7160819380079335,
+   "z_win_vs_loss": -1.8561001984579562
+  },
+  {
+   "a": "PPO-NFSP (half)",
+   "b": "Random",
+   "return_ab": 4.84375,
+   "return_ba": -4.85625,
+   "z_return": -0.020355245675685606,
+   "z_win_vs_loss": 2.190890230020663
+  },
+  {
+   "a": "PPO-NFSP (full)",
+   "b": "PQN-NFSP (half)",
+   "return_ab": -0.5,
+   "return_ba": 0.6575,
+   "z_return": 0.20716460808882275,
+   "z_win_vs_loss": -2.4258087527577827
+  },
+  {
+   "a": "PPO-NFSP (full)",
+   "b": "PQN-NFSP (full)",
+   "return_ab": -1.4,
+   "return_ba": 1.245,
+   "z_return": -0.21243987797179084,
+   "z_win_vs_loss": -0.15869351165087095
+  },
+  {
+   "a": "PPO-NFSP (full)",
+   "b": "ReBeL (half)",
+   "return_ab": -1.15,
+   "return_ba": 1.40125,
+   "z_return": 0.5747175010592094,
+   "z_win_vs_loss": 0.15093444108438941
+  },
+  {
+   "a": "PPO-NFSP (full)",
+   "b": "ReBeL (full)",
+   "return_ab": -1.14375,
+   "return_ba": 1.12,
+   "z_return": -0.052623755883626076,
+   "z_win_vs_loss": 1.02768152749662
+  },
+  {
+   "a": "PPO-NFSP (full)",
+   "b": "Random",
+   "return_ab": 4.2625,
+   "return_ba": -4.3625,
+   "z_return": -0.15196456789300458,
+   "z_win_vs_loss": -1.1338934190276846
+  },
+  {
+   "a": "PQN-NFSP (half)",
+   "b": "PQN-NFSP (full)",
+   "return_ab": -0.89375,
+   "return_ba": 0.90125,
+   "z_return": 0.00897497479637269,
+   "z_win_vs_loss": -0.7461240050607111
+  },
+  {
+   "a": "PQN-NFSP (half)",
+   "b": "ReBeL (half)",
+   "return_ab": -1.4775,
+   "return_ba": 1.10125,
+   "z_return": -0.769533065127068,
+   "z_win_vs_loss": -0.4228211725956219
+  },
+  {
+   "a": "PQN-NFSP (half)",
+   "b": "ReBeL (full)",
+   "return_ab": -1.1875,
+   "return_ba": 0.945,
+   "z_return": -0.49782376301886305,
+   "z_win_vs_loss": -0.3455817581880704
+  },
+  {
+   "a": "PQN-NFSP (half)",
+   "b": "Random",
+   "return_ab": 3.25,
+   "return_ba": -3.16875,
+   "z_return": 0.14326427982641082,
+   "z_win_vs_loss": 1.183215956619925
+  },
+  {
+   "a": "PQN-NFSP (full)",
+   "b": "ReBeL (half)",
+   "return_ab": -0.555,
+   "return_ba": 0.2975,
+   "z_return": -0.648013182123411,
+   "z_win_vs_loss": 0.7319931375965031
+  },
+  {
+   "a": "PQN-NFSP (full)",
+   "b": "ReBeL (full)",
+   "return_ab": -1.19125,
+   "return_ba": 1.2275,
+   "z_return": 0.08522668548511751,
+   "z_win_vs_loss": 0.4282983661489501
+  },
+  {
+   "a": "PQN-NFSP (full)",
+   "b": "Random",
+   "return_ab": 2.81875,
+   "return_ba": -3.34375,
+   "z_return": -0.6008282424250115,
+   "z_win_vs_loss": -0.17677669529663625
+  },
+  {
+   "a": "ReBeL (half)",
+   "b": "ReBeL (full)",
+   "return_ab": 0.03375,
+   "return_ba": 0.50375,
+   "z_return": 1.906634597986328,
+   "z_win_vs_loss": 0.7918944211153065
+  },
+  {
+   "a": "ReBeL (half)",
+   "b": "Random",
+   "return_ab": 2.96875,
+   "return_ba": -3.1625,
+   "z_return": -0.3808342313154426,
+   "z_win_vs_loss": -0.27091418459144
+  },
+  {
+   "a": "ReBeL (full)",
+   "b": "Random",
+   "return_ab": 2.28125,
+   "return_ba": -2.45,
+   "z_return": -0.364018290256395,
+   "z_win_vs_loss": -0.4120816918460657
+  }
+ ],
+ "diagonal": [
+  {
+   "participant": "PPO-NFSP (half)",
+   "return": 0.428125,
+   "win": 0.4859375,
+   "loss": 0.484375,
+   "z_return": 0.882657477142572
+  },
+  {
+   "participant": "PPO-NFSP (full)",
+   "return": 0.80625,
+   "win": 0.484375,
+   "loss": 0.4859375,
+   "z_return": 1.644603131055637
+  },
+  {
+   "participant": "PQN-NFSP (half)",
+   "return": 0.178125,
+   "win": 0.4890625,
+   "loss": 0.4765625,
+   "z_return": 0.3757991455145226
+  },
+  {
+   "participant": "PQN-NFSP (full)",
+   "return": 0.228125,
+   "win": 0.4859375,
+   "loss": 0.4703125,
+   "z_return": 0.543878536803124
+  },
+  {
+   "participant": "ReBeL (half)",
+   "return": -0.303125,
+   "win": 0.4671875,
+   "loss": 0.50625,
+   "z_return": -1.7301549481880822
+  },
+  {
+   "participant": "ReBeL (full)",
+   "return": 0.04375,
+   "win": 0.4921875,
+   "loss": 0.4875,
+   "z_return": 0.23296917785195206
+  },
+  {
+   "participant": "Random",
+   "return": 1.0625,
+   "win": 0.5625,
+   "loss": 0.4375,
+   "z_return": NaN
+  }
+ ],
+ "random_vs_random_many_pairs": {
+  "win": 0.50018310546875,
+  "loss": 0.49908447265625,
+  "draw": 0.000732421875,
+  "return": -0.03314208984375,
+  "win_se": 0.003635519484215471,
+  "return_se": 0.032887597081937656,
+  "pairs": 512,
+  "episodes": 16384
+ },
+ "wall_seconds": 178.59978795051575,
+ "seconds_by_group": {
+  "pool-pool": 3.252610683441162,
+  "pool-rebel": 47.05072355270386,
+  "rebel-pool": 44.43787980079651,
+  "rebel-rebel": 80.1511218547821
+ },
+ "seed": 0,
+ "rebel": {
+  "game": "hul",
+  "max_raises": 4,
+  "value_hidden_dim": 128,
+  "value_num_layers": 2,
+  "cfr_iters": 64
+ },
+ "solve_chunk": 64,
+ "pairs_total": 931
+}

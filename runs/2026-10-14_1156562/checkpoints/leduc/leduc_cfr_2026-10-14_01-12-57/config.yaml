@@ -1,0 +1,12 @@
+iterations: 100
+eval_interval: 10
+seed: 0
+save_dir: /home/aryaman/bluffjax-dev/runs/checkpoints/leduc
+job_type: leduc_cfr
+wandb: true
+project: bluffjax-final
+save_checkpoints: true
+env_name: leduc_poker
+num_seeds: 1
+half_iterations: 50
+run_dir: /home/aryaman/bluffjax-dev/runs/checkpoints/leduc/leduc_cfr_2026-10-14_01-12-57

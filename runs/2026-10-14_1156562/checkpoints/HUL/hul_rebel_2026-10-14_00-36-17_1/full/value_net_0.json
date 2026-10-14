@@ -1,0 +1,9 @@
+{
+  "game": "hul",
+  "max_raises": 4,
+  "value_hidden_dim": 128,
+  "value_num_layers": 2,
+  "cfr_iters": 64,
+  "samples": 10004086,
+  "seed": 1
+}

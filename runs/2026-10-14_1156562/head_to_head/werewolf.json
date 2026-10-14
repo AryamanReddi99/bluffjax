@@ -1,0 +1,386 @@
+{
+ "game": "Werewolf",
+ "game_key": "werewolf",
+ "units": "team reward per game (+10 win, -10 loss)",
+ "episodes_per_pair": 32,
+ "protocol": "2 werewolves vs 4 villagers: the row checkpoint controls every player of one team and the column checkpoint the other; 16 role deals per pair, each played twice with the sides swapped (same reset and env-step keys).",
+ "participants": [
+  "PPO-NFSP (half)",
+  "PPO-NFSP (full)",
+  "PQN-NFSP (half)",
+  "PQN-NFSP (full)",
+  "Random"
+ ],
+ "checkpoints": {
+  "PPO-NFSP (half)": 5,
+  "PPO-NFSP (full)": 5,
+  "PQN-NFSP (half)": 5,
+  "PQN-NFSP (full)": 5,
+  "Random": 1
+ },
+ "cells": [
+  [
+   {
+    "win": 0.49687498807907104,
+    "loss": 0.503125011920929,
+    "draw": 0.0,
+    "return": -0.0625,
+    "win_se": 0.023549621924757957,
+    "return_se": 0.47099244594573975,
+    "pairs": 20,
+    "episodes": 640,
+    "extra": {
+     "win_as_werewolf": 0.796875,
+     "win_as_villager": 0.196875
+    }
+   },
+   {
+    "win": 0.47749999165534973,
+    "loss": 0.5224999785423279,
+    "draw": 0.0,
+    "return": -0.44999998807907104,
+    "win_se": 0.013075302354991436,
+    "return_se": 0.261506050825119,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.81,
+     "win_as_villager": 0.145
+    }
+   },
+   {
+    "win": 0.4724999964237213,
+    "loss": 0.5274999737739563,
+    "draw": 0.0,
+    "return": -0.550000011920929,
+    "win_se": 0.017146732658147812,
+    "return_se": 0.34293463826179504,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.7975,
+     "win_as_villager": 0.1475
+    }
+   },
+   {
+    "win": 0.4337500035762787,
+    "loss": 0.5662500262260437,
+    "draw": 0.0,
+    "return": -1.3250000476837158,
+    "win_se": 0.01912132278084755,
+    "return_se": 0.3824264407157898,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.73,
+     "win_as_villager": 0.1375
+    }
+   },
+   {
+    "win": 0.6000000238418579,
+    "loss": 0.4000000059604645,
+    "draw": 0.0,
+    "return": 2.0,
+    "win_se": 0.018221724778413773,
+    "return_se": 0.36443448066711426,
+    "pairs": 5,
+    "episodes": 160,
+    "extra": {
+     "win_as_werewolf": 0.925,
+     "win_as_villager": 0.275
+    }
+   }
+  ],
+  [
+   {
+    "win": 0.5475000143051147,
+    "loss": 0.45249998569488525,
+    "draw": 0.0,
+    "return": 0.949999988079071,
+    "win_se": 0.011284668929874897,
+    "return_se": 0.22569337487220764,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.8875,
+     "win_as_villager": 0.2075
+    }
+   },
+   {
+    "win": 0.48750001192092896,
+    "loss": 0.512499988079071,
+    "draw": 0.0,
+    "return": -0.25,
+    "win_se": 0.01593443565070629,
+    "return_se": 0.3186887204647064,
+    "pairs": 20,
+    "episodes": 640,
+    "extra": {
+     "win_as_werewolf": 0.81875,
+     "win_as_villager": 0.15625
+    }
+   },
+   {
+    "win": 0.5274999737739563,
+    "loss": 0.4724999964237213,
+    "draw": 0.0,
+    "return": 0.550000011920929,
+    "win_se": 0.015554005280137062,
+    "return_se": 0.31108009815216064,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.85,
+     "win_as_villager": 0.205
+    }
+   },
+   {
+    "win": 0.49125000834465027,
+    "loss": 0.5087500214576721,
+    "draw": 0.0,
+    "return": -0.17499999701976776,
+    "win_se": 0.015258193016052246,
+    "return_se": 0.3051638901233673,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.8025,
+     "win_as_villager": 0.18
+    }
+   },
+   {
+    "win": 0.574999988079071,
+    "loss": 0.42500001192092896,
+    "draw": 0.0,
+    "return": 1.5,
+    "win_se": 0.021194780245423317,
+    "return_se": 0.42389559745788574,
+    "pairs": 5,
+    "episodes": 160,
+    "extra": {
+     "win_as_werewolf": 0.925,
+     "win_as_villager": 0.225
+    }
+   }
+  ],
+  [
+   {
+    "win": 0.5174999833106995,
+    "loss": 0.48249998688697815,
+    "draw": 0.0,
+    "return": 0.3499999940395355,
+    "win_se": 0.009560661390423775,
+    "return_se": 0.1912132203578949,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.8625,
+     "win_as_villager": 0.1725
+    }
+   },
+   {
+    "win": 0.48249998688697815,
+    "loss": 0.5174999833106995,
+    "draw": 0.0,
+    "return": -0.3499999940395355,
+    "win_se": 0.01251041330397129,
+    "return_se": 0.2502082586288452,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.81,
+     "win_as_villager": 0.155
+    }
+   },
+   {
+    "win": 0.46875,
+    "loss": 0.53125,
+    "draw": 0.0,
+    "return": -0.625,
+    "win_se": 0.015038328245282173,
+    "return_se": 0.30076655745506287,
+    "pairs": 20,
+    "episodes": 640,
+    "extra": {
+     "win_as_werewolf": 0.79375,
+     "win_as_villager": 0.14375
+    }
+   },
+   {
+    "win": 0.4612500071525574,
+    "loss": 0.5387499928474426,
+    "draw": 0.0,
+    "return": -0.7749999761581421,
+    "win_se": 0.015549818053841591,
+    "return_se": 0.3109963536262512,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.7825,
+     "win_as_villager": 0.14
+    }
+   },
+   {
+    "win": 0.6187499761581421,
+    "loss": 0.3812499940395355,
+    "draw": 0.0,
+    "return": 2.375,
+    "win_se": 0.02296396531164646,
+    "return_se": 0.459279328584671,
+    "pairs": 5,
+    "episodes": 160,
+    "extra": {
+     "win_as_werewolf": 0.925,
+     "win_as_villager": 0.3125
+    }
+   }
+  ],
+  [
+   {
+    "win": 0.5287500023841858,
+    "loss": 0.4712499976158142,
+    "draw": 0.0,
+    "return": 0.574999988079071,
+    "win_se": 0.014311453327536583,
+    "return_se": 0.28622907400131226,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.87,
+     "win_as_villager": 0.1875
+    }
+   },
+   {
+    "win": 0.5099999904632568,
+    "loss": 0.49000000953674316,
+    "draw": 0.0,
+    "return": 0.20000000298023224,
+    "win_se": 0.011513127014040947,
+    "return_se": 0.23026254773139954,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.8025,
+     "win_as_villager": 0.2175
+    }
+   },
+   {
+    "win": 0.5350000262260437,
+    "loss": 0.4650000035762787,
+    "draw": 0.0,
+    "return": 0.699999988079071,
+    "win_se": 0.011313477531075478,
+    "return_se": 0.22626957297325134,
+    "pairs": 25,
+    "episodes": 800,
+    "extra": {
+     "win_as_werewolf": 0.8475,
+     "win_as_villager": 0.2225
+    }
+   },
+   {
+    "win": 0.5015624761581421,
+    "loss": 0.4984374940395355,
+    "draw": 0.0,
+    "return": 0.03125,
+    "win_se": 0.017336376011371613,
+    "return_se": 0.34672752022743225,
+    "pairs": 20,
+    "episodes": 640,
+    "extra": {
+     "win_as_werewolf": 0.809375,
+     "win_as_villager": 0.19375
+    }
+   },
+   {
+    "win": 0.699999988079071,
+    "loss": 0.30000001192092896,
+    "draw": 0.0,
+    "return": 4.0,
+    "win_se": 0.01593443565070629,
+    "return_se": 0.3186887204647064,
+    "pairs": 5,
+    "episodes": 160,
+    "extra": {
+     "win_as_werewolf": 0.95,
+     "win_as_villager": 0.45
+    }
+   }
+  ],
+  [
+   {
+    "win": 0.42500001192092896,
+    "loss": 0.574999988079071,
+    "draw": 0.0,
+    "return": -1.5,
+    "win_se": 0.00765465572476387,
+    "return_se": 0.1530931144952774,
+    "pairs": 5,
+    "episodes": 160,
+    "extra": {
+     "win_as_werewolf": 0.7625,
+     "win_as_villager": 0.0875
+    }
+   },
+   {
+    "win": 0.40625,
+    "loss": 0.59375,
+    "draw": 0.0,
+    "return": -1.875,
+    "win_se": 0.03277527540922165,
+    "return_se": 0.6555054783821106,
+    "pairs": 5,
+    "episodes": 160,
+    "extra": {
+     "win_as_werewolf": 0.775,
+     "win_as_villager": 0.0375
+    }
+   },
+   {
+    "win": 0.3375000059604645,
+    "loss": 0.6625000238418579,
+    "draw": 0.0,
+    "return": -3.25,
+    "win_se": 0.01530931144952774,
+    "return_se": 0.3061862289905548,
+    "pairs": 5,
+    "episodes": 160,
+    "extra": {
+     "win_as_werewolf": 0.6125,
+     "win_as_villager": 0.0625
+    }
+   },
+   {
+    "win": 0.3812499940395355,
+    "loss": 0.6187499761581421,
+    "draw": 0.0,
+    "return": -2.375,
+    "win_se": 0.0544862374663353,
+    "return_se": 1.0897247791290283,
+    "pairs": 5,
+    "episodes": 160,
+    "extra": {
+     "win_as_werewolf": 0.6625,
+     "win_as_villager": 0.1
+    }
+   },
+   {
+    "win": 0.53125,
+    "loss": 0.46875,
+    "draw": 0.0,
+    "return": 0.625,
+    "win_se": NaN,
+    "return_se": NaN,
+    "pairs": 1,
+    "episodes": 32,
+    "extra": {
+     "win_as_werewolf": 0.9375,
+     "win_as_villager": 0.125
+    }
+   }
+  ]
+ ],
+ "commit": "1156562",
+ "runs_root": "~/bluffjax-dev/runs/checkpoints",
+ "generated": "2026-10-14T05:52:54+02:00"
+}

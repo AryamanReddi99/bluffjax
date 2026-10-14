@@ -1,0 +1,12 @@
+iterations: 100
+eval_interval: 10
+seed: 0
+save_dir: /home/aryaman/bluffjax-dev/runs/checkpoints/kuhn
+job_type: kuhn_cfr
+wandb: true
+project: bluffjax-final
+save_checkpoints: true
+env_name: kuhn_poker
+num_seeds: 1
+half_iterations: 50
+run_dir: /home/aryaman/bluffjax-dev/runs/checkpoints/kuhn/kuhn_cfr_2026-10-14_00-41-48

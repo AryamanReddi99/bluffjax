@@ -1,0 +1,20 @@
+# name | command (run from ~/bluffjax-dev/runs; wandb offline, synced later)
+kuhn_ppo_nfsp | .venv/bin/python bluffjax/examples/kuhn/kuhn_ppo_nfsp.py wandb=True project=bluffjax-final
+kuhn_pqn_nfsp | .venv/bin/python bluffjax/examples/kuhn/kuhn_pqn_nfsp.py wandb=True project=bluffjax-final
+kuhn_ppo | .venv/bin/python bluffjax/examples/kuhn/kuhn_ppo.py wandb=True project=bluffjax-final
+kuhn_pqn | .venv/bin/python bluffjax/examples/kuhn/kuhn_pqn.py wandb=True project=bluffjax-final
+kuhn_cfr | .venv/bin/python bluffjax/examples/kuhn/kuhn_cfr.py --wandb --project bluffjax-final
+kuhn_deep_cfr | .venv/bin/python bluffjax/examples/kuhn/kuhn_deep_cfr.py --wandb --project bluffjax-final
+leduc_ppo_nfsp | .venv/bin/python bluffjax/examples/leduc/leduc_ppo_nfsp.py wandb=True project=bluffjax-final
+leduc_pqn_nfsp | .venv/bin/python bluffjax/examples/leduc/leduc_pqn_nfsp.py wandb=True project=bluffjax-final
+leduc_ppo | .venv/bin/python bluffjax/examples/leduc/leduc_ppo.py wandb=True project=bluffjax-final
+leduc_pqn | .venv/bin/python bluffjax/examples/leduc/leduc_pqn.py wandb=True project=bluffjax-final
+leduc_cfr | .venv/bin/python bluffjax/examples/leduc/leduc_cfr.py --wandb --project bluffjax-final
+leduc_deep_cfr | .venv/bin/python bluffjax/examples/leduc/leduc_deep_cfr.py --wandb --project bluffjax-final
+goofspiel_ppo_nfsp | .venv/bin/python bluffjax/examples/goofspiel/goofspiel_ppo_nfsp.py wandb=True project=bluffjax-final
+goofspiel_pqn_nfsp | .venv/bin/python bluffjax/examples/goofspiel/goofspiel_pqn_nfsp.py wandb=True project=bluffjax-final
+werewolf_ppo_nfsp | .venv/bin/python bluffjax/examples/werewolf/werewolf_ppo_nfsp.py wandb=True project=bluffjax-final
+werewolf_pqn_nfsp | .venv/bin/python bluffjax/examples/werewolf/werewolf_pqn_nfsp.py wandb=True project=bluffjax-final
+five_card_draw_ppo_nfsp | .venv/bin/python bluffjax/examples/five_card_draw/five_card_draw_ppo_nfsp.py wandb=True project=bluffjax-final
+five_card_draw_pqn_nfsp | .venv/bin/python bluffjax/examples/five_card_draw/five_card_draw_pqn_nfsp.py wandb=True project=bluffjax-final
+kuhn_rebel | .venv/bin/python bluffjax/examples/kuhn/kuhn_rebel.py wandb=True project=bluffjax-final

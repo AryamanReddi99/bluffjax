@@ -1,0 +1,9 @@
+{
+  "game": "hunl",
+  "max_raises": 2,
+  "value_hidden_dim": 128,
+  "value_num_layers": 2,
+  "cfr_iters": 64,
+  "samples": 10001209,
+  "seed": 2
+}

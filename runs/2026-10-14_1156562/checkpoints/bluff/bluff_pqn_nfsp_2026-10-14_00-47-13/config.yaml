@@ -1,0 +1,44 @@
+num_timesteps: 100000000.0
+num_envs: 1024
+num_steps_per_env_per_update: 64
+num_epochs: 4
+num_minibatches: 4
+lr: 0.00025
+anneal_lr: true
+start_e: 1.0
+end_e: 0.005
+exploration_fraction: 0.1
+q_lambda: 0.9
+max_grad_norm: 0.5
+gamma: 0.99
+fc_dim_size: 128
+anticipatory_eta: 0.1
+sl_reservoir_capacity: 1000000
+sl_batch_size: 256
+sl_num_steps_per_update: 512
+sl_lr: 0.0003
+env_name: bluff
+seed: 0
+num_seeds: 5
+env_kwargs:
+  num_agents: 3
+  num_ranks: 13
+  num_suits: 4
+  num_decks: 1
+  horizon: 500
+compare: true
+compare_mode: random
+compare_with: ''
+compare_network_type: actor
+compare_episodes: 10
+compare_interval: 1
+project: bluffjax-final
+job_type: bluff_pqn_nfsp
+wandb: true
+save_checkpoints: true
+save_dir: /home/reddi/bluffjax-dev/runs/checkpoints/bluff
+num_update_steps: 1525
+half_update_steps: 762
+num_gradient_steps: 24400
+batch_shuffle_dim: 65536
+run_dir: /home/reddi/bluffjax-dev/runs/checkpoints/bluff/bluff_pqn_nfsp_2026-10-14_00-47-13

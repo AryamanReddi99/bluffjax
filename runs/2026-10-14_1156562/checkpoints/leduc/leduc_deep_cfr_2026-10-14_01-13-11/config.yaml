@@ -1,0 +1,23 @@
+iterations: 50
+eval_interval: 5
+seed: 0
+num_seeds: 5
+traversals: 100
+hidden_sizes:
+- 128
+- 128
+learning_rate: 0.001
+max_grad_norm: 1.0
+batch_size: 2048
+advantage_train_steps: 200
+policy_train_steps: 5000
+memory_capacity: 100000
+save_dir: /home/aryaman/bluffjax-dev/runs/checkpoints/leduc
+job_type: leduc_deep_cfr
+wandb: true
+project: bluffjax-final
+save_checkpoints: true
+output: null
+env_name: leduc_poker
+half_iterations: 25
+run_dir: /home/aryaman/bluffjax-dev/runs/checkpoints/leduc/leduc_deep_cfr_2026-10-14_01-13-11
