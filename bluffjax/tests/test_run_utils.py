@@ -93,3 +93,17 @@ def test_masked_totals_rate_and_credit():
     assert math.isnan(float(rate(0.0, 0.0)))
     np.testing.assert_array_equal(credit(3, 1, 2.0), np.array([0.0, 2.0, 0.0]))
     assert prefixed("game", {"x": 1}) == {"game/x": 1}
+
+
+def test_read_results_reads_the_gzipped_log(tmp_path):
+    import gzip
+    import shutil
+
+    run_dir = run_utils.make_run_dir(_config(tmp_path))
+    run_utils.ResultsLog(run_dir).log({"x": 2.0}, seed_index=1)
+    path = os.path.join(run_dir, run_utils.RESULTS_FILE)
+    with open(path, "rb") as src, gzip.open(path + ".gz", "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    os.remove(path)
+    (record,) = run_utils.read_results(run_dir)
+    assert record["seed_index"] == 1 and record["x"] == 2.0

@@ -23,6 +23,7 @@ json module writes as NaN and reads back. Read it with read_results().
 """
 
 import datetime
+import gzip
 import json
 import os
 import time
@@ -96,8 +97,15 @@ class ResultsLog:
 
 
 def read_results(run_dir: str) -> list[dict]:
-    """The records of {run_dir}/results.jsonl, in the order they were logged."""
-    with open(os.path.join(run_dir, RESULTS_FILE)) as f:
+    """The records of {run_dir}/results.jsonl, in the order they were logged.
+
+    Reads results.jsonl.gz instead when only the compressed file exists (as in
+    the runs committed under runs/)."""
+    path = os.path.join(run_dir, RESULTS_FILE)
+    if not os.path.exists(path) and os.path.exists(path + ".gz"):
+        with gzip.open(path + ".gz", "rt") as f:
+            return [json.loads(line) for line in f if line.strip()]
+    with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
