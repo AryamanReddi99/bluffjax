@@ -1,5 +1,7 @@
 # BluffJAX baseline runs, 14 October 2026
 
+> **Superseded for PPO-NFSP and PQN-NFSP:** they were rerun with the Kuhn/Leduc sweep's settings in `runs/2026-10-14_dcb5aee/`, which also holds the current head-to-head matrices of all 10 games. The other baselines here are current.
+
 Every baseline in every game, trained fresh with the code at commit `1156562`: 5 seeds per baseline (CFR: one deterministic run), each run saving a **half** and a **full** checkpoint from the same run. Settings: `bluffjax-experiments.md` in the project notes, and each run's own `config.yaml`.
 
 ## Layout
