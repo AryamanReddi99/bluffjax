@@ -1,0 +1,534 @@
+{
+ "game": "Limit Hold'em",
+ "game_key": "hul",
+ "units": "chips per hand",
+ "episodes_per_pair": 32,
+ "protocol": "Each checkpoint pair plays 16 deals twice with the seats swapped (mirrored: the same env reset key, so the same cards and blinds, with independent action randomness), every hand played to its end with holdem_rebel.agent.play_match; ReBeL searches at every betting round, NFSP plays its sampled average policy, Random uniformly random legal actions.",
+ "participants": [
+  "PPO-NFSP (half)",
+  "PPO-NFSP (full)",
+  "PQN-NFSP (half)",
+  "PQN-NFSP (full)",
+  "ReBeL (half)",
+  "ReBeL (full)",
+  "Random"
+ ],
+ "checkpoints": {
+  "PPO-NFSP (half)": 5,
+  "PPO-NFSP (full)": 5,
+  "PQN-NFSP (half)": 5,
+  "PQN-NFSP (full)": 5,
+  "ReBeL (half)": 5,
+  "ReBeL (full)": 5,
+  "Random": 1
+ },
+ "cells": [
+  [
+   {
+    "win": 0.490625,
+    "loss": 0.490625,
+    "draw": 0.01875,
+    "return": 0.6015625,
+    "win_se": 0.015225146918312824,
+    "return_se": 0.6638341325594721,
+    "pairs": 20,
+    "episodes": 640
+   },
+   {
+    "win": 0.50125,
+    "loss": 0.48375,
+    "draw": 0.015,
+    "return": -0.4125,
+    "win_se": 0.016971176545346918,
+    "return_se": 0.3120517618654529,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.4325,
+    "loss": 0.5525,
+    "draw": 0.015,
+    "return": -1.325,
+    "win_se": 0.012970318680227818,
+    "return_se": 0.40285843900184093,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.43875,
+    "loss": 0.5425,
+    "draw": 0.01875,
+    "return": -1.05875,
+    "win_se": 0.013194261694640844,
+    "return_se": 0.4217064478105593,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.46375,
+    "loss": 0.51125,
+    "draw": 0.025,
+    "return": -1.27625,
+    "win_se": 0.015799030824705674,
+    "return_se": 0.2846191717306947,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.48,
+    "loss": 0.49875,
+    "draw": 0.02125,
+    "return": -1.0525,
+    "win_se": 0.011951507924386222,
+    "return_se": 0.25400259390079727,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.8625,
+    "loss": 0.1375,
+    "draw": 0.0,
+    "return": 3.00625,
+    "win_se": 0.02119478119726646,
+    "return_se": 0.6162195732853671,
+    "pairs": 5,
+    "episodes": 160
+   }
+  ],
+  [
+   {
+    "win": 0.46625,
+    "loss": 0.51125,
+    "draw": 0.0225,
+    "return": -0.20125,
+    "win_se": 0.016723860200324563,
+    "return_se": 0.41484528993750586,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.5015625,
+    "loss": 0.478125,
+    "draw": 0.0203125,
+    "return": 0.196875,
+    "win_se": 0.01657862918710966,
+    "return_se": 0.3795780043004127,
+    "pairs": 20,
+    "episodes": 640
+   },
+   {
+    "win": 0.38125,
+    "loss": 0.58625,
+    "draw": 0.0325,
+    "return": -0.9875,
+    "win_se": 0.0142064392676936,
+    "return_se": 0.35480334928896406,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.41625,
+    "loss": 0.56125,
+    "draw": 0.0225,
+    "return": -0.955,
+    "win_se": 0.013825550019197549,
+    "return_se": 0.4207085726782852,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.45375,
+    "loss": 0.53,
+    "draw": 0.01625,
+    "return": -0.76875,
+    "win_se": 0.019691633164028492,
+    "return_se": 0.3591892635969696,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.4775,
+    "loss": 0.5125,
+    "draw": 0.01,
+    "return": -0.715,
+    "win_se": 0.015364495056243576,
+    "return_se": 0.30098752396624906,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.7375,
+    "loss": 0.25625,
+    "draw": 0.00625,
+    "return": 3.025,
+    "win_se": 0.03775951866748303,
+    "return_se": 0.3901121633581809,
+    "pairs": 5,
+    "episodes": 160
+   }
+  ],
+  [
+   {
+    "win": 0.55375,
+    "loss": 0.40875,
+    "draw": 0.0375,
+    "return": 0.44,
+    "win_se": 0.0123057828546853,
+    "return_se": 0.2514212206802229,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.58625,
+    "loss": 0.3925,
+    "draw": 0.02125,
+    "return": 1.3275,
+    "win_se": 0.015963010628742103,
+    "return_se": 0.5217973994201837,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.475,
+    "loss": 0.4703125,
+    "draw": 0.0546875,
+    "return": 0.834375,
+    "win_se": 0.007024393586862705,
+    "return_se": 0.3054139029876634,
+    "pairs": 20,
+    "episodes": 640
+   },
+   {
+    "win": 0.495,
+    "loss": 0.48375,
+    "draw": 0.02125,
+    "return": 0.1625,
+    "win_se": 0.0085923294280422,
+    "return_se": 0.3038543630727282,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.4875,
+    "loss": 0.47625,
+    "draw": 0.03625,
+    "return": -0.62875,
+    "win_se": 0.01275775907699572,
+    "return_se": 0.2895101826073365,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.485,
+    "loss": 0.485,
+    "draw": 0.03,
+    "return": -1.20625,
+    "win_se": 0.012119199643540822,
+    "return_se": 0.2696025720852826,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.875,
+    "loss": 0.125,
+    "draw": 0.0,
+    "return": 3.3625,
+    "win_se": 0.02795084971874737,
+    "return_se": 0.14169730060943292,
+    "pairs": 5,
+    "episodes": 160
+   }
+  ],
+  [
+   {
+    "win": 0.52875,
+    "loss": 0.44125,
+    "draw": 0.03,
+    "return": 0.27,
+    "win_se": 0.01274754878398196,
+    "return_se": 0.268197591183565,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.56125,
+    "loss": 0.42125,
+    "draw": 0.0175,
+    "return": 0.7775,
+    "win_se": 0.013797267241498707,
+    "return_se": 0.4389163086986706,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.49375,
+    "loss": 0.48125,
+    "draw": 0.025,
+    "return": 0.7725,
+    "win_se": 0.004773516348912333,
+    "return_se": 0.30583262375031217,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.4859375,
+    "loss": 0.471875,
+    "draw": 0.0421875,
+    "return": -0.0296875,
+    "win_se": 0.007679793955398049,
+    "return_se": 0.2331213731727192,
+    "pairs": 20,
+    "episodes": 640
+   },
+   {
+    "win": 0.49125,
+    "loss": 0.48625,
+    "draw": 0.0225,
+    "return": -0.48125,
+    "win_se": 0.013443554837418065,
+    "return_se": 0.2749763247384521,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.4775,
+    "loss": 0.50625,
+    "draw": 0.01625,
+    "return": -1.145,
+    "win_se": 0.008172935519138762,
+    "return_se": 0.16589875175339125,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.8875,
+    "loss": 0.1125,
+    "draw": 0.0,
+    "return": 3.00625,
+    "win_se": 0.03365728004459065,
+    "return_se": 0.7068581452455648,
+    "pairs": 5,
+    "episodes": 160
+   }
+  ],
+  [
+   {
+    "win": 0.505,
+    "loss": 0.4775,
+    "draw": 0.0175,
+    "return": 1.1275,
+    "win_se": 0.014510233457804875,
+    "return_se": 0.2927449561905379,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.55125,
+    "loss": 0.44125,
+    "draw": 0.0075,
+    "return": 1.6725,
+    "win_se": 0.013365845776954533,
+    "return_se": 0.3494793374316522,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.48,
+    "loss": 0.495,
+    "draw": 0.025,
+    "return": 0.5625,
+    "win_se": 0.012484365222148863,
+    "return_se": 0.34220295817443386,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.49625,
+    "loss": 0.48,
+    "draw": 0.02375,
+    "return": 0.50875,
+    "win_se": 0.01317450979480198,
+    "return_se": 0.25117251085326464,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.475,
+    "loss": 0.4953125,
+    "draw": 0.0296875,
+    "return": -0.490625,
+    "win_se": 0.012124287824988231,
+    "return_se": 0.27587238271717707,
+    "pairs": 20,
+    "episodes": 640
+   },
+   {
+    "win": 0.4725,
+    "loss": 0.5025,
+    "draw": 0.025,
+    "return": -0.135,
+    "win_se": 0.012670709332945807,
+    "return_se": 0.13648679728579366,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.8125,
+    "loss": 0.1875,
+    "draw": 0.0,
+    "return": 3.24375,
+    "win_se": 0.02209708691207961,
+    "return_se": 0.260970244951412,
+    "pairs": 5,
+    "episodes": 160
+   }
+  ],
+  [
+   {
+    "win": 0.5025,
+    "loss": 0.47875,
+    "draw": 0.01875,
+    "return": 1.17125,
+    "win_se": 0.013966104801745307,
+    "return_se": 0.2931405468513923,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.545,
+    "loss": 0.44,
+    "draw": 0.015,
+    "return": 1.555,
+    "win_se": 0.013020416659999784,
+    "return_se": 0.33845005170630416,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.49625,
+    "loss": 0.47375,
+    "draw": 0.03,
+    "return": 1.07875,
+    "win_se": 0.010722591027048142,
+    "return_se": 0.20389373764292026,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.50125,
+    "loss": 0.47,
+    "draw": 0.02875,
+    "return": 0.85875,
+    "win_se": 0.012432107289863078,
+    "return_se": 0.2773404195809427,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.505,
+    "loss": 0.48,
+    "draw": 0.015,
+    "return": -0.06125,
+    "win_se": 0.011786954299846362,
+    "return_se": 0.25787391945160587,
+    "pairs": 25,
+    "episodes": 800
+   },
+   {
+    "win": 0.4875,
+    "loss": 0.4953125,
+    "draw": 0.0171875,
+    "return": 0.0234375,
+    "win_se": 0.009724832565193738,
+    "return_se": 0.2085975230045132,
+    "pairs": 20,
+    "episodes": 640
+   },
+   {
+    "win": 0.81875,
+    "loss": 0.16875,
+    "draw": 0.0125,
+    "return": 3.16875,
+    "win_se": 0.028641098093474,
+    "return_se": 0.43047938394306406,
+    "pairs": 5,
+    "episodes": 160
+   }
+  ],
+  [
+   {
+    "win": 0.275,
+    "loss": 0.725,
+    "draw": 0.0,
+    "return": -2.25625,
+    "win_se": 0.03336586953759785,
+    "return_se": 0.1836585656864389,
+    "pairs": 5,
+    "episodes": 160
+   },
+   {
+    "win": 0.19375,
+    "loss": 0.80625,
+    "draw": 0.0,
+    "return": -3.48125,
+    "win_se": 0.04122158111960286,
+    "return_se": 0.9004447685727314,
+    "pairs": 5,
+    "episodes": 160
+   },
+   {
+    "win": 0.11875,
+    "loss": 0.88125,
+    "draw": 0.0,
+    "return": -3.45625,
+    "win_se": 0.011692679333668566,
+    "return_se": 0.4171143428365896,
+    "pairs": 5,
+    "episodes": 160
+   },
+   {
+    "win": 0.1,
+    "loss": 0.89375,
+    "draw": 0.00625,
+    "return": -3.25625,
+    "win_se": 0.018221724671391562,
+    "return_se": 0.3138097552658298,
+    "pairs": 5,
+    "episodes": 160
+   },
+   {
+    "win": 0.14375,
+    "loss": 0.85625,
+    "draw": 0.0,
+    "return": -3.00625,
+    "win_se": 0.036443449342783124,
+    "return_se": 0.44900062639154525,
+    "pairs": 5,
+    "episodes": 160
+   },
+   {
+    "win": 0.14375,
+    "loss": 0.85,
+    "draw": 0.00625,
+    "return": -3.1,
+    "win_se": 0.025387620014487373,
+    "return_se": 0.08694017339527221,
+    "pairs": 5,
+    "episodes": 160
+   },
+   {
+    "win": 0.5625,
+    "loss": 0.4375,
+    "draw": 0.0,
+    "return": 1.0625,
+    "win_se": NaN,
+    "return_se": NaN,
+    "pairs": 1,
+    "episodes": 32
+   }
+  ]
+ ],
+ "commit": "dcb5aee (PPO-NFSP, PQN-NFSP); 1156562 (ReBeL)",
+ "runs_root": "/home/reddi/bluffjax-dev/h2h_v2_root",
+ "generated": "2026-10-14T20:03:07+00:00"
+}

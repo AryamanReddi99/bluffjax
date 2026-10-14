@@ -1,0 +1,10 @@
+kuhn_ppo_nfsp | .venv/bin/python bluffjax/examples/kuhn/kuhn_ppo_nfsp.py wandb=True project=bluffjax-final-v2
+kuhn_pqn_nfsp | .venv/bin/python bluffjax/examples/kuhn/kuhn_pqn_nfsp.py wandb=True project=bluffjax-final-v2
+leduc_ppo_nfsp | .venv/bin/python bluffjax/examples/leduc/leduc_ppo_nfsp.py wandb=True project=bluffjax-final-v2
+leduc_pqn_nfsp | .venv/bin/python bluffjax/examples/leduc/leduc_pqn_nfsp.py wandb=True project=bluffjax-final-v2
+goofspiel_ppo_nfsp | .venv/bin/python bluffjax/examples/goofspiel/goofspiel_ppo_nfsp.py wandb=True project=bluffjax-final-v2
+goofspiel_pqn_nfsp | .venv/bin/python bluffjax/examples/goofspiel/goofspiel_pqn_nfsp.py wandb=True project=bluffjax-final-v2
+werewolf_ppo_nfsp | .venv/bin/python bluffjax/examples/werewolf/werewolf_ppo_nfsp.py wandb=True project=bluffjax-final-v2
+werewolf_pqn_nfsp | .venv/bin/python bluffjax/examples/werewolf/werewolf_pqn_nfsp.py wandb=True project=bluffjax-final-v2
+five_card_draw_ppo_nfsp | .venv/bin/python bluffjax/examples/five_card_draw/five_card_draw_ppo_nfsp.py wandb=True project=bluffjax-final-v2
+five_card_draw_pqn_nfsp | .venv/bin/python bluffjax/examples/five_card_draw/five_card_draw_pqn_nfsp.py wandb=True project=bluffjax-final-v2
