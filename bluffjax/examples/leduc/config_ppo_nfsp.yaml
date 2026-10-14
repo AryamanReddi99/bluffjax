@@ -8,12 +8,12 @@ num_minibatches: 4
 
 # BR (PPO), trained only on decisions made while following the BR
 lr: 2.5e-4
-anneal_lr: true  # linear decay to 0 over all gradient steps
+anneal_lr: false  # constant learning rate (best in the Kuhn/Leduc sweep, 14 Oct 2026)
 gamma: 0.99
 gae_lambda: 0.95
 clip_eps: 0.2
 vf_clip: 0.9  # 0.2 x the std of a game's return under random play (reward units)
-ent_coef: 0.0
+ent_coef: 0.1  # best in the Kuhn/Leduc sweep (14 Oct 2026)
 vf_coef: 1.0
 max_grad_norm: 0.5
 

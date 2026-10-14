@@ -8,10 +8,10 @@ num_minibatches: 4
 
 # PQN BR params (Q-network trained on all decisions, see the script docstring)
 lr: 2.5e-4
-anneal_lr: true  # linear decay to 0 over all gradient steps
+anneal_lr: false  # constant learning rate (best in the Kuhn/Leduc sweep, 14 Oct 2026)
 start_e: 1.0
 end_e: 0.005
-exploration_fraction: 0.1  # epsilon decays linearly over this share of the run
+exploration_fraction: 0.01  # epsilon decays linearly over this share of the run (best in the Kuhn/Leduc sweep, 14 Oct 2026)
 q_lambda: 0.9
 max_grad_norm: 0.5
 
