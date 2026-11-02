@@ -123,6 +123,7 @@ from bluffjax.examples.parallel_nfsp_common import print_final_evals
 from bluffjax.examples.run_utils import (
     CHECKPOINT_STAGES,
     ResultsLog,
+    env_steps_after,
     half_update_steps,
     make_run_dir,
     save_seed_params,
@@ -336,15 +337,6 @@ def reservoir_append(
         action=buffer.action.at[slot].set(action, mode="drop"),
         seen=buffer.seen + num_new,
         size=jnp.minimum(capacity, buffer.size + num_new),
-    )
-
-
-def env_steps_after(update: int, config: dict) -> int:
-    """Env steps (all envs) after update `update` (from 0), as a Python int."""
-    return (
-        (int(update) + 1)
-        * int(config["num_envs"])
-        * int(config["num_steps_per_env_per_update"])
     )
 
 

@@ -83,6 +83,7 @@ from bluffjax.examples.kuhn_leduc_eval import (
 from bluffjax.examples.parallel_nfsp_common import print_final_evals
 from bluffjax.examples.run_utils import (
     ResultsLog,
+    env_steps_after,
     half_update_steps,
     make_run_dir,
     save_seed_params,
@@ -255,7 +256,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         seed_i = int(seed_val)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
         update = int(metrics["update_step"])
-        env_steps = int(metrics["env_steps"])
+        # On the host: the device counter is int32 and wraps past 2**31 steps.
+        env_steps = env_steps_after(update, config)
+        metrics["env_steps"] = env_steps
         if bool(evaluated):
             evals = {k: float(v) for k, v in metrics.items() if is_sampled_metric(k)}
             EVALUATIONS.setdefault(seed_i, []).append((env_steps, evals))

@@ -78,6 +78,7 @@ from bluffjax.environments.texas_limit_holdem.texas_limit_holdem import (
 from bluffjax.examples.run_utils import (
     CHECKPOINT_STAGES,
     ResultsLog,
+    env_steps_after,
     half_update_steps,
     load_params,
     make_run_dir,
@@ -1022,7 +1023,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 )
             )
 
-            send_to_log(seed, metric)
+            send_to_log(seed, metric, config)
 
             # Half-budget checkpoint: the networks after num_half updates.
             take_half = runner_state.update_step + 1 == num_half
@@ -1069,7 +1070,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     return train
 
 
-def send_to_log(seed: IntArray, metric: dict[str, Any]) -> None:
+def send_to_log(seed: IntArray, metric: dict[str, Any], config: dict) -> None:
     """Calls logging_callback on the host with the update's scalar metrics
     packed into one float32 and one int32 array: every array passed to a
     host callback is a transfer of its own, and one per metric costs more
@@ -1084,11 +1085,16 @@ def send_to_log(seed: IntArray, metric: dict[str, Any]) -> None:
         jnp.stack([values[k].astype(jnp.int32) for k in ints]),
     )
     jax.experimental.io_callback(
-        functools.partial(logging_callback, floats, ints, bools), None, seed, packed
+        functools.partial(logging_callback, floats, ints, bools, config),
+        None,
+        seed,
+        packed,
     )
 
 
-def logging_callback(float_names, int_names, bool_names, seed_val, packed) -> None:
+def logging_callback(
+    float_names, int_names, bool_names, config, seed_val, packed
+) -> None:
     """Logs one update of one seed to results.jsonl and wandb; the
     evaluation results only in the updates that evaluated (metric
     "evaluated", a flag that isn't logged)."""
@@ -1096,6 +1102,8 @@ def logging_callback(float_names, int_names, bool_names, seed_val, packed) -> No
     metrics = dict(zip(float_names, float_values)) | dict(zip(int_names, int_values))
     for k in bool_names:
         metrics[k] = bool(metrics[k])
+    # On the host: the device counter is int32 and wraps past 2**31 steps.
+    metrics["env_steps"] = env_steps_after(metrics["update_step"], config)
     if not metrics.pop("evaluated"):
         metrics = {k: v for k, v in metrics.items() if not is_eval_metric(k)}
     RESULTS_LOG.log(metrics, int(seed_val))

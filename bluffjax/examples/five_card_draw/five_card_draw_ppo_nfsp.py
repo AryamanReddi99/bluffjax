@@ -70,6 +70,7 @@ from bluffjax import make
 from bluffjax.environments.five_card_draw.five_card_draw import FiveCardDrawState
 from bluffjax.examples.run_utils import (
     ResultsLog,
+    env_steps_after,
     half_update_steps,
     load_params,
     make_run_dir,
@@ -479,10 +480,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         an evaluation ran."""
         seed_i = int(seed_val)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
+        # On the host: the device counter is int32 and wraps past 2**31 steps.
+        env_steps = env_steps_after(int(metrics["update_step"]), config)
+        metrics["env_steps"] = env_steps
         eval_keys = [k for k in metrics if "_vs_" in k]
         if bool(evaluated):
             update = int(metrics["update_step"])
-            env_steps = int(metrics["env_steps"])
             evals = {k: float(metrics[k]) for k in eval_keys}
             EVALUATIONS.setdefault(seed_i, []).append((env_steps, evals))
             print(

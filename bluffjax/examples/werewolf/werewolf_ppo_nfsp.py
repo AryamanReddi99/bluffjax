@@ -73,6 +73,7 @@ from bluffjax.environments.werewolf.werewolf import WEREWOLF, WerewolfState
 from bluffjax.examples.run_utils import (
     CHECKPOINT_STAGES,
     ResultsLog,
+    env_steps_after,
     half_update_steps,
     load_params,
     make_run_dir,
@@ -551,10 +552,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         an evaluation ran."""
         seed_i, update = int(seed_val), int(update)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
+        # On the host: the device counter is int32 and wraps past 2**31 steps.
+        env_steps = env_steps_after(update, config)
+        metrics["env_steps"] = env_steps
         eval_keys = [k for k in metrics if "_vs_" in k]
         if bool(evaluated):
             evals = {k: float(metrics[k]) for k in eval_keys}
-            env_steps = int(metrics["env_steps"])
             EVALUATIONS.setdefault(seed_i, []).append((update, env_steps, evals))
             print(
                 f"seed {seed_i} update {update + 1}/{config['num_update_steps']} "

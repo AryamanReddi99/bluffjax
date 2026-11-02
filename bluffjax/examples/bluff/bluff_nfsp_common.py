@@ -15,6 +15,7 @@ from bluffjax.environments.bluff.bluff import Bluff
 from bluffjax.examples.run_utils import (
     CHECKPOINT_STAGES,
     ResultsLog,
+    env_steps_after,
     load_params,
     save_seed_params,
 )
@@ -311,7 +312,11 @@ def eval_metrics(name: str, result: EvalResult) -> dict[str, FloatArray]:
 
 
 def log_update(
-    results_log: ResultsLog, evals_by_seed: dict, seed_val, metric_dict: dict
+    results_log: ResultsLog,
+    evals_by_seed: dict,
+    seed_val,
+    metric_dict: dict,
+    config: dict,
 ) -> None:
     """Logs the metrics of one update of one seed to wandb and results.jsonl.
 
@@ -321,14 +326,17 @@ def log_update(
     """
     seed = int(seed_val)
     metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
+    # On the host: the device counter is int32 and wraps past 2**31 steps.
+    env_steps = env_steps_after(metrics["update_step"], config)
+    metrics["env_steps"] = env_steps
     evaluated = bool(metrics.pop("evaluated"))
     eval_keys = [k for k in metrics if "_vs_" in k]
     if evaluated:
         evals = {k: float(metrics[k]) for k in eval_keys}
-        evals_by_seed.setdefault(seed, []).append((int(metrics["env_steps"]), evals))
+        evals_by_seed.setdefault(seed, []).append((env_steps, evals))
         print(
             f"seed {seed} update {int(metrics['update_step'])} "
-            f"({int(metrics['env_steps'])} env steps): {format_eval(evals)}",
+            f"({env_steps} env steps): {format_eval(evals)}",
             flush=True,
         )
     else:

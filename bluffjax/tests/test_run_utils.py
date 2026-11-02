@@ -107,3 +107,58 @@ def test_read_results_reads_the_gzipped_log(tmp_path):
     os.remove(path)
     (record,) = run_utils.read_results(run_dir)
     assert record["seed_index"] == 1 and record["x"] == 2.0
+
+
+def test_env_steps_after_past_int32():
+    cfg = {"num_envs": 1024, "num_steps_per_env_per_update": 64}
+    per_update = 1024 * 64
+    # Below 2**31 it is the device formula; past it it doesn't wrap.
+    assert run_utils.env_steps_after(0, cfg) == per_update
+    assert run_utils.env_steps_after(100, cfg) == 101 * per_update
+    update = 3_000_000_000 // per_update  # ~3e9 env steps, 0-based update index
+    steps = run_utils.env_steps_after(update, cfg)
+    assert type(steps) is int and steps == (update + 1) * per_update > 2**31
+    # numpy / jax scalars (what the callbacks get) are fine too
+    assert run_utils.env_steps_after(np.int32(update), cfg) == steps
+    assert run_utils.env_steps_after(jnp.int32(update), cfg) == steps
+
+
+def test_shared_log_update_uses_host_env_steps():
+    from bluffjax.examples import parallel_nfsp_common
+    from bluffjax.examples.bluff import bluff_nfsp_common
+
+    cfg = {"num_envs": 1024, "num_steps_per_env_per_update": 64}
+    update = 45775  # 45776 * 65536 = 3.0e9 env steps
+    wrapped = np.int32(np.int64((update + 1) * 65536) - 2**32)  # the device value
+    assert wrapped < 0
+    for module in (parallel_nfsp_common, bluff_nfsp_common):
+        logged, evals = [], {}
+
+        class Log:
+            def log(self, metrics, seed):
+                logged.append(metrics)
+
+        module.log_update(
+            Log(),
+            evals,
+            0,
+            {
+                "update_step": np.int32(update),
+                "env_steps": wrapped,
+                "evaluated": np.bool_(True),
+                **{
+                    f"{k}_x_vs_y": np.float32(0.25)
+                    for k in (
+                        "win_rate",
+                        "loss_rate",
+                        "draw_rate",
+                        "win_rate_decided",
+                        "avg_return",
+                        "avg_episode_length",
+                    )
+                },
+            },
+            cfg,
+        )
+        assert logged[0]["env_steps"] == 45776 * 65536 > 2**31
+        assert evals[0][0][0] == 45776 * 65536

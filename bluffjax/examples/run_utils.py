@@ -43,6 +43,17 @@ def half_update_steps(num_update_steps: int) -> int:
     return num_update_steps // 2
 
 
+def env_steps_after(update: Any, config: dict) -> int:
+    """Env steps (all envs) after update `update` (counted from 0), as a Python
+    int. The scripts' device-side counter is int32 and wraps past 2**31 steps,
+    so what is logged is computed here, on the host."""
+    return (
+        (int(update) + 1)
+        * int(config["num_envs"])
+        * int(config["num_steps_per_env_per_update"])
+    )
+
+
 def make_run_dir(config: dict) -> str:
     """Creates {save_dir}/{job_type}_{timestamp}[_n]/ and writes config.yaml.
 

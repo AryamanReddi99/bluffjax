@@ -65,6 +65,7 @@ parallel_nfsp_common.load_checkpoint.
 """
 
 import datetime
+import functools
 import time
 from typing import Callable, NamedTuple
 
@@ -712,7 +713,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 totals = masked_totals(transitions.game_counts, mask)
                 metric.update(prefixed(prefix, gm.summarize(totals)))
 
-            io_callback(logging_callback, None, seed, metric)
+            io_callback(
+                functools.partial(logging_callback, config=config), None, seed, metric
+            )
 
             # Half-budget checkpoint: the networks after num_half updates.
             take_half = runner_state.update_step + 1 == num_half
@@ -758,8 +761,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     return train
 
 
-def logging_callback(seed_val, metric_dict) -> None:
-    log_update(RESULTS_LOG, EVALS, seed_val, metric_dict)
+def logging_callback(seed_val, metric_dict, config) -> None:
+    log_update(RESULTS_LOG, EVALS, seed_val, metric_dict, config)
 
 
 @hydra.main(version_base=None, config_path="./", config_name="config_ppo_nfsp")
