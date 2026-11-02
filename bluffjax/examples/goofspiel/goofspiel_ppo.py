@@ -22,7 +22,8 @@ The policy evaluated is the current one; there is no average policy.
   shapes; run them as separate jobs). Instance i is grid point
   i // num_seeds, seed i % num_seeds; it is logged as seed_index i with its
   hyperparameters as hp/<name> and its grid point and seed as
-  hp/grid_index, hp/seed.
+  hp/grid_index, hp/seed. At most max_vmap_instances run in one program
+  (GPU memory); more run as consecutive chunks.
 - Exact evaluation (two players and env_kwargs.num_cards N <= 6;
   bluffjax/utils/game_utils/goofspiel_exploitability.py): every
   exact_eval_interval updates and after the last one, exploitability
@@ -492,16 +493,23 @@ def main(config: dict) -> None:
         rngs = seed_keys[jnp.asarray([int(i["hp/seed"]) for i in insts])]
         ids = jnp.arange(len(insts))
         hp = hparams_of(insts)
-        start = time.time()
-        train_vjit = (
-            jax.jit(jax.vmap(lambda r, s, h, t: train(r, s, h, t), in_axes=(0, 0, 0, None)))
-            .lower(rngs, ids, hp, exact_tables)
-            .compile()
+        # At most max_vmap_instances in one program (GPU memory), in chunks
+        # of equal size where possible.
+        num_chunks = -(-len(insts) // config["max_vmap_instances"])
+        size = -(-len(insts) // num_chunks)
+        train_vjit = jax.jit(
+            jax.vmap(lambda r, s, h, t: train(r, s, h, t), in_axes=(0, 0, 0, None))
         )
-        print(f"Compile finished in {time.time() - start:.1f} s")
         start = time.time()
-        final = jax.block_until_ready(train_vjit(rngs, ids, hp, exact_tables))
-        jax.effects_barrier()
+        finals = []
+        for c in range(num_chunks):
+            sl = slice(c * size, min(len(insts), (c + 1) * size))
+            args = (rngs[sl], ids[sl], jax.tree_util.tree_map(lambda x: x[sl], hp), exact_tables)
+            finals.append(jax.block_until_ready(train_vjit(*args)))
+            jax.effects_barrier()
+            print(f"Chunk {c + 1}/{num_chunks} (instances {sl.start}..{sl.stop - 1}) "
+                  f"done after {time.time() - start:.1f} s", flush=True)
+        final = jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs), *finals)
         env_steps = config["num_update_steps"] * config["num_envs"] * config["num_steps_per_env_per_update"]
         print(f"Trained {len(insts)} instance(s) x {env_steps} env steps in {time.time() - start:.1f} s")
         print_final_evals(EVALS)

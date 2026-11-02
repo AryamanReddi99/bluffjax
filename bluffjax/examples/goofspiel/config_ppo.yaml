@@ -23,6 +23,7 @@ fc_dim_size: 128
 # sweep="{lr: [1e-4, 3e-4], ent_coef: [0.0, 0.01]}" on the command line; see the
 # script docstring
 sweep: null
+max_vmap_instances: 24  # instances per program; more run as consecutive chunks (24 fit a 10 GB GPU)
 
 env_name: goofspiel
 seed: 0
