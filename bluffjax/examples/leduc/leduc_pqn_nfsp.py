@@ -29,6 +29,14 @@ the acting player's perfect-recall information state).
   round-2 raise rates with and without a pair; definitions there) of the
   average policy in self-play as game/<name> and of the greedy BR in self-play
   as game_br/<name>, computed from their tables at every infoset.
+  With log_br_gap, also the exact quality of the greedy BR: the value of an
+  exact best response and of the greedy BR against the average policy and
+  against the per-hand NFSP mixture, and their differences br_gap_vs_avg and
+  br_gap_vs_mix (bluffjax/utils/game_utils/leduc_br_gap.py).
+- br_optimizer: adam (default) or radam (as in purejaxql's PQN) for the
+  Q-network, after clipping by max_grad_norm.
+- anneal_lr: the Q-network's lr decays linearly from lr to
+  lr * lr_final_frac (default 0) over the run.
 - Evaluation against random (compare), every compare_interval updates and
   after the last update: the average policy (sampled from softmax(logits)) and
   the greedy BR (argmax Q over the legal actions, ties to the first), the
@@ -121,6 +129,7 @@ from bluffjax.examples.run_utils import (
 )
 from bluffjax.metrics.leduc_holdem import log_metrics
 from bluffjax.networks.mlp import ActorDiscreteMLP, QNetworkDiscreteMLP
+from bluffjax.utils.game_utils.leduc_br_gap import br_gap_metrics
 from bluffjax.utils.game_utils.leduc_exploitability import (
     _INFOSET_LIST,
     _KEY_TO_IDX,
@@ -330,6 +339,15 @@ def reservoir_append(
     )
 
 
+def env_steps_after(update: int, config: dict) -> int:
+    """Env steps (all envs) after update `update` (from 0), as a Python int."""
+    return (
+        (int(update) + 1)
+        * int(config["num_envs"])
+        * int(config["num_steps_per_env_per_update"])
+    )
+
+
 def make_train(config: dict) -> Callable[..., RunnerState]:
     """train(rng, seed, num_updates=None): runs num_updates updates (default
     all num_update_steps; fewer stops the same run early, for tests)."""
@@ -356,10 +374,19 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     compare_episodes = config["compare_episodes"]
     last_update = config["num_update_steps"] - 1
     num_half = half_update_steps(config["num_update_steps"])
+    # Optional settings; their defaults reproduce the earlier runs.
+    br_optimizer = config.get("br_optimizer", "adam")
+    if br_optimizer not in ("adam", "radam"):
+        raise ValueError(f"br_optimizer must be 'adam' or 'radam', got {br_optimizer!r}")
+    log_br_gap = config.get("log_br_gap", False)
+
+    # With anneal_lr the lr decays linearly from lr to lr * lr_final_frac
+    # over the run (lr_final_frac 0, the default, decays to 0).
+    lr_final_frac = config.get("lr_final_frac", 0.0)
 
     def linear_decay(count: int) -> float:
         frac = 1.0 - count / config["num_gradient_steps"]
-        return config["lr"] * frac
+        return config["lr"] * (lr_final_frac + (1.0 - lr_final_frac) * frac)
 
     def epsilon_schedule(update_step: FloatArray) -> FloatArray:
         decay_steps = max(
@@ -375,7 +402,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         seed_i = int(seed_val)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
         update = int(metrics["update_step"])
-        env_steps = int(metrics["env_steps"])
+        # On the host: the device counter is int32 and wraps past 2**31 steps.
+        env_steps = env_steps_after(update, config)
+        metrics["env_steps"] = env_steps
         if bool(evaluated):
             evals = {k: float(v) for k, v in metrics.items() if is_sampled_metric(k)}
             EVALUATIONS.setdefault(seed_i, []).append((env_steps, evals))
@@ -402,8 +431,25 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             metrics["value_br_vs_random"] = value["br_policy"]
             metrics.update(log_metrics("game", policies["avg_policy"]))
             metrics.update(log_metrics("game_br", policies["br_policy"]))
+            if log_br_gap:
+                # Exact quality of the greedy BR against the average policy
+                # and against the per-hand NFSP mixture it is trained against
+                # (bluffjax/utils/game_utils/leduc_br_gap.py).
+                metrics.update(
+                    br_gap_metrics(
+                        policies["avg_policy"],
+                        policies["br_policy"],
+                        config["anticipatory_eta"],
+                    )
+                )
             extra = (
-                f"; value vs random average policy {value['avg_policy']:+.4f}, "
+                (
+                    f"; BR gap vs average policy {metrics['br_gap_vs_avg']:.4f}, "
+                    f"vs NFSP mixture {metrics['br_gap_vs_mix']:.4f}"
+                    if log_br_gap
+                    else ""
+                )
+                + f"; value vs random average policy {value['avg_policy']:+.4f}, "
                 f"greedy BR {value['br_policy']:+.4f}"
             )
             if bool(evaluated):
@@ -452,9 +498,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         br_params = br_network.init(rng_br_init, obs)
         avg_params = avg_network.init(rng_avg_init, obs)
         br_lr = linear_decay if config["anneal_lr"] else config["lr"]
+        # br_optimizer: adam (default) or radam (purejaxql's PQN)
+        br_opt = optax.radam if br_optimizer == "radam" else optax.adam
         br_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adam(learning_rate=br_lr),
+            br_opt(learning_rate=br_lr),
         )
         avg_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
