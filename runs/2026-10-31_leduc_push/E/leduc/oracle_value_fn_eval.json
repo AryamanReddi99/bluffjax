@@ -1,0 +1,41 @@
+{
+ "run_dir": "none",
+ "results": [
+  {
+   "cfr_iters": 512,
+   "precision": "highest",
+   "oracle": 1024,
+   "stage": "full",
+   "exploitability": [
+    0.023344271866717406
+   ],
+   "mean": 0.023344271866717406,
+   "sd": 0.0,
+   "seconds": 23.059410333633423
+  },
+  {
+   "cfr_iters": 1024,
+   "precision": "highest",
+   "oracle": 1024,
+   "stage": "full",
+   "exploitability": [
+    0.014609172388395673
+   ],
+   "mean": 0.014609172388395673,
+   "sd": 0.0,
+   "seconds": 42.02282786369324
+  },
+  {
+   "cfr_iters": 2048,
+   "precision": "highest",
+   "oracle": 1024,
+   "stage": "full",
+   "exploitability": [
+    0.009986255039716202
+   ],
+   "mean": 0.009986255039716202,
+   "sd": 0.0,
+   "seconds": 82.58424663543701
+  }
+ ]
+}
