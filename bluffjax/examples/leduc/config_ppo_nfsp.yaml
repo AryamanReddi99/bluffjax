@@ -18,12 +18,17 @@ ent_coef_final: null  # set: linear decay from ent_coef to this after ent_decay_
 ent_decay_start: 0.5  # share of the updates before the entropy decay starts
 vf_coef: 1.0
 max_grad_norm: 0.5
+target_kl: null  # set: stop an update's PPO epochs after the first with mean approx. KL above it
 
 # Shared network architecture
 fc_dim_size: 128
 
 # NFSP-specific knobs
 anticipatory_eta: 0.1  # prob. a player follows the BR for a whole hand
+# anticipatory: each player follows the BR with prob. anticipatory_eta per hand;
+# learner_seat: exactly one seat per hand (uniform) follows the BR, the other the
+# average policy (BR to the average alone, about half of all decisions)
+br_mode_scheme: anticipatory
 sl_reservoir_capacity: 1000000  # Algorithm R sample of all BR decisions
 sl_batch_size: 256
 sl_num_steps_per_update: 512  # 2 SL samples per env step, as in NFSP/OpenSpiel

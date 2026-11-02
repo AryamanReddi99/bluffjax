@@ -140,3 +140,40 @@ def test_br_gap_logged_and_entropy_decay(monkeypatch, tmp_path):
             assert not gap_keys & set(r)
     assert [r["ent_coef"] for r in rows] == pytest.approx([0.1, 0.055, 0.01])
     assert rows[-1]["sl_target_differs_frac"] > 0.0
+
+
+def test_learner_seat_scheme(monkeypatch, tmp_path):
+    """learner_seat: exactly one BR seat in every hand, so about half of all
+    decisions are BR decisions (all of them go to the reservoir)."""
+    config = _config(br_mode_scheme="learner_seat", anticipatory_eta=0.1)
+    state = _train(monkeypatch, tmp_path, config, num_updates=2)
+    assert (np.asarray(state.br_mode).sum(-1) == 1).all()
+    decisions = 2 * config["num_envs"] * config["num_steps_per_env_per_update"]
+    frac = int(state.sl_buffer.seen) / decisions
+    assert 0.3 < frac < 0.7, frac
+    rows = read_results(str(tmp_path))
+    assert all(0.3 < r["br_action_frac_rollout"] < 0.7 for r in rows)
+    modes = leduc_ppo_nfsp.draw_br_modes(
+        jax.random.PRNGKey(1), (4000, 2), "learner_seat", 0.1
+    )
+    assert (np.asarray(modes).sum(-1) == 1).all()
+    assert np.asarray(modes)[:, 0].mean() == pytest.approx(0.5, abs=0.03)
+    with pytest.raises(ValueError):
+        leduc_ppo_nfsp.make_train(_config(br_mode_scheme="nope"))
+
+
+@pytest.mark.parametrize("target_kl, epochs_run", [(None, 3), (1e-12, 1), (1e9, 3)])
+def test_target_kl(monkeypatch, tmp_path, target_kl, epochs_run):
+    """target_kl stops an update's epochs after the first whose mean KL is
+    above it: a tiny target leaves one epoch per update (num_minibatches
+    optimizer steps), a huge one all of them."""
+    config = _config(num_epochs=3, target_kl=target_kl, lr=1e-2, anticipatory_eta=0.5)
+    state = _train(monkeypatch, tmp_path, config, num_updates=2)
+    steps = 2 * epochs_run * config["num_minibatches"]
+    assert int(state.br_train_state.step) == steps
+    rows = read_results(str(tmp_path))
+    if target_kl is None:
+        assert "ppo_epochs_run" not in rows[0]
+    else:
+        assert [r["ppo_epochs_run"] for r in rows] == [epochs_run] * 2
+        assert all(np.isfinite(r["kl_backward"]) for r in rows)

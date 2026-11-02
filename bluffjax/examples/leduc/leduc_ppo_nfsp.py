@@ -8,7 +8,11 @@ acting player's perfect-recall information state).
 
 - Policy mixing: at the start of every hand each player independently draws
   the policy it follows for the whole hand, the BR with probability
-  anticipatory_eta and the average policy otherwise.
+  anticipatory_eta and the average policy otherwise (br_mode_scheme
+  anticipatory, the default). With br_mode_scheme learner_seat, one seat drawn
+  uniformly follows the BR for the whole hand and the other the average
+  policy: the BR then learns a best response to the average policy alone (as
+  in XFP), from about half of all decisions instead of anticipatory_eta.
 - BR learning: PPO is on-policy, so the BR actor and critic train only on
   decisions made while following the BR. Returns follow each player's own
   decisions: a decision's reward is everything the player receives until its
@@ -28,6 +32,10 @@ acting player's perfect-recall information state).
 - Entropy schedule: ent_coef, or, when ent_coef_final is set, ent_coef until
   ent_decay_start x num_update_steps updates and then linear to
   ent_coef_final at the last update.
+- Target KL (target_kl, default null: off): as in CleanRL, the PPO epochs of
+  an update stop after the first epoch whose mean approximate KL
+  (kl_backward over its minibatches) exceeds target_kl; ppo_epochs_run logs
+  how many ran.
 - Best-response gaps (log_br_gap): at every exact evaluation, br_gap_<b>_<o>
   is the exact best-response value against the opponent o (avg: the average
   policy; mix: anticipatory_eta x BR + (1 - anticipatory_eta) x average, what
@@ -203,6 +211,7 @@ class PPOUpdateState(NamedTuple):
     targets: FloatArray
     train_mask: BoolArray
     rng: PRNGKeyArray
+    stopped: BoolArray = False  # target_kl reached: skip the remaining epochs
 
 
 class SLBatch(NamedTuple):
@@ -345,6 +354,19 @@ def reservoir_append(
 
 
 SL_TARGETS = ("sampled", "greedy", "sharpened")
+BR_MODE_SCHEMES = ("anticipatory", "learner_seat")
+
+
+def draw_br_modes(
+    rng: PRNGKeyArray, shape: tuple[int, int], scheme: str, eta: float
+) -> BoolArray:
+    """(num_envs, num_agents) policy of every player for a new hand: True =
+    BR. anticipatory: each player independently with probability eta;
+    learner_seat: exactly one seat per hand, drawn uniformly."""
+    if scheme == "learner_seat":
+        seat = jax.random.randint(rng, shape[:-1], 0, shape[-1])
+        return jax.nn.one_hot(seat, shape[-1], dtype=jnp.bool_)
+    return jax.random.bernoulli(rng, p=eta, shape=shape)
 
 
 def greedy_policy_array(policy: np.ndarray, legal_mask: np.ndarray) -> np.ndarray:
@@ -433,6 +455,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     if sl_target not in SL_TARGETS:
         raise ValueError(f"sl_target must be one of {SL_TARGETS}, got '{sl_target}'")
     sl_temperature = config.get("sl_target_temperature", 0.1)
+    br_mode_scheme = config.get("br_mode_scheme", "anticipatory")
+    if br_mode_scheme not in BR_MODE_SCHEMES:
+        raise ValueError(
+            f"br_mode_scheme must be one of {BR_MODE_SCHEMES}, got '{br_mode_scheme}'"
+        )
+    target_kl = config.get("target_kl")
     log_br_gap = config.get("log_br_gap", False)
     ent_coef_at = ent_coef_schedule(config)
     eval_interval = config["eval_interval"]
@@ -557,10 +585,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             apply_fn=network.apply, params=avg_params, tx=avg_tx
         )
         sl_buffer = init_sl_buffer(obs.shape[-1])
-        br_mode = jax.random.bernoulli(
+        br_mode = draw_br_modes(
             rng_mode,
-            p=config["anticipatory_eta"],
-            shape=(config["num_envs"], env.num_agents),
+            (config["num_envs"], env.num_agents),
+            br_mode_scheme,
+            config["anticipatory_eta"],
         )
 
         def update_step(
@@ -613,8 +642,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
                 # A new hand starts after done (the env auto-resets): every
                 # player draws BR (prob. anticipatory_eta) or average policy.
-                new_br_mode = jax.random.bernoulli(
-                    rng_mode, p=config["anticipatory_eta"], shape=br_mode.shape
+                new_br_mode = draw_br_modes(
+                    rng_mode, br_mode.shape, br_mode_scheme, config["anticipatory_eta"]
                 )
                 next_br_mode = jnp.where(done[:, None], new_br_mode, br_mode)
 
@@ -802,6 +831,18 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 final_train_state, batch_stats = lax.scan(
                     update_minibatch, ppo_state.train_state, minibatches
                 )
+                stopped = ppo_state.stopped
+                if target_kl is not None:
+                    # An epoch after the target KL was reached changes nothing.
+                    final_train_state = jax.tree_util.tree_map(
+                        lambda new, old: jnp.where(ppo_state.stopped, old, new),
+                        final_train_state,
+                        ppo_state.train_state,
+                    )
+                    batch_stats["epoch_ran"] = jnp.broadcast_to(
+                        ~ppo_state.stopped, batch_stats["kl_backward"].shape
+                    ).astype(jnp.float32)
+                    stopped = stopped | (batch_stats["kl_backward"].mean() > target_kl)
                 ppo_state = PPOUpdateState(
                     train_state=final_train_state,
                     transitions=ppo_state.transitions,
@@ -809,6 +850,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     targets=ppo_state.targets,
                     train_mask=ppo_state.train_mask,
                     rng=rng,
+                    stopped=stopped,
                 )
                 return ppo_state, batch_stats
 
@@ -819,12 +861,25 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 targets=targets,
                 train_mask=train_mask,
                 rng=rng_ppo_update,
+                stopped=jnp.array(False),
             )
             final_ppo_state, ppo_loss_info = lax.scan(
                 update_ppo_epoch, ppo_state, None, config["num_epochs"]
             )
             br_train_state = final_ppo_state.train_state
-            ppo_loss_info = jax.tree_util.tree_map(lambda x: x.mean(), ppo_loss_info)
+            if target_kl is None:
+                ppo_loss_info = jax.tree_util.tree_map(
+                    lambda x: x.mean(), ppo_loss_info
+                )
+            else:
+                # statistics of the epochs that ran
+                ran = ppo_loss_info.pop("epoch_ran")
+                ppo_loss_info = jax.tree_util.tree_map(
+                    lambda x: jnp.where(ran > 0, x, 0.0).sum()
+                    / jnp.maximum(ran.sum(), 1.0),
+                    ppo_loss_info,
+                )
+                ppo_loss_info["ppo_epochs_run"] = ran[:, 0].sum()
 
             def update_sl_step(
                 sl_state: SLUpdateState, unused: None
