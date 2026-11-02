@@ -19,7 +19,7 @@ Every run directory keeps:
 - `results.jsonl.gz`, read with `bluffjax.examples.run_utils.read_results`;
 - the `half/` and `full/` checkpoints.
 
-Some PPO-NFSP run directories hold thinned results files; their `README.txt` says where the full file is. New behaviour is behind config options whose defaults reproduce the earlier runs.
+Every run's results file is complete. Three extra run directories carry a `README.txt` saying what they are and are not used in any result: the cancelled 3e9 PPO-NFSP run (`F7/`), the C0 reproducibility rerun (`C0/`) and a ReBeL timing test (`E/`). New behaviour is behind config options whose defaults reproduce the earlier runs.
 
 ## Folders
 
