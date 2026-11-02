@@ -17,6 +17,16 @@ and OpenSpiel's implementations (open_spiel/python/{jax,pytorch}/deep_cfr.py):
 - Linear CFR: every sample is weighted by the iteration t it was collected on,
   rescaled by 2 / T when training on iteration T (paper, Section 5.3).
 
+Single Deep CFR (--sd_cfr; Steinberger 2019, https://arxiv.org/abs/1901.07621):
+also computes, exactly at every infoset, the linearly weighted average of the
+advantage networks' regret-matching strategies, each weighted by the player's
+own reach probability (bluffjax.examples.sd_cfr; leduc_deep_cfr.py describes
+it), and logs it as sd_cfr/exploitability and sd_cfr/value_vs_random and saves
+it as {half,full}/sd_cfr_policy_{i}.msgpack (kuhn_cfr.py's average-policy
+layout, read with kuhn_cfr.load_average_policy).
+--strategy_memory_capacity sets the strategy memory's size separately
+(default: --memory_capacity).
+
 OpenSpiel's JAX and PyTorch versions skip training while a memory holds fewer
 samples than a batch; here the networks are trained on every iteration, with
 minibatches sampled with replacement.
@@ -97,6 +107,8 @@ from bluffjax.examples.run_utils import (
     make_run_dir,
     save_params,
 )
+from bluffjax.examples.kuhn import kuhn_cfr
+from bluffjax.examples.sd_cfr import SDCFRAverage, regret_matching_table
 from bluffjax.metrics import prefixed
 from bluffjax.metrics.kuhn_poker import policy_metrics
 from bluffjax.utils.game_utils.kuhn_exploitability import (
@@ -170,6 +182,23 @@ def regret_matching(advantages: np.ndarray, legal_mask: np.ndarray) -> np.ndarra
 # Network inputs for every infoset, in kuhn_exploitability's infoset order.
 # Both actions are legal in every Kuhn infoset.
 INFOSET_TENSORS = np.stack([_infoset_tensor(k) for k in INFOSETS])
+INFOSET_LEGAL_MASKS = np.ones((len(INFOSETS), NUM_ACTIONS), dtype=bool)
+# Acting player of every infoset (players alternate: 0 acts at even depths)
+INFOSET_PLAYERS = np.array([(len(k) - 1) % 2 for k in INFOSETS])
+
+
+def _own_parents() -> tuple[np.ndarray, np.ndarray]:
+    """For every infoset, the row of its player's previous infoset (two
+    actions earlier) and the action taken there; -1 and 0 at the player's
+    first decision."""
+    row = {k: i for i, k in enumerate(INFOSETS)}
+    parent = np.full(len(INFOSETS), -1, dtype=np.int64)
+    parent_action = np.zeros(len(INFOSETS), dtype=np.int64)
+    for i, k in enumerate(INFOSETS):
+        if len(k) >= 3:
+            parent[i] = row[k[:-2]]
+            parent_action[i] = ACTION_PASS if k[-2] == "p" else ACTION_BET
+    return parent, parent_action
 
 
 # --- Reservoir memories ---
@@ -319,7 +348,15 @@ class DeepCFRSolver:
         self._advantage_memories = [
             ReservoirBuffer(config.memory_capacity) for _ in range(2)
         ]
-        self._strategy_memory = ReservoirBuffer(config.memory_capacity)
+        strategy_capacity = getattr(config, "strategy_memory_capacity", None)
+        self._strategy_memory = ReservoirBuffer(
+            config.memory_capacity if strategy_capacity is None else strategy_capacity
+        )
+        self.sd_cfr = (
+            SDCFRAverage(INFOSET_PLAYERS, *_own_parents(), INFOSET_LEGAL_MASKS)
+            if getattr(config, "sd_cfr", False)
+            else None
+        )
         # None stands for the initial advantage network, which predicts 0 everywhere
         self._advantage_params: list[PyTree | None] = [None, None]
         # Regret-matching strategies of each player's current advantage network,
@@ -353,12 +390,28 @@ class DeepCFRSolver:
         self._iteration += 1
         losses = []
         for player in range(2):
+            if self.sd_cfr is not None:
+                # The opponent's strategy, as Deep CFR's strategy memory gets it
+                opponent = 1 - player
+                self.sd_cfr.add(
+                    opponent, self.strategy_table(opponent), self._iteration
+                )
             for _ in range(self._config.traversals):
                 # The deal is Kuhn's only chance event
                 hands = DEALS[self._rng.integers(len(DEALS))]
                 self._traverse_game_tree(hands, (), player)
             losses.append(self._learn_advantage_network(player))
         return losses
+
+    def strategy_table(self, player: int) -> np.ndarray:
+        """Regret matching on `player`'s current advantage network at every
+        infoset, (12, 2) (meaningful on `player`'s rows)."""
+        params = self._advantage_params[player]
+        if params is None:
+            advantages = np.zeros(INFOSET_LEGAL_MASKS.shape)
+        else:
+            advantages = np.asarray(self._apply(params, INFOSET_TENSORS))
+        return regret_matching_table(advantages, INFOSET_LEGAL_MASKS)
 
     def _strategy(
         self, player: int, info_state: np.ndarray, legal_mask: np.ndarray
@@ -465,6 +518,8 @@ def run_deep_cfr(
         "advantage_loss": [],
         "policy_loss": [],
     }
+    if solver.sd_cfr is not None:
+        results["sd_cfr_exploitability"] = []
 
     for it in range(1, config.iterations + 1):
         advantage_losses = solver.run_iteration()
@@ -495,6 +550,19 @@ def run_deep_cfr(
                 policy_loss=loss,
                 **prefixed("game", policy_metrics(table)),
             )
+            if solver.sd_cfr is not None:
+                sd_table = solver.sd_cfr.policy()
+                sd_expl = exploitability(policy_from_array(sd_table))
+                record["sd_cfr/exploitability"] = sd_expl
+                record["sd_cfr/value_vs_random"] = value_vs_random(
+                    policy_from_array(sd_table)
+                )
+                results["sd_cfr_exploitability"].append(sd_expl)
+                print(
+                    f"seed index {seed_index} iteration {it:4d}: SD-CFR "
+                    f"exploitability = {sd_expl:.6f}",
+                    flush=True,
+                )
             eval_seconds += time.time() - eval_start
             results["iterations"].append(it)
             results["exploitability"].append(expl)
@@ -507,10 +575,15 @@ def run_deep_cfr(
             if run_dir is not None and it in (num_half, config.iterations):
                 stage = "half" if it == num_half else "full"
                 save_params(run_dir, stage, "avg_policy", policy_params, seed_index)
+                if solver.sd_cfr is not None:
+                    tree = kuhn_cfr.policy_checkpoint(solver.sd_cfr.policy(), it)
+                    save_params(run_dir, stage, "sd_cfr_policy", tree, seed_index)
         if results_log is not None:
             results_log.log(record, seed_index)
 
     results["final_exploitability"] = results["exploitability"][-1]
+    if solver.sd_cfr is not None:
+        results["final_sd_cfr_exploitability"] = results["sd_cfr_exploitability"][-1]
     results["runtime_seconds"] = time.time() - start
     # Intermediate policy networks and all exploitability computations, which a
     # run without logging doesn't need
@@ -549,7 +622,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=2048)
     parser.add_argument("--advantage_train_steps", type=int, default=200)
     parser.add_argument("--policy_train_steps", type=int, default=5000)
-    parser.add_argument("--memory_capacity", type=int, default=100_000)
+    parser.add_argument(
+        "--memory_capacity",
+        type=int,
+        default=100_000,
+        help="size of each advantage memory (and of the strategy memory unless "
+        "--strategy_memory_capacity is given)",
+    )
+    parser.add_argument("--strategy_memory_capacity", type=int, default=None)
+    parser.add_argument(
+        "--sd_cfr",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="also compute Single Deep CFR's average strategy (exact, every "
+        "infoset) and log/save it",
+    )
     parser.add_argument(
         "--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "kuhn")
     )
@@ -607,6 +694,11 @@ def run(args: argparse.Namespace) -> str:
             )
             all_results.append({"seed": args.seed + i, "seed_index": i, **results})
             print(f"Final exploitability: {results['final_exploitability']:.6f}")
+            if "final_sd_cfr_exploitability" in results:
+                print(
+                    "Final SD-CFR exploitability: "
+                    f"{results['final_sd_cfr_exploitability']:.6f}"
+                )
             print(
                 f"Runtime: {results['runtime_seconds']:.1f}s "
                 f"({results['eval_seconds']:.1f}s evaluating)"

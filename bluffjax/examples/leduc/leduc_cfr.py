@@ -8,6 +8,21 @@ player 0's strategy updated in the same iteration), updates the traversing
 player's regrets and adds its strategy, weighted by its own reach probability,
 to its average strategy.
 
+--variant picks the CFR variant (default cfr, the vanilla CFR above); all
+use the same alternating updates and match OpenSpiel's solvers of the same
+name (open_spiel/python/algorithms/{cfr,discounted_cfr}.py) to numerical
+precision:
+    cfr        vanilla CFR (CFRSolver): average strategy weighted by own reach
+    cfr_plus   CFR+ (CFRPlusSolver): regret matching+ (a player's negative
+               cumulative regrets are reset to 0 after its traversal) and
+               linear averaging (iteration t's strategy weighted by t)
+    linear     Linear CFR (LCFRSolver, Brown & Sandholm 2019): after a
+               player's traversal on iteration t its cumulative regrets are
+               multiplied by t / (t + 1); average weighted by t
+    dcfr       Discounted CFR (DCFRSolver, alpha 1.5, beta 0, gamma 2):
+               positive regrets multiplied by t^1.5 / (t^1.5 + 1), negative
+               ones by 1/2; average weighted by t^2
+
 Logs, after iteration 1, every --eval_interval iterations, after half of the
 iterations (the half checkpoint) and after the last one: the exact
 exploitability of the average strategy, its exact expected return per hand
@@ -20,8 +35,8 @@ so a run is one solve (seed index 0, one wandb run "{seed}_0"; --seed only
 names it).
 
 Flags (the same as kuhn_cfr.py; kuhn_deep_cfr.py and leduc_deep_cfr.py add
---num_seeds and their own hyperparameters): --iterations, --eval_interval,
---seed, --save_dir, --job_type, --wandb, --project, --save_checkpoints. With
+--num_seeds and their own hyperparameters): --variant, --iterations,
+--eval_interval, --seed, --save_dir, --job_type, --wandb, --project, --save_checkpoints. With
 --wandb the run logs to project --project, group {env_name}_{timestamp}, job
 type {job_type}_{env_name} (env_name leduc_poker), as the RL scripts do.
 
@@ -83,8 +98,26 @@ from bluffjax.utils.paths import REPO_ROOT
 ENV_NAME = "leduc_poker"
 
 
+# Regret discounting (alpha for positive, beta for negative cumulative regrets;
+# None for none), average-strategy weight exponent gamma (iteration t's
+# strategy weighted by t^gamma) and regret matching+ of each variant
+VARIANTS = {
+    "cfr": dict(alpha=None, beta=None, gamma=0.0, regret_matching_plus=False),
+    "cfr_plus": dict(alpha=None, beta=None, gamma=1.0, regret_matching_plus=True),
+    "linear": dict(alpha=1.0, beta=1.0, gamma=1.0, regret_matching_plus=False),
+    "dcfr": dict(alpha=1.5, beta=0.0, gamma=2.0, regret_matching_plus=False),
+}
+
+
 class CFRSolver:
-    def __init__(self) -> None:
+    def __init__(self, variant: str = "cfr") -> None:
+        if variant not in VARIANTS:
+            raise ValueError(f"unknown CFR variant {variant!r}")
+        self.variant = variant
+        self._params = VARIANTS[variant]
+        self.iteration = 0
+        # Weight of the current iteration's strategy in the average strategy
+        self._avg_weight = 1.0
         # regrets[player][infoset_key][action] -> cumulative regret
         self.regrets = [defaultdict(lambda: defaultdict(float)) for _ in range(2)]
         # strategy_sum[player][infoset_key][action] -> cumulative average-strategy mass
@@ -123,14 +156,22 @@ class CFRSolver:
         return self._strategy_cache[cache_key]
 
     def _cfr(
-        self, state: leduc.LeducState, update_player: int, reach: tuple[float, float]
+        self,
+        state: leduc.LeducState,
+        update_player: int,
+        reach: tuple[float, float],
+        chance: float = 1.0,
     ) -> float:
         """Expected value for update_player of the current strategies at state.
 
-        reach holds both players' reach probabilities without chance. The chance
-        probability of reaching a history is the same for every history of an
-        infoset in Leduc, so leaving it out scales an infoset's regrets by a
-        constant, which regret matching ignores.
+        reach holds both players' reach probabilities and chance the chance
+        probability of reaching state. Regrets are weighted by the opponent's
+        reach times chance, as in OpenSpiel. (The chance probability is the
+        same for every history of an infoset in Leduc, so it only scales an
+        infoset's regrets by a constant, which none of the variants' regret
+        updates depends on; but leaving it out changes the rounding, which
+        Linear CFR and DCFR amplify until their iterates visibly differ from
+        OpenSpiel's after about 150 iterations.)
         """
         if state.is_terminal():
             return state.returns()[update_player]
@@ -138,7 +179,9 @@ class CFRSolver:
         if state.is_chance_node():
             v = 0.0
             for action, prob in state.chance_outcomes():
-                v += prob * self._cfr(state.child(action), update_player, reach)
+                v += prob * self._cfr(
+                    state.child(action), update_player, reach, chance * prob
+                )
             return v
 
         current = state.current_player
@@ -152,27 +195,64 @@ class CFRSolver:
             next_reach = list(reach)
             next_reach[current] *= strategy[action]
             val = self._cfr(
-                state.child(action), update_player, (next_reach[0], next_reach[1])
+                state.child(action),
+                update_player,
+                (next_reach[0], next_reach[1]),
+                chance,
             )
             action_values[action] = val
             node_value += strategy[action] * val
 
         if current == update_player:
-            opp = 1 - current
+            cf_reach = reach[1 - current] * chance
             for action in legal:
                 regret = action_values[action] - node_value
-                self.regrets[current][infoset_key][action] += reach[opp] * regret
+                self.regrets[current][infoset_key][action] += cf_reach * regret
                 self.strategy_sum[current][infoset_key][action] += (
-                    reach[current] * strategy[action]
+                    self._avg_weight * reach[current] * strategy[action]
                 )
         return node_value
 
     def run_iteration(self) -> None:
+        self.iteration += 1
+        t = float(self.iteration)
+        gamma = self._params["gamma"]
+        self._avg_weight = 1.0 if gamma == 0 else t**gamma
         root = leduc.initial_state()
         for p in (0, 1):
             self._strategy_cache = {}
             self._cfr(root, p, (1.0, 1.0))
+            self._update_regrets(p, t)
         self._strategy_cache = {}
+
+    def _update_regrets(self, player: int, t: float) -> None:
+        """Regret matching+ or discounting of `player`'s cumulative regrets
+        after its traversal (OpenSpiel's order)."""
+        alpha, beta = self._params["alpha"], self._params["beta"]
+        if not self._params["regret_matching_plus"] and alpha is None:
+            return
+        pos = t**alpha / (t**alpha + 1) if alpha is not None else None
+        neg = t**beta / (t**beta + 1) if beta is not None else None
+        for regrets in self.regrets[player].values():
+            for action, r in regrets.items():
+                if self._params["regret_matching_plus"]:
+                    if r < 0:
+                        regrets[action] = 0.0
+                elif r >= 0:
+                    regrets[action] = r * pos
+                else:
+                    regrets[action] = r * neg
+
+    def current_policy_array(self, player: int) -> np.ndarray:
+        """The current strategy (regret matching on the cumulative regrets) at
+        every infoset of `player`, (936, 3) in leduc._INFOSET_LIST order (rows
+        of the other player's infosets are 0)."""
+        policy = np.zeros((len(leduc._INFOSET_LIST), 3), dtype=np.float64)
+        for i, (key, legal) in enumerate(leduc._INFOSET_LIST):
+            if key[0] == player:
+                for a, p in self._regret_matching(player, key, legal).items():
+                    policy[i, a] = p
+        return policy
 
     def average_policy(self, state: leduc.LeducState) -> dict[int, float]:
         legal = state.legal_actions()
@@ -274,12 +354,13 @@ def run_cfr(
     eval_interval: int,
     results_log: ResultsLog | None = None,
     run_dir: str | None = None,
+    variant: str = "cfr",
 ) -> CFRSolver:
-    """Runs CFR, evaluating after iteration 1, every eval_interval
-    iterations, after half_update_steps(iterations) and at the end; with
-    run_dir, saves the average strategy after half and all of the
-    iterations."""
-    solver = CFRSolver()
+    """Runs CFR (`variant`, see VARIANTS), evaluating after iteration 1,
+    every eval_interval iterations, after half_update_steps(iterations) and
+    at the end; with run_dir, saves the average strategy after half and all
+    of the iterations."""
+    solver = CFRSolver(variant)
     num_half = half_update_steps(iterations)
 
     def save(stage: str, it: int) -> None:
@@ -321,6 +402,12 @@ def run_cfr(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CFR on Leduc Poker.")
     parser.add_argument("--iterations", type=int, default=100, help="CFR iterations")
+    parser.add_argument(
+        "--variant",
+        choices=sorted(VARIANTS),
+        default="cfr",
+        help="cfr (vanilla), cfr_plus, linear (Linear CFR) or dcfr (Discounted CFR)",
+    )
     parser.add_argument(
         "--eval_interval",
         type=int,
@@ -376,6 +463,7 @@ def run(args: argparse.Namespace) -> str:
             args.eval_interval,
             results_log,
             run_dir if args.save_checkpoints else None,
+            args.variant,
         )
         final_expl = leduc.exploitability_from_policy_array(
             solver.average_policy_array(), leduc._KEY_TO_IDX
