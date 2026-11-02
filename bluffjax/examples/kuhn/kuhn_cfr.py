@@ -14,14 +14,26 @@ return per hand against uniformly random play averaged over both seats
 --eval_interval iterations, after half of the iterations (the half
 checkpoint) and after the last one.
 
+--variant picks the CFR variant (default cfr, vanilla CFR with alternating
+updates, as OpenSpiel's CFRSolver); the others match OpenSpiel's solvers of the
+same name (open_spiel/python/algorithms/{cfr,discounted_cfr}.py) to numerical
+precision (VARIANTS; leduc_cfr.py describes them):
+    cfr_plus  CFR+ (CFRPlusSolver): regret matching+, average weighted by t
+    linear    Linear CFR (LCFRSolver): regrets times t / (t + 1) after each
+              player's traversal, average weighted by t
+    dcfr      Discounted CFR (DCFRSolver): positive regrets times
+              t^1.5 / (t^1.5 + 1), negative ones times 1/2, average
+              weighted by t^2
+
 CFR is deterministic, so a run is one solve (seed index 0, one wandb run
 "{seed}_0"; --seed only names it):
 
     python bluffjax/examples/kuhn/kuhn_cfr.py --iterations 100 [--wandb]
 
 Flags (the same as leduc_cfr.py; kuhn_deep_cfr.py and leduc_deep_cfr.py add
---num_seeds and their own hyperparameters): --iterations, --eval_interval,
---seed, --save_dir, --job_type, --wandb, --project, --save_checkpoints. With
+--num_seeds and their own hyperparameters): --variant, --iterations,
+--eval_interval, --seed, --save_dir, --job_type, --wandb, --project,
+--save_checkpoints. With
 --wandb the run logs to project --project, group {env_name}_{timestamp}, job
 type {job_type}_{env_name} (env_name kuhn_poker), as the RL scripts do.
 
@@ -93,6 +105,41 @@ from bluffjax.utils.paths import REPO_ROOT
 
 ENV_NAME = "kuhn_poker"
 MAX_BETTING = 2  # actions before a decision: at most pass, bet
+
+# As leduc_cfr.VARIANTS: regret discounting (alpha for positive, beta for
+# negative cumulative regrets; None for none), average-strategy weight exponent
+# gamma (iteration t's strategy weighted by t^gamma) and regret matching+
+VARIANTS = {
+    "cfr": dict(alpha=None, beta=None, gamma=0.0, regret_matching_plus=False),
+    "cfr_plus": dict(alpha=None, beta=None, gamma=1.0, regret_matching_plus=True),
+    "linear": dict(alpha=1.0, beta=1.0, gamma=1.0, regret_matching_plus=False),
+    "dcfr": dict(alpha=1.5, beta=0.0, gamma=2.0, regret_matching_plus=False),
+}
+
+
+def _update_regrets(
+    infoset_nodes: dict[str, dict], player: int | None, t: float, variant: str
+) -> None:
+    """Regret matching+ or discounting of the cumulative regrets of `player`'s
+    infosets (all infosets if None) after its traversal, as OpenSpiel."""
+    params = VARIANTS[variant]
+    alpha, beta = params["alpha"], params["beta"]
+    if not params["regret_matching_plus"] and alpha is None:
+        return
+    pos = t**alpha / (t**alpha + 1) if alpha is not None else None
+    neg = t**beta / (t**beta + 1) if beta is not None else None
+    for infok, node in infoset_nodes.items():
+        if player is not None and get_current_player(_history(infok)) != player:
+            continue
+        regrets = node["cumulative_regret"]
+        for a, r in regrets.items():
+            if params["regret_matching_plus"]:
+                if r < 0:
+                    regrets[a] = 0.0
+            elif r >= 0:
+                regrets[a] = r * pos
+            else:
+                regrets[a] = r * neg
 
 
 def _regret_matching(
@@ -191,9 +238,19 @@ def _run_cfr_iteration(
     iteration: int,
     linear_averaging: bool,
     alternating_updates: bool,
+    variant: str = "cfr",
 ) -> float:
-    """One CFR iteration: update policy from regrets, then traverse (alternating or simultaneous)."""
+    """One CFR iteration: update policy from regrets, then traverse (alternating or simultaneous).
+
+    `variant` (VARIANTS) sets the average-strategy weight (t^gamma; with
+    linear_averaging, vanilla CFR's weight is t) and the regret update after
+    each traversal."""
     total_value = 0.0
+    t = float(iteration)
+    gamma = VARIANTS[variant]["gamma"]
+    if gamma != 0:
+        # _cfr_traversal weights the strategy by `iteration` with linear_averaging
+        iteration, linear_averaging = t**gamma, True
 
     if alternating_updates:
         for player in range(2):
@@ -218,6 +275,7 @@ def _run_cfr_iteration(
                     player,
                 )
                 total_value += val[0]
+            _update_regrets(infoset_nodes, player, t, variant)
     else:
         for infok in INFOSETS:
             if infok in infoset_nodes:
@@ -240,6 +298,7 @@ def _run_cfr_iteration(
                 None,
             )
             total_value += val[0]
+        _update_regrets(infoset_nodes, None, t, variant)
 
     return total_value / 6
 
@@ -340,6 +399,7 @@ def run_cfr(
     alternating_updates: bool = True,
     eval_interval: int = 100,
     results_log: ResultsLog | None = None,
+    variant: str = "cfr",
 ) -> CFRResult:
     """
     Run CFR on Kuhn poker.
@@ -353,6 +413,8 @@ def run_cfr(
             last.
         results_log: if given, every evaluation is logged to it (iteration,
             exploitability, value_vs_random and the game/ policy metrics).
+        variant: the CFR variant (VARIANTS); its average-strategy weighting
+            replaces linear_averaging's unless it is "cfr".
 
     Returns:
         CFRResult: the average policy after all iterations, the
@@ -403,6 +465,7 @@ def run_cfr(
             it,
             linear_averaging,
             alternating_updates,
+            variant,
         )
 
         if it == num_half:
@@ -427,6 +490,12 @@ def run_cfr(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CFR on Kuhn Poker.")
     parser.add_argument("--iterations", type=int, default=100, help="CFR iterations")
+    parser.add_argument(
+        "--variant",
+        choices=sorted(VARIANTS),
+        default="cfr",
+        help="cfr (vanilla), cfr_plus, linear (Linear CFR) or dcfr (Discounted CFR)",
+    )
     parser.add_argument(
         "--eval_interval",
         type=int,
@@ -484,6 +553,7 @@ def run(args: argparse.Namespace) -> str:
             linear_averaging=False,
             eval_interval=args.eval_interval,
             results_log=results_log,
+            variant=args.variant,
         )
         final_expl = float(result.exploitability_log[-1][1])
         print("=" * 50)

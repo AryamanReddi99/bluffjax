@@ -17,6 +17,27 @@ and OpenSpiel's implementations (open_spiel/python/{jax,pytorch}/deep_cfr.py):
 - Linear CFR: every sample is weighted by the iteration t it was collected on,
   rescaled by 2 / T when training on iteration T (paper, Section 5.3).
 
+Single Deep CFR (--sd_cfr; Steinberger 2019, https://arxiv.org/abs/1901.07621):
+the average strategy is computed from the advantage networks themselves
+instead of a policy network. With --sd_cfr the solver also keeps, at every
+infoset I of each player i, the linearly weighted average
+    sum_t t * reach_i^t(I) * sigma_i^t(I) / sum_t t * reach_i^t(I)
+of the regret-matching strategies sigma_i^t of i's advantage networks, where
+reach_i^t(I) is i's own probability of reaching I under sigma_i^t. The
+strategies are those that Deep CFR adds to its strategy memory (i's strategy
+when i is the opponent of the traverser: on iteration t, player 1's network of
+iteration t - 1 and player 0's network of iteration t), so the SD-CFR average
+is the exact, sample-free version of what Deep CFR's policy network is
+trained to approximate; with all 936 infosets it is computed exactly (the
+"explicit" query of SD-CFR's Section 4). Both share the same advantage
+networks, as in the SD-CFR paper's experiments; SD-CFR adds its own logs
+(sd_cfr/exploitability, sd_cfr/value_vs_random) and checkpoints
+({half,full}/sd_cfr_policy_{i}.msgpack, leduc_cfr.py's average-policy layout,
+read with leduc_cfr.load_average_policy).
+
+--strategy_memory_capacity sets the strategy memory's size separately
+(default: --memory_capacity, the size of each advantage memory).
+
 OpenSpiel's JAX and PyTorch versions skip training while a memory holds fewer
 samples than a batch; here the networks are trained on every iteration, with
 minibatches sampled with replacement.
@@ -95,6 +116,8 @@ from bluffjax.examples.run_utils import (
     make_run_dir,
     save_params,
 )
+from bluffjax.examples.leduc import leduc_cfr
+from bluffjax.examples.sd_cfr import SDCFRAverage, regret_matching_table
 from bluffjax.metrics.leduc_holdem import log_metrics
 from bluffjax.utils.game_utils import leduc_exploitability as leduc
 from bluffjax.utils.paths import REPO_ROOT
@@ -160,6 +183,40 @@ INFOSET_TENSORS = np.stack(
     [information_state_tensor(k) for k, _ in leduc._INFOSET_LIST]
 )
 INFOSET_LEGAL_MASKS = np.stack([legal_actions_mask(a) for _, a in leduc._INFOSET_LIST])
+# Acting player of every infoset
+INFOSET_PLAYERS = np.array([k[0] for k, _ in leduc._INFOSET_LIST])
+
+
+def _own_parents() -> tuple[np.ndarray, np.ndarray]:
+    """For every infoset, the row of its player's previous infoset on the way
+    to it and the action taken there (-1 and 0 at the player's first
+    decision); unique by perfect recall."""
+    n = len(leduc._INFOSET_LIST)
+    parent = np.full(n, -2, dtype=np.int64)
+    parent_action = np.zeros(n, dtype=np.int64)
+
+    def visit(state: leduc.LeducState, last: tuple) -> None:
+        if state.is_terminal():
+            return
+        if state.is_chance_node():
+            for action, _ in state.chance_outcomes():
+                visit(state.child(action), last)
+            return
+        p = state.current_player
+        row = leduc._KEY_TO_IDX[state.info_state_key(p)]
+        prev = last[p] if last[p] is not None else (-1, 0)
+        assert parent[row] in (-2, prev[0]) and (
+            parent[row] == -2 or parent_action[row] == prev[1]
+        ), "not perfect recall"
+        parent[row], parent_action[row] = prev
+        for action in state.legal_actions():
+            new_last = list(last)
+            new_last[p] = (row, action)
+            visit(state.child(action), tuple(new_last))
+
+    visit(leduc.initial_state(), (None, None))
+    assert (parent >= -1).all()
+    return parent, parent_action
 
 
 # --- Reservoir memories ---
@@ -337,7 +394,15 @@ class DeepCFRSolver:
         self._advantage_memories = [
             ReservoirBuffer(config.memory_capacity) for _ in range(2)
         ]
-        self._strategy_memory = ReservoirBuffer(config.memory_capacity)
+        strategy_capacity = getattr(config, "strategy_memory_capacity", None)
+        self._strategy_memory = ReservoirBuffer(
+            config.memory_capacity if strategy_capacity is None else strategy_capacity
+        )
+        self.sd_cfr = (
+            SDCFRAverage(INFOSET_PLAYERS, *_own_parents(), INFOSET_LEGAL_MASKS)
+            if getattr(config, "sd_cfr", False)
+            else None
+        )
         # None stands for the initial advantage network, which predicts 0 everywhere
         self._advantage_params: list[PyTree | None] = [None, None]
         # Regret-matching strategies of each player's current advantage network,
@@ -358,10 +423,26 @@ class DeepCFRSolver:
         self._iteration += 1
         losses = []
         for player in range(2):
+            if self.sd_cfr is not None:
+                # The opponent's strategy, as Deep CFR's strategy memory gets it
+                opponent = 1 - player
+                self.sd_cfr.add(
+                    opponent, self.strategy_table(opponent), self._iteration
+                )
             for _ in range(self._config.traversals):
                 self._traverse_game_tree(leduc.initial_state(), player)
             losses.append(self._learn_advantage_network(player))
         return losses
+
+    def strategy_table(self, player: int) -> np.ndarray:
+        """Regret matching on `player`'s current advantage network at every
+        infoset, (936, 3) (meaningful on `player`'s rows)."""
+        params = self._advantage_params[player]
+        if params is None:
+            advantages = np.zeros(INFOSET_LEGAL_MASKS.shape)
+        else:
+            advantages = np.asarray(self._apply(params, INFOSET_TENSORS))
+        return regret_matching_table(advantages, INFOSET_LEGAL_MASKS)
 
     def _strategy(
         self, player: int, info_state: np.ndarray, legal_mask: np.ndarray
@@ -471,6 +552,8 @@ def run_deep_cfr(
         "advantage_loss": [],
         "policy_loss": [],
     }
+    if solver.sd_cfr is not None:
+        results["sd_cfr_exploitability"] = []
 
     for it in range(1, config.iterations + 1):
         advantage_losses = solver.run_iteration()
@@ -495,6 +578,17 @@ def run_deep_cfr(
                 exploitability=expl, value_vs_random=value, policy_loss=loss
             )
             metrics.update(log_metrics("game", policy))
+            if solver.sd_cfr is not None:
+                sd_policy = solver.sd_cfr.policy()
+                sd_expl = exploitability(sd_policy)
+                metrics["sd_cfr/exploitability"] = sd_expl
+                metrics["sd_cfr/value_vs_random"] = value_vs_random(sd_policy)
+                results["sd_cfr_exploitability"].append(sd_expl)
+                print(
+                    f"seed index {seed_index} iteration {it:4d}: SD-CFR "
+                    f"exploitability = {sd_expl:.6f}",
+                    flush=True,
+                )
             eval_seconds += time.time() - eval_start
             results["iterations"].append(it)
             results["exploitability"].append(expl)
@@ -509,10 +603,15 @@ def run_deep_cfr(
             if run_dir is not None and it in (num_half, config.iterations):
                 stage = "full" if is_last else "half"
                 save_params(run_dir, stage, "avg_policy", policy_params, seed_index)
+                if solver.sd_cfr is not None:
+                    tree = leduc_cfr.policy_checkpoint(solver.sd_cfr.policy(), it)
+                    save_params(run_dir, stage, "sd_cfr_policy", tree, seed_index)
         if results_log is not None:
             results_log.log(metrics, seed_index)
 
     results["final_exploitability"] = results["exploitability"][-1]
+    if solver.sd_cfr is not None:
+        results["final_sd_cfr_exploitability"] = results["sd_cfr_exploitability"][-1]
     results["runtime_seconds"] = time.time() - start
     # Intermediate policy networks and all exploitability computations, which a
     # run without logging doesn't need
@@ -551,7 +650,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=2048)
     parser.add_argument("--advantage_train_steps", type=int, default=200)
     parser.add_argument("--policy_train_steps", type=int, default=5000)
-    parser.add_argument("--memory_capacity", type=int, default=100_000)
+    parser.add_argument(
+        "--memory_capacity",
+        type=int,
+        default=100_000,
+        help="size of each advantage memory (and of the strategy memory unless "
+        "--strategy_memory_capacity is given)",
+    )
+    parser.add_argument("--strategy_memory_capacity", type=int, default=None)
+    parser.add_argument(
+        "--sd_cfr",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="also compute Single Deep CFR's average strategy (exact, every "
+        "infoset) and log/save it",
+    )
     parser.add_argument(
         "--save_dir", type=str, default=str(REPO_ROOT / "checkpoints" / "leduc")
     )
@@ -609,6 +722,11 @@ def run(args: argparse.Namespace) -> str:
             )
             all_results.append({"seed": args.seed + i, "seed_index": i, **results})
             print(f"Final exploitability: {results['final_exploitability']:.6f}")
+            if "final_sd_cfr_exploitability" in results:
+                print(
+                    "Final SD-CFR exploitability: "
+                    f"{results['final_sd_cfr_exploitability']:.6f}"
+                )
             print(
                 f"Runtime: {results['runtime_seconds']:.1f}s "
                 f"({results['eval_seconds']:.1f}s evaluating)"
