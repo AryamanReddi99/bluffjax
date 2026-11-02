@@ -9,7 +9,9 @@ leduc_br_gap.py) and the PQN-NFSP options that use it:
   the exact BR value against the average policy is its exploitability;
 - a short PQN-NFSP run with log_br_gap and br_optimizer=radam logs the gap
   metrics at exactly the evaluation points, consistent with the logged
-  exploitability, and radam changes the Q-network but not the default path.
+  exploitability, and radam changes the Q-network but not the default path;
+- lr_final_frac: with anneal_lr the logged BR lr follows the linear decay to
+  lr * lr_final_frac, and the default 0 is the earlier schedule.
 """
 
 import numpy as np
@@ -135,3 +137,16 @@ def test_pqn_nfsp_options(monkeypatch, tmp_path):
             assert not gap_keys & set(r)
     with pytest.raises(ValueError):
         leduc_pqn_nfsp.make_train(_config(br_optimizer="sgd"))
+
+
+@pytest.mark.parametrize("floor", [None, 0.0, 0.25])
+def test_pqn_nfsp_lr_floor(monkeypatch, tmp_path, floor):
+    kw = {} if floor is None else {"lr_final_frac": floor}
+    _, rows = _run(monkeypatch, tmp_path, **kw)
+    cfg = _config()
+    f = 0.0 if floor is None else floor
+    per_update = cfg["num_epochs"] * cfg["num_minibatches"]
+    for r in rows:
+        step = (r["update_step"] + 1) * per_update  # optimiser steps after the update
+        frac = 1.0 - step / cfg["num_gradient_steps"]
+        assert r["br_lr"] == pytest.approx(cfg["lr"] * (f + (1 - f) * frac), rel=1e-5, abs=1e-9)

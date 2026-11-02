@@ -35,6 +35,8 @@ the acting player's perfect-recall information state).
   br_gap_vs_mix (bluffjax/utils/game_utils/leduc_br_gap.py).
 - br_optimizer: adam (default) or radam (as in purejaxql's PQN) for the
   Q-network, after clipping by max_grad_norm.
+- anneal_lr: the Q-network's lr decays linearly from lr to
+  lr * lr_final_frac (default 0) over the run.
 - Evaluation against random (compare), every compare_interval updates and
   after the last update: the average policy (sampled from softmax(logits)) and
   the greedy BR (argmax Q over the legal actions, ties to the first), the
@@ -369,9 +371,13 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         raise ValueError(f"br_optimizer must be 'adam' or 'radam', got {br_optimizer!r}")
     log_br_gap = config.get("log_br_gap", False)
 
+    # With anneal_lr the lr decays linearly from lr to lr * lr_final_frac
+    # over the run (lr_final_frac 0, the default, decays to 0).
+    lr_final_frac = config.get("lr_final_frac", 0.0)
+
     def linear_decay(count: int) -> float:
         frac = 1.0 - count / config["num_gradient_steps"]
-        return config["lr"] * frac
+        return config["lr"] * (lr_final_frac + (1.0 - lr_final_frac) * frac)
 
     def epsilon_schedule(update_step: FloatArray) -> FloatArray:
         decay_steps = max(
