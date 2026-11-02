@@ -6,6 +6,10 @@ p = os.path.join(run_dir, "results.jsonl")
 rows = [json.loads(l) for l in (gzip.open(p + ".gz", "rt") if not os.path.exists(p) else open(p))]
 import yaml
 cfg = yaml.safe_load(open(os.path.join(run_dir, "config.yaml")))
+# env steps from update_step (runs before the host-side fix logged an int32
+# counter that wraps past 2**31)
+for r in rows:
+    r["env_steps"] = (r["update_step"] + 1) * cfg["num_envs"] * cfg["num_steps_per_env_per_update"]
 seeds, gap_avg, gap_mix, expl_br = [], {}, {}, {}
 for s in sorted({r["seed_index"] for r in rows}):
     ev = [r for r in rows if r["seed_index"] == s and "exploitability" in r]

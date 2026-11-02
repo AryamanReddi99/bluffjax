@@ -2,7 +2,7 @@
 usage: combine.py <collect_dir> <out.json> [phase ...]"""
 import glob, json, os, subprocess, sys
 collect, out = sys.argv[1], sys.argv[2]
-phases = sys.argv[3:] or ["C0", "C1", "C2", "C3a", "C3b", "C3c", "C3d", "C4", "C4b"]
+phases = sys.argv[3:] or ["C0", "C1", "C2", "C3a", "C3b", "C3c", "C3d", "C4", "C4b", "C5a1", "C5a2", "C5b", "C5c"]
 BASE = "eps 0.06->0 linear over the run, gamma 1"
 OPT = "RAdam, clip 10, lr 2.5e-4 linearly to 0"
 VAR = {
@@ -15,6 +15,10 @@ VAR = {
     "C3d": ("C3", f"{BASE}; {OPT}; 16 minibatches"),
     "C4": ("C4", f"C3c (best of C1-C3: {BASE}; {OPT}; 32 minibatches, lambda 0.65) at 1e9 env steps, 2e6 reservoir"),
     "C4b": ("C4", f"C3a ({BASE}; {OPT}; 32 minibatches, lambda 0.9) at 1e9 env steps, 2e6 reservoir"),
+    "C5a1": ("C5a", "C4 with 64 minibatches (4 epochs), 1e9 env steps, 2e6 reservoir"),
+    "C5a2": ("C5a", "C4 with 32 minibatches x 2 epochs, 1e9 env steps, 2e6 reservoir"),
+    "C5b": ("C5b", "C4 settings at 3e9 env steps, 3e6 reservoir"),
+    "C5c": ("C5c", "C4 with lr floor: lr decays linearly to 10% (lr_final_frac 0.1), 1e9 env steps, 2e6 reservoir"),
 }
 entries = []
 here = os.path.dirname(os.path.abspath(__file__))
