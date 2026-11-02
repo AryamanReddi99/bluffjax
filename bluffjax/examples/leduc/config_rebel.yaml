@@ -1,0 +1,37 @@
+num_update_steps: 4000
+num_games: 256  # self-play hands per update; each reaching round 2 adds one example
+cfr_iters: 512  # Linear CFR-D iterations per subgame in self play
+eval_cfr_iters: 1024  # CFR iterations per subgame of the evaluated test-time policy (null: cfr_iters)
+eval_matmul_precision: highest  # jax.default_matmul_precision of the test-time policy
+value_target: iterates  # round-2 training targets: iterates (paper / released code) or average_policy (see solve_round)
+explore_prob: 0.25  # ReBeL's epsilon: one player explores at random
+value_lr: 3e-4
+lr_halve_at: [0.5, 0.75]  # fractions of training at which the learning rate halves
+value_hidden_dim: 256
+value_num_layers: 2
+max_grad_norm: 5.0
+replay_capacity: 500000  # targets are exact round-2 values, so old examples stay valid
+batch_size: 512
+num_value_train_steps: 4  # minibatches per update
+eval_interval: 1000  # updates between exact evaluations (the first before training); divides num_update_steps
+# run directory {save_dir}/{job_type}_{timestamp}/ with config.yaml,
+# results.jsonl, curves.json and the half/ and full/ value networks (see the
+# script docstring)
+save_checkpoints: true
+save_dir: ${repo_root:}/checkpoints/leduc
+
+env_name: leduc_poker
+seed: 0
+num_seeds: 5
+env_kwargs: {}
+
+project: bluffjax
+job_type: leduc_rebel
+wandb: false
+
+# Hydra configs and logs go to outputs/ at the repo root
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
