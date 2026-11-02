@@ -156,14 +156,22 @@ class CFRSolver:
         return self._strategy_cache[cache_key]
 
     def _cfr(
-        self, state: leduc.LeducState, update_player: int, reach: tuple[float, float]
+        self,
+        state: leduc.LeducState,
+        update_player: int,
+        reach: tuple[float, float],
+        chance: float = 1.0,
     ) -> float:
         """Expected value for update_player of the current strategies at state.
 
-        reach holds both players' reach probabilities without chance. The chance
-        probability of reaching a history is the same for every history of an
-        infoset in Leduc, so leaving it out scales an infoset's regrets by a
-        constant, which regret matching ignores.
+        reach holds both players' reach probabilities and chance the chance
+        probability of reaching state. Regrets are weighted by the opponent's
+        reach times chance, as in OpenSpiel. (The chance probability is the
+        same for every history of an infoset in Leduc, so it only scales an
+        infoset's regrets by a constant, which none of the variants' regret
+        updates depends on; but leaving it out changes the rounding, which
+        Linear CFR and DCFR amplify until their iterates visibly differ from
+        OpenSpiel's after about 150 iterations.)
         """
         if state.is_terminal():
             return state.returns()[update_player]
@@ -171,7 +179,9 @@ class CFRSolver:
         if state.is_chance_node():
             v = 0.0
             for action, prob in state.chance_outcomes():
-                v += prob * self._cfr(state.child(action), update_player, reach)
+                v += prob * self._cfr(
+                    state.child(action), update_player, reach, chance * prob
+                )
             return v
 
         current = state.current_player
@@ -185,16 +195,19 @@ class CFRSolver:
             next_reach = list(reach)
             next_reach[current] *= strategy[action]
             val = self._cfr(
-                state.child(action), update_player, (next_reach[0], next_reach[1])
+                state.child(action),
+                update_player,
+                (next_reach[0], next_reach[1]),
+                chance,
             )
             action_values[action] = val
             node_value += strategy[action] * val
 
         if current == update_player:
-            opp = 1 - current
+            cf_reach = reach[1 - current] * chance
             for action in legal:
                 regret = action_values[action] - node_value
-                self.regrets[current][infoset_key][action] += reach[opp] * regret
+                self.regrets[current][infoset_key][action] += cf_reach * regret
                 self.strategy_sum[current][infoset_key][action] += (
                     self._avg_weight * reach[current] * strategy[action]
                 )

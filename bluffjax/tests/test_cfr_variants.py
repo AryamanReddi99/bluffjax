@@ -40,7 +40,7 @@ def test_leduc_cfr_variants_match_openspiel(variant):
     expl = leduc.exploitability_from_policy_array(
         solver.average_policy_array(), leduc._KEY_TO_IDX
     )
-    assert expl == pytest.approx(OPENSPIEL_LEDUC_20[variant], abs=1e-9)
+    assert expl == pytest.approx(OPENSPIEL_LEDUC_20[variant], abs=1e-12)
 
 
 @pytest.mark.parametrize("variant", sorted(OPENSPIEL_KUHN_100))
