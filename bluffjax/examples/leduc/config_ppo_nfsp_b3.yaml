@@ -1,0 +1,12 @@
+# Leduc push, phase B3: the best 1e8 phase-B setting (B1 with the sharpened
+# reservoir target, softmax(BR logits / 0.1), gamma 1) at 1e9 env steps per
+# seed (15258 updates); exact evaluations at 0, 25, 50, 75 and 100%.
+defaults:
+  - config_ppo_nfsp_b1
+  - _self_
+
+sl_target: sharpened
+sl_target_temperature: 0.1
+num_timesteps: 1e9
+eval_interval: 3815
+job_type: leduc_ppo_nfsp_b3
