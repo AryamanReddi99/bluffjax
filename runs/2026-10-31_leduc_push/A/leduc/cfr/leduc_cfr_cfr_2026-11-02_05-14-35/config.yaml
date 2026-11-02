@@ -1,0 +1,13 @@
+iterations: 2000
+variant: cfr
+eval_interval: 100
+seed: 0
+save_dir: runs/leduc_push/A_leduc_cfr
+job_type: leduc_cfr_cfr
+wandb: true
+project: bluffjax-leduc-push
+save_checkpoints: true
+env_name: leduc_poker
+num_seeds: 1
+half_iterations: 1000
+run_dir: runs/leduc_push/A_leduc_cfr/leduc_cfr_cfr_2026-11-02_05-14-35

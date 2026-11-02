@@ -1,0 +1,25 @@
+iterations: 1000
+eval_interval: 250
+seed: 3
+num_seeds: 1
+traversals: 1500
+hidden_sizes:
+- 128
+- 128
+learning_rate: 0.001
+max_grad_norm: 1.0
+batch_size: 2048
+advantage_train_steps: 750
+policy_train_steps: 5000
+memory_capacity: 2000000
+strategy_memory_capacity: 10000000
+sd_cfr: true
+save_dir: /home/reddi/bluffjax-dev/cfr/runs/leduc_push/D_kuhn_adv750/seed3
+job_type: kuhn_deep_cfr_D_kuhn_adv750
+wandb: true
+project: bluffjax-leduc-push
+save_checkpoints: true
+output: /home/reddi/bluffjax-dev/cfr/runs/leduc_push/D_kuhn_adv750/seed3/results.json
+env_name: kuhn_poker
+half_iterations: 500
+run_dir: /home/reddi/bluffjax-dev/cfr/runs/leduc_push/D_kuhn_adv750/seed3/kuhn_deep_cfr_D_kuhn_adv750_2026-11-02_05-00-44
