@@ -10,6 +10,7 @@ leduc_br_gap.py) and the PQN-NFSP options that use it:
 - a short PQN-NFSP run with log_br_gap and br_optimizer=radam logs the gap
   metrics at exactly the evaluation points, consistent with the logged
   exploitability, and radam changes the Q-network but not the default path;
+- env_steps is counted on the host, without the int32 wrap past 2**31;
 - lr_final_frac: with anneal_lr the logged BR lr follows the linear decay to
   lr * lr_final_frac, and the default 0 is the earlier schedule.
 """
@@ -150,3 +151,10 @@ def test_pqn_nfsp_lr_floor(monkeypatch, tmp_path, floor):
         step = (r["update_step"] + 1) * per_update  # optimiser steps after the update
         frac = 1.0 - step / cfg["num_gradient_steps"]
         assert r["br_lr"] == pytest.approx(cfg["lr"] * (f + (1 - f) * frac), rel=1e-5, abs=1e-9)
+
+
+def test_env_steps_past_int32(monkeypatch, tmp_path):
+    cfg = {"num_envs": 1024, "num_steps_per_env_per_update": 64}
+    assert leduc_pqn_nfsp.env_steps_after(45775, cfg) == 45776 * 65536 > 2**31
+    _, rows = _run(monkeypatch, tmp_path)
+    assert [r["env_steps"] for r in rows] == [64 * (r["update_step"] + 1) for r in rows]

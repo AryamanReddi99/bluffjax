@@ -339,6 +339,15 @@ def reservoir_append(
     )
 
 
+def env_steps_after(update: int, config: dict) -> int:
+    """Env steps (all envs) after update `update` (from 0), as a Python int."""
+    return (
+        (int(update) + 1)
+        * int(config["num_envs"])
+        * int(config["num_steps_per_env_per_update"])
+    )
+
+
 def make_train(config: dict) -> Callable[..., RunnerState]:
     """train(rng, seed, num_updates=None): runs num_updates updates (default
     all num_update_steps; fewer stops the same run early, for tests)."""
@@ -393,7 +402,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         seed_i = int(seed_val)
         metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
         update = int(metrics["update_step"])
-        env_steps = int(metrics["env_steps"])
+        # On the host: the device counter is int32 and wraps past 2**31 steps.
+        env_steps = env_steps_after(update, config)
+        metrics["env_steps"] = env_steps
         if bool(evaluated):
             evals = {k: float(v) for k, v in metrics.items() if is_sampled_metric(k)}
             EVALUATIONS.setdefault(seed_i, []).append((env_steps, evals))
