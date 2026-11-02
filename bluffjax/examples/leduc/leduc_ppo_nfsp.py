@@ -8,7 +8,11 @@ acting player's perfect-recall information state).
 
 - Policy mixing: at the start of every hand each player independently draws
   the policy it follows for the whole hand, the BR with probability
-  anticipatory_eta and the average policy otherwise.
+  anticipatory_eta and the average policy otherwise (br_mode_scheme
+  anticipatory, the default). With br_mode_scheme learner_seat, one seat drawn
+  uniformly follows the BR for the whole hand and the other the average
+  policy: the BR then learns a best response to the average policy alone (as
+  in XFP), from about half of all decisions instead of anticipatory_eta.
 - BR learning: PPO is on-policy, so the BR actor and critic train only on
   decisions made while following the BR. Returns follow each player's own
   decisions: a decision's reward is everything the player receives until its
@@ -17,6 +21,30 @@ acting player's perfect-recall information state).
 - Average policy: every BR decision (obs, action) is added to a reservoir
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
+  sl_target chooses the action stored for a BR decision: "sampled" (default,
+  the action played, from the entropy-regularised PPO policy), "greedy" (the
+  argmax of the BR's masked logits, like NFSP's epsilon-greedy BR with epsilon
+  -> 0) or "sharpened" (a sample of softmax(masked logits /
+  sl_target_temperature)). The BR always plays and trains on the sampled
+  action; only the reservoir's target changes. An entropy-softened BR makes
+  the average policy converge to a smoothed fictitious-play fixed point
+  instead of a Nash equilibrium.
+- Entropy schedule: ent_coef, or, when ent_coef_final is set, ent_coef until
+  ent_decay_start x num_update_steps updates and then linear to
+  ent_coef_final at the last update.
+- SL learning rate (sl_anneal_lr, default false: constant sl_lr): linear
+  decay of the average policy's learning rate from sl_lr to 0 over all
+  num_update_steps x sl_num_steps_per_update SL steps; logged as sl_lr.
+- Target KL (target_kl, default null: off): as in CleanRL, the PPO epochs of
+  an update stop after the first epoch whose mean approximate KL
+  (kl_backward over its minibatches) exceeds target_kl; ppo_epochs_run logs
+  how many ran.
+- Best-response gaps (log_br_gap): at every exact evaluation, br_gap_<b>_<o>
+  is the exact best-response value against the opponent o (avg: the average
+  policy; mix: anticipatory_eta x BR + (1 - anticipatory_eta) x average, what
+  the BR trains against) minus the value of the BR network b (sampled: its
+  softmax policy; greedy: the argmax over legal actions) against it, in chips
+  per hand averaged over both seats (br_gap_values).
 - Exact evaluation, every eval_interval updates and after the last update: the
   exploitability (leduc_exploitability), the expected return per hand against
   uniformly random legal play averaged over both seats
@@ -115,6 +143,7 @@ from bluffjax.examples.run_utils import (
 )
 from bluffjax.metrics.leduc_holdem import log_metrics
 from bluffjax.networks.mlp import ActorCriticDiscreteMLP
+from bluffjax.utils.game_utils import leduc_exploitability
 from bluffjax.utils.game_utils.leduc_exploitability import (
     _INFOSET_LIST,
     _KEY_TO_IDX,
@@ -140,6 +169,7 @@ class Transition(NamedTuple):
     action_mask: BoolArray
     action: IntArray
     br_log_prob: FloatArray  # log-prob of the action under the BR (BR decisions)
+    sl_action: IntArray  # the reservoir's target for a BR decision (sl_target)
     reward: FloatArray  # (num_agents,) env reward for every player, chips
     done: BoolArray  # the hand ended at this step (the env auto-resets)
     value: FloatArray  # BR critic value of obs, chips
@@ -184,6 +214,7 @@ class PPOUpdateState(NamedTuple):
     targets: FloatArray
     train_mask: BoolArray
     rng: PRNGKeyArray
+    stopped: BoolArray = False  # target_kl reached: skip the remaining epochs
 
 
 class SLBatch(NamedTuple):
@@ -325,6 +356,85 @@ def reservoir_append(
     )
 
 
+SL_TARGETS = ("sampled", "greedy", "sharpened")
+BR_MODE_SCHEMES = ("anticipatory", "learner_seat")
+
+
+def draw_br_modes(
+    rng: PRNGKeyArray, shape: tuple[int, int], scheme: str, eta: float
+) -> BoolArray:
+    """(num_envs, num_agents) policy of every player for a new hand: True =
+    BR. anticipatory: each player independently with probability eta;
+    learner_seat: exactly one seat per hand, drawn uniformly."""
+    if scheme == "learner_seat":
+        seat = jax.random.randint(rng, shape[:-1], 0, shape[-1])
+        return jax.nn.one_hot(seat, shape[-1], dtype=jnp.bool_)
+    return jax.random.bernoulli(rng, p=eta, shape=shape)
+
+
+def greedy_policy_array(policy: np.ndarray, legal_mask: np.ndarray) -> np.ndarray:
+    """One-hot argmax over the legal actions of every row (ties to the first)."""
+    best = np.argmax(np.where(legal_mask, policy, -np.inf), axis=-1)
+    return np.eye(policy.shape[-1])[best]
+
+
+def br_gap_values(
+    avg_policy: np.ndarray, br_policy: np.ndarray, eta: float
+) -> dict[str, float]:
+    """Exact best-response gaps of the BR network, chips per hand averaged
+    over both seats (see the module docstring): br_gap_{sampled,greedy}_
+    {avg,mix} = (exact BR value - value of the BR network) against the average
+    policy (avg) or the anticipatory mixture eta x BR + (1 - eta) x average
+    (mix). Policies are (num_infosets, 3) arrays over _INFOSET_LIST."""
+    L = leduc_exploitability
+    legal = L._infoset_inputs(_INFOSET_LIST)[1]
+    root = L.initial_state()
+    players = {
+        "sampled": L._policy_from_array_callable(br_policy, _KEY_TO_IDX),
+        "greedy": L._policy_from_array_callable(
+            greedy_policy_array(br_policy, legal), _KEY_TO_IDX
+        ),
+    }
+    out = {}
+    for opp_name, opp_arr in (
+        ("avg", avg_policy),
+        ("mix", eta * br_policy + (1.0 - eta) * avg_policy),
+    ):
+        opp = L._policy_from_array_callable(opp_arr, _KEY_TO_IDX)
+        best = np.mean(
+            [L.BestResponseSolver(root, seat, opp).value(root) for seat in (0, 1)]
+        )
+        for name, pol in players.items():
+            values = []
+            for seat in (0, 1):
+
+                def profile(s, seat=seat, pol=pol):
+                    return (pol if s.current_player == seat else opp)(s)
+
+                values.append(L._state_values(root, profile)[seat])
+            out[f"br_gap_{name}_{opp_name}"] = float(best - np.mean(values))
+    return out
+
+
+def ent_coef_schedule(config: dict) -> Callable[[IntArray], FloatArray]:
+    """update_step -> entropy coefficient: ent_coef, or with ent_coef_final
+    set, ent_coef until ent_decay_start x num_update_steps updates and then
+    linear to ent_coef_final at the last update."""
+    start_coef = config["ent_coef"]
+    final_coef = config.get("ent_coef_final")
+    if final_coef is None:
+        return lambda update_step: jnp.asarray(start_coef, dtype=jnp.float32)
+    last = config["num_update_steps"] - 1
+    start = config.get("ent_decay_start", 0.5) * config["num_update_steps"]
+    span = max(last - start, 1.0)
+
+    def coef(update_step):
+        frac = jnp.clip((update_step - start) / span, 0.0, 1.0)
+        return (start_coef + frac * (final_coef - start_coef)).astype(jnp.float32)
+
+    return coef
+
+
 def make_train(config: dict) -> Callable[..., RunnerState]:
     """train(rng, seed, num_updates=None): runs num_updates updates (default
     all num_update_steps; fewer stops the same run early, for tests)."""
@@ -344,6 +454,18 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     network = ActorCriticDiscreteMLP(
         action_dim=action_dim, hidden_dim=config["fc_dim_size"]
     )
+    sl_target = config.get("sl_target", "sampled")
+    if sl_target not in SL_TARGETS:
+        raise ValueError(f"sl_target must be one of {SL_TARGETS}, got '{sl_target}'")
+    sl_temperature = config.get("sl_target_temperature", 0.1)
+    br_mode_scheme = config.get("br_mode_scheme", "anticipatory")
+    if br_mode_scheme not in BR_MODE_SCHEMES:
+        raise ValueError(
+            f"br_mode_scheme must be one of {BR_MODE_SCHEMES}, got '{br_mode_scheme}'"
+        )
+    target_kl = config.get("target_kl")
+    log_br_gap = config.get("log_br_gap", False)
+    ent_coef_at = ent_coef_schedule(config)
     eval_interval = config["eval_interval"]
     compare_enabled = config["compare"]
     compare_interval = config["compare_interval"]
@@ -354,6 +476,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
     def linear_decay(count: int) -> float:
         frac = 1.0 - count / config["num_gradient_steps"]
         return config["lr"] * frac
+
+    sl_anneal_lr = config.get("sl_anneal_lr", False)
+    num_sl_steps = config["num_update_steps"] * config["sl_num_steps_per_update"]
+
+    def sl_linear_decay(count: int) -> float:
+        return config["sl_lr"] * jnp.maximum(1.0 - count / num_sl_steps, 0.0)
 
     def logging_callback(seed_val, metric_dict, policy_arrays, evaluated) -> None:
         """Logs the metrics, those of the evaluation against random only when
@@ -389,6 +517,14 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             metrics["value_br_vs_random"] = value["br_policy"]
             metrics.update(log_metrics("game", policies["avg_policy"]))
             metrics.update(log_metrics("game_br", policies["br_policy"]))
+            if log_br_gap:
+                metrics.update(
+                    br_gap_values(
+                        policies["avg_policy"],
+                        policies["br_policy"],
+                        config["anticipatory_eta"],
+                    )
+                )
             extra = (
                 f"; value vs random average policy {value['avg_policy']:+.4f}, "
                 f"BR {value['br_policy']:+.4f}"
@@ -449,7 +585,10 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         )
         avg_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adam(learning_rate=config["sl_lr"], eps=1e-5),
+            optax.adam(
+                learning_rate=sl_linear_decay if sl_anneal_lr else config["sl_lr"],
+                eps=1e-5,
+            ),
         )
         br_train_state = TrainState.create(
             apply_fn=network.apply, params=br_params, tx=br_tx
@@ -458,10 +597,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             apply_fn=network.apply, params=avg_params, tx=avg_tx
         )
         sl_buffer = init_sl_buffer(obs.shape[-1])
-        br_mode = jax.random.bernoulli(
+        br_mode = draw_br_modes(
             rng_mode,
-            p=config["anticipatory_eta"],
-            shape=(config["num_envs"], env.num_agents),
+            (config["num_envs"], env.num_agents),
+            br_mode_scheme,
+            config["anticipatory_eta"],
         )
 
         def update_step(
@@ -496,6 +636,16 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 )
                 br_pi = distrax.Categorical(logits=br_logits_masked)
                 br_log_prob = jnp.where(is_br, br_pi.log_prob(action), 0.0)
+                # The reservoir's target for a BR decision (sl_target); the
+                # default keeps the played action and the original streams.
+                if sl_target == "greedy":
+                    sl_action = jnp.argmax(br_logits_masked, axis=-1)
+                elif sl_target == "sharpened":
+                    sl_action = distrax.Categorical(
+                        logits=br_logits_masked / sl_temperature
+                    ).sample(seed=jax.random.fold_in(rng_action, 1))
+                else:
+                    sl_action = action
 
                 rng_steps = jax.random.split(rng_step, config["num_envs"])
                 next_state, next_obs, reward, _, done, info = jax.vmap(
@@ -504,8 +654,8 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
                 # A new hand starts after done (the env auto-resets): every
                 # player draws BR (prob. anticipatory_eta) or average policy.
-                new_br_mode = jax.random.bernoulli(
-                    rng_mode, p=config["anticipatory_eta"], shape=br_mode.shape
+                new_br_mode = draw_br_modes(
+                    rng_mode, br_mode.shape, br_mode_scheme, config["anticipatory_eta"]
                 )
                 next_br_mode = jnp.where(done[:, None], new_br_mode, br_mode)
 
@@ -514,6 +664,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     action_mask=action_mask,
                     action=action,
                     br_log_prob=br_log_prob,
+                    sl_action=sl_action,
                     reward=reward,
                     done=done,
                     value=value,
@@ -558,13 +709,14 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 config["gae_lambda"],
             )
             train_mask = valid & transitions.is_br
+            ent_coef = ent_coef_at(runner_state.update_step)
 
             # NFSP: every BR decision goes to the reservoir.
             sl_buffer = reservoir_append(
                 sl_buffer,
                 transitions.obs.reshape(-1, transitions.obs.shape[-1]),
                 transitions.action_mask.reshape(-1, action_dim),
-                transitions.action.reshape(-1),
+                transitions.sl_action.reshape(-1),
                 transitions.is_br.reshape(-1),
                 rng_sl_append,
             )
@@ -651,7 +803,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                         total_loss = (
                             loss_actor
                             + config["vf_coef"] * value_loss
-                            - config["ent_coef"] * entropy
+                            - ent_coef * entropy
                         )
 
                         kl_backward = masked_mean((ratio - 1) - logratio, mask)
@@ -691,6 +843,18 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 final_train_state, batch_stats = lax.scan(
                     update_minibatch, ppo_state.train_state, minibatches
                 )
+                stopped = ppo_state.stopped
+                if target_kl is not None:
+                    # An epoch after the target KL was reached changes nothing.
+                    final_train_state = jax.tree_util.tree_map(
+                        lambda new, old: jnp.where(ppo_state.stopped, old, new),
+                        final_train_state,
+                        ppo_state.train_state,
+                    )
+                    batch_stats["epoch_ran"] = jnp.broadcast_to(
+                        ~ppo_state.stopped, batch_stats["kl_backward"].shape
+                    ).astype(jnp.float32)
+                    stopped = stopped | (batch_stats["kl_backward"].mean() > target_kl)
                 ppo_state = PPOUpdateState(
                     train_state=final_train_state,
                     transitions=ppo_state.transitions,
@@ -698,6 +862,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     targets=ppo_state.targets,
                     train_mask=ppo_state.train_mask,
                     rng=rng,
+                    stopped=stopped,
                 )
                 return ppo_state, batch_stats
 
@@ -708,12 +873,25 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 targets=targets,
                 train_mask=train_mask,
                 rng=rng_ppo_update,
+                stopped=jnp.array(False),
             )
             final_ppo_state, ppo_loss_info = lax.scan(
                 update_ppo_epoch, ppo_state, None, config["num_epochs"]
             )
             br_train_state = final_ppo_state.train_state
-            ppo_loss_info = jax.tree_util.tree_map(lambda x: x.mean(), ppo_loss_info)
+            if target_kl is None:
+                ppo_loss_info = jax.tree_util.tree_map(
+                    lambda x: x.mean(), ppo_loss_info
+                )
+            else:
+                # statistics of the epochs that ran
+                ran = ppo_loss_info.pop("epoch_ran")
+                ppo_loss_info = jax.tree_util.tree_map(
+                    lambda x: jnp.where(ran > 0, x, 0.0).sum()
+                    / jnp.maximum(ran.sum(), 1.0),
+                    ppo_loss_info,
+                )
+                ppo_loss_info["ppo_epochs_run"] = ran[:, 0].sum()
 
             def update_sl_step(
                 sl_state: SLUpdateState, unused: None
@@ -789,9 +967,22 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "return_per_episode_br": (transitions.reward * br_hands).sum()
                 / jnp.maximum(br_hands.sum(), 1),
                 "br_action_frac_rollout": transitions.is_br.mean(),
+                "ent_coef": ent_coef,
+                # BR decisions whose reservoir target differs from the action
+                # played (0 with sl_target sampled)
+                "sl_target_differs_frac": (
+                    (transitions.sl_action != transitions.action) & transitions.is_br
+                ).sum()
+                / jnp.maximum(transitions.is_br.sum(), 1),
                 "ppo_sample_frac": train_mask.mean(),
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
                 "sl_buffer_seen": sl_buffer.seen.astype(jnp.float32),
+                # learning rate of the next SL step
+                "sl_lr": (
+                    sl_linear_decay(avg_train_state.step)
+                    if sl_anneal_lr
+                    else jnp.asarray(config["sl_lr"])
+                ),
                 "br_lr": (
                     linear_decay(br_train_state.step)
                     if config["anneal_lr"]

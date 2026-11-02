@@ -1,0 +1,12 @@
+# Leduc push, combined best PPO-NFSP setting: B3 (sharpened reservoir target,
+# softmax(BR logits / 0.1), gamma 1, 1e9 env steps) with the faster best
+# response of the follow-up screens: lr 1e-3 and 8 PPO epochs with a target-KL
+# early stop at 0.015.
+defaults:
+  - config_ppo_nfsp_b3
+  - _self_
+
+lr: 1e-3
+num_epochs: 8
+target_kl: 0.015
+job_type: leduc_ppo_nfsp_best

@@ -1,0 +1,12 @@
+# Leduc push, phase B1: PPO-NFSP with the greedy BR action as the reservoir
+# target (sl_target), gamma 1, and the exact best-response gaps logged. Exact
+# evaluations at 0, 25, 50, 75 and 100% of the 1525 updates (eval_interval 381).
+defaults:
+  - config_ppo_nfsp
+  - _self_
+
+sl_target: greedy
+gamma: 1.0
+log_br_gap: true
+eval_interval: 381
+job_type: leduc_ppo_nfsp_b1

@@ -1,0 +1,10 @@
+# Leduc push, phase B2: B1 (greedy reservoir target, gamma 1) with the entropy
+# coefficient decaying linearly from 0.1 to 0.01 over the second half of the run.
+defaults:
+  - config_ppo_nfsp_b1
+  - _self_
+
+ent_coef: 0.1
+ent_coef_final: 0.01
+ent_decay_start: 0.5
+job_type: leduc_ppo_nfsp_b2

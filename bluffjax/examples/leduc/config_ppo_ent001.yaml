@@ -1,0 +1,10 @@
+# Leduc push: the self-play PPO baseline with ent_coef 0.01 (the CleanRL /
+# PureJaxRL discrete default) instead of 0; exact evaluations at 0, 25, 50, 75
+# and 100% of the 1525 updates.
+defaults:
+  - config_ppo
+  - _self_
+
+ent_coef: 0.01
+eval_interval: 381
+job_type: leduc_ppo_ent001
