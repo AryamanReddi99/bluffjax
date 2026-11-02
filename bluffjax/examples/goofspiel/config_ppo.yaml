@@ -1,0 +1,56 @@
+# Self-play PPO for Goofspiel (goofspiel_ppo.py). 1e8 env samples per seed
+# (1525 updates of 1024 envs x 64 steps), 5 seeds.
+num_timesteps: 1e8
+num_envs: 1024
+num_steps_per_env_per_update: 64
+num_epochs: 4
+num_minibatches: 4
+
+# Defaults: the Kuhn/Leduc self-play PPO settings (bluffjax/examples/leduc/config_ppo.yaml)
+lr: 2.5e-4
+lr_final_frac: 0.0  # linear decay to lr * lr_final_frac over all gradient steps (1.0: constant)
+gamma: 0.99
+gae_lambda: 0.95
+clip_eps: 0.2
+vf_clip: 4.0  # 0.2 x the std of a game's return under random play (reward units)
+ent_coef: 0.0
+ent_final_frac: 1.0  # entropy coefficient decays linearly to ent_coef * ent_final_frac (1.0: constant)
+vf_coef: 1.0
+max_grad_norm: 0.5
+fc_dim_size: 128
+
+# Grid of scalar hyperparameters trained together (vmapped), e.g.
+# sweep="{lr: [1e-4, 3e-4], ent_coef: [0.0, 0.01]}" on the command line; see the
+# script docstring
+sweep: null
+
+env_name: goofspiel
+seed: 0
+num_seeds: 5
+env_kwargs:
+  num_agents: 2
+  num_cards: 13  # N; 3..6 have an exact exploitability
+
+# Exact evaluation (two players, num_cards <= 6): exploitability and exact
+# value against random of the policy every exact_eval_interval updates and
+# after the last one (0 turns it off)
+exact_eval_interval: 10
+
+# Evaluation against uniformly random bids (*_vs_random), every
+# compare_interval updates and after the last one
+compare: true
+compare_episodes: 10
+compare_interval: 1
+
+project: bluffjax
+job_type: goofspiel_ppo
+wandb: false
+
+save_checkpoints: true
+save_dir: ${repo_root:}/checkpoints/goofspiel
+
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
