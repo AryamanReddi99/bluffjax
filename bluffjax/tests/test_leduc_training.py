@@ -132,6 +132,10 @@ def _run_hydra_main(mod, monkeypatch, tmp_path, name):
             "sl_reservoir_capacity=64", "sl_batch_size=8", "sl_num_steps_per_update=2",
             "sl_lr=1e-3", "anticipatory_eta=0.1",
         ]
+    if name == "leduc_pqn_nfsp":
+        # Leduc's config uses RAdam, whose warm-up barely moves the networks in
+        # a run of 6 updates; Adam keeps the half and full checkpoints apart.
+        overrides += ["br_optimizer=adam"]
     monkeypatch.setattr(sys, "argv", [f"{name}.py", *overrides])
     mod.main()
     jax.effects_barrier()
@@ -367,7 +371,7 @@ def test_cfr_flags_config_and_wandb(monkeypatch, tmp_path, name):
     assert defaults["job_type"] == name and defaults["project"] == "bluffjax"
     assert defaults["seed"] == 0 and defaults["wandb"] is False
     assert defaults["save_checkpoints"] is True
-    assert (defaults["iterations"], defaults["eval_interval"]) == ((50, 5) if deep else (100, 10))
+    assert (defaults["iterations"], defaults["eval_interval"]) == ((1000, 250) if deep else (2000, 100))
     assert defaults["save_dir"].endswith(os.path.join("checkpoints", "leduc"))
     assert mod.parse_args(["--wandb"]).wandb and not mod.parse_args(["--no-wandb"]).wandb
     runs = []
@@ -396,6 +400,9 @@ DEEP_CFR_ARGS = [
     "--traversals", "5", "--eval_interval", "3", "--policy_train_steps", "20",
     "--advantage_train_steps", "10", "--batch_size", "16", "--memory_capacity", "500",
     "--hidden_sizes", "8", "8", "--save_checkpoints",
+    # without SD-CFR and with the strategy memory as large as the advantage
+    # memories (the defaults are the Leduc push's full scale)
+    "--no-sd_cfr", "--strategy_memory_capacity", "500",
 ]
 
 

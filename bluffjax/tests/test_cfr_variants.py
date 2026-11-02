@@ -150,8 +150,12 @@ def test_deep_cfr_sd_cfr_run(tmp_path, game):
         "kuhn": (kuhn_deep_cfr, kuhn_cfr),
         "leduc": (leduc_deep_cfr, leduc_cfr),
     }[game]
-    base = mod.parse_args(SMALL_DEEP_CFR)
-    assert not base.sd_cfr and base.strategy_memory_capacity is None
+    defaults = mod.parse_args([])  # the Leduc push's best settings
+    assert defaults.sd_cfr and defaults.strategy_memory_capacity == 10_000_000
+    # A small run without SD-CFR and with the strategy memory as large as the
+    # advantage memories (the behaviour of strategy_memory_capacity None).
+    base = mod.parse_args(SMALL_DEEP_CFR + ["--no-sd_cfr", "--strategy_memory_capacity", "500"])
+    assert not base.sd_cfr
     plain = mod.run_deep_cfr(base, 0)
     args = mod.parse_args(
         SMALL_DEEP_CFR
@@ -161,7 +165,7 @@ def test_deep_cfr_sd_cfr_run(tmp_path, game):
     assert solver._strategy_memory.capacity == 700
     assert solver._advantage_memories[0].capacity == 500
     run_dir = mod.run(args)
-    sd_args = mod.parse_args(SMALL_DEEP_CFR + ["--sd_cfr"])
+    sd_args = mod.parse_args(SMALL_DEEP_CFR + ["--sd_cfr", "--strategy_memory_capacity", "500"])
     with_sd = mod.run_deep_cfr(sd_args, 0)
     assert with_sd["exploitability"] == plain["exploitability"]
     assert len(with_sd["sd_cfr_exploitability"]) == len(with_sd["exploitability"])

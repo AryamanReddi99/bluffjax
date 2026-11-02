@@ -677,6 +677,12 @@ def make_train(
     # there on every CFR iteration of self play.
     leaf_nodes = tuple(int(n) for n in np.nonzero(structure.leaf.any(axis=0))[0])
     num_iterations = config["cfr_iters"]
+    # The test-time policy may use more CFR iterations than self play (its
+    # exploitability falls with the iteration count, the trained network
+    # unchanged), at a chosen matmul precision (None: JAX's default, TF32 on
+    # Ampere GPUs, which moves the exploitability by about 1e-3).
+    eval_iterations = config.get("eval_cfr_iters") or num_iterations
+    eval_precision = config.get("eval_matmul_precision")
     num_subgames = config["num_subgames_per_update"]
     capacity = config["replay_capacity"]
     batch_size = config["batch_size"]
@@ -813,9 +819,10 @@ def make_train(
                 "replay_size": runner_state.replay_buffer.size,
                 "root_value_p0": jnp.mean(root_values[0]),
             }
-            policy = test_time_policy(
-                network_value_fn(network, params), structure, num_iterations
-            )
+            with jax.default_matmul_precision(eval_precision):
+                policy = test_time_policy(
+                    network_value_fn(network, params), structure, eval_iterations
+                )
 
             def logging_callback(exp_id, metrics, policy):
                 log_dict = {k: np.array(v) for k, v in metrics.items()}

@@ -1,6 +1,6 @@
-num_update_steps: 4000
+num_update_steps: 16000
 num_games: 256  # self-play hands per update; each reaching round 2 adds one example
-cfr_iters: 512  # Linear CFR-D iterations per subgame in self play
+cfr_iters: 1024  # 31 Oct push long run: 0.0174 ± 0.0021
 eval_cfr_iters: 1024  # CFR iterations per subgame of the evaluated test-time policy (null: cfr_iters)
 eval_matmul_precision: highest  # jax.default_matmul_precision of the test-time policy
 value_target: iterates  # round-2 training targets: iterates (paper / released code) or average_policy (see solve_round)
@@ -13,7 +13,7 @@ max_grad_norm: 5.0
 replay_capacity: 500000  # targets are exact round-2 values, so old examples stay valid
 batch_size: 512
 num_value_train_steps: 4  # minibatches per update
-eval_interval: 1000  # updates between exact evaluations (the first before training); divides num_update_steps
+eval_interval: 4000  # updates between exact evaluations (the first before training); divides num_update_steps
 # run directory {save_dir}/{job_type}_{timestamp}/ with config.yaml,
 # results.jsonl, curves.json and the half/ and full/ value networks (see the
 # script docstring)
