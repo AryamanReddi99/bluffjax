@@ -32,6 +32,9 @@ acting player's perfect-recall information state).
 - Entropy schedule: ent_coef, or, when ent_coef_final is set, ent_coef until
   ent_decay_start x num_update_steps updates and then linear to
   ent_coef_final at the last update.
+- SL learning rate (sl_anneal_lr, default false: constant sl_lr): linear
+  decay of the average policy's learning rate from sl_lr to 0 over all
+  num_update_steps x sl_num_steps_per_update SL steps; logged as sl_lr.
 - Target KL (target_kl, default null: off): as in CleanRL, the PPO epochs of
   an update stop after the first epoch whose mean approximate KL
   (kl_backward over its minibatches) exceeds target_kl; ppo_epochs_run logs
@@ -474,6 +477,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         frac = 1.0 - count / config["num_gradient_steps"]
         return config["lr"] * frac
 
+    sl_anneal_lr = config.get("sl_anneal_lr", False)
+    num_sl_steps = config["num_update_steps"] * config["sl_num_steps_per_update"]
+
+    def sl_linear_decay(count: int) -> float:
+        return config["sl_lr"] * jnp.maximum(1.0 - count / num_sl_steps, 0.0)
+
     def logging_callback(seed_val, metric_dict, policy_arrays, evaluated) -> None:
         """Logs the metrics, those of the evaluation against random only when
         it ran; computes the exact exploitability, value against random and
@@ -576,7 +585,10 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         )
         avg_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adam(learning_rate=config["sl_lr"], eps=1e-5),
+            optax.adam(
+                learning_rate=sl_linear_decay if sl_anneal_lr else config["sl_lr"],
+                eps=1e-5,
+            ),
         )
         br_train_state = TrainState.create(
             apply_fn=network.apply, params=br_params, tx=br_tx
@@ -965,6 +977,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "ppo_sample_frac": train_mask.mean(),
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
                 "sl_buffer_seen": sl_buffer.seen.astype(jnp.float32),
+                # learning rate of the next SL step
+                "sl_lr": (
+                    sl_linear_decay(avg_train_state.step)
+                    if sl_anneal_lr
+                    else jnp.asarray(config["sl_lr"])
+                ),
                 "br_lr": (
                     linear_decay(br_train_state.step)
                     if config["anneal_lr"]

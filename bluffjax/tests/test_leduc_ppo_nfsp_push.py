@@ -177,3 +177,28 @@ def test_target_kl(monkeypatch, tmp_path, target_kl, epochs_run):
     else:
         assert [r["ppo_epochs_run"] for r in rows] == [epochs_run] * 2
         assert all(np.isfinite(r["kl_backward"]) for r in rows)
+
+
+@pytest.mark.parametrize("anneal", [False, True])
+def test_sl_lr_anneal(monkeypatch, tmp_path, anneal):
+    """sl_anneal_lr: the average policy's learning rate decays linearly from
+    sl_lr to 0 over all num_update_steps x sl_num_steps_per_update SL steps
+    (logged sl_lr = the next step's rate); off, it is the constant sl_lr."""
+    config = _config(sl_anneal_lr=anneal, sl_lr=1e-3, sl_num_steps_per_update=4)
+    state = _train(monkeypatch, tmp_path, config, num_updates=3)
+    total = config["num_update_steps"] * config["sl_num_steps_per_update"]
+    assert int(state.avg_train_state.step) == total
+    rows = read_results(str(tmp_path))
+    want = [1e-3 * (1 - 4 * (u + 1) / total) if anneal else 1e-3 for u in range(3)]
+    assert [r["sl_lr"] for r in rows] == pytest.approx(want, abs=1e-9)
+    if anneal:  # the last SL step used rate 1e-3 / total, not 1e-3
+        (tmp_path / "c").mkdir()
+        constant = _train(
+            monkeypatch, tmp_path / "c",
+            _config(sl_lr=1e-3, sl_num_steps_per_update=4), num_updates=3,
+        )
+        diff = jax.tree_util.tree_map(
+            lambda a, b: float(jnp.abs(a - b).max()),
+            state.avg_train_state.params, constant.avg_train_state.params,
+        )
+        assert max(jax.tree_util.tree_leaves(diff)) > 1e-6
