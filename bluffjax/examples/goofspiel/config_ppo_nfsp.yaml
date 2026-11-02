@@ -34,6 +34,12 @@ seed: 0
 num_seeds: 5
 env_kwargs:
   num_agents: 2
+  num_cards: 13  # N, the cards per hand and prizes; 3..6 have an exact exploitability
+
+# Exact evaluation (two players, num_cards <= 6; else ignored): exploitability
+# and exact value against random of the average policy and the BR, every
+# exact_eval_interval updates and after the last one (0 turns it off)
+exact_eval_interval: 10
 
 # comparison: win/loss/draw rates and return of the average and best-response
 # policies in compare_episodes games against the opponent, the learner in one

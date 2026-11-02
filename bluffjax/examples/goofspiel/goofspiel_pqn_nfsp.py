@@ -22,7 +22,7 @@ game.
   one-step Q-learning targets (see
   parallel_nfsp_common.per_agent_q_lambda_targets).
 - Truncation: a game the env cuts off without ending it (done without
-  absorbing; Goofspiel always ends after 13 rounds, so this doesn't happen
+  absorbing; Goofspiel always ends after N rounds, so this doesn't happen
   with the current env) would not be treated as terminal: the decisions at
   the cut have no known outcome and are left out of the loss.
 - Average policy: every BR decision (obs, action) is added to a reservoir
@@ -42,8 +42,16 @@ game.
   average policy's softmax, or the BR's epsilon-greedy distribution (with
   the epsilon of the update). The per-game part (Spearman) is carried across
   updates in the runner state.
+- Exact evaluation (two players and env_kwargs.num_cards N <= 6, see
+  bluffjax/utils/game_utils/goofspiel_exploitability.py): every
+  exact_eval_interval updates and after the last one, exploitability
+  (NashConv / 2, exact over every decision state) of the average policy and
+  of the BR (exploitability_br; the BR's greedy policy, ties to the lowest card), and their exact
+  expected returns against uniformly random bids (value_vs_random,
+  value_br_vs_random: the expectations of avg_return_vs_random and
+  avg_return_br_vs_random). In points of the point difference.
 
-Units: the env pays each round's prize value (1-13) to its winner and
+Units: the env pays each round's prize value (1-N) to its winner and
 -value / (num_agents - 1) to every other player, so a game's return is the
 player's points minus the opponents' mean points (with two players the point
 difference). Logged returns are in these units.
@@ -62,10 +70,10 @@ Run directory, {save_dir}/{job_type}_{timestamp}/, made when the run starts
                                  schedules span the whole run)
 Every checkpoint file holds flax params without a seed axis; the input is one
 player's observation (env.obs_from_state(state)[p], env.obs_dim floats):
-    avg_policy: ActorDiscreteMLP(action_dim=13, hidden_dim=fc_dim_size) ->
-        logits over the 13 cards to bid;
-    br: QNetworkDiscreteMLP(action_dim=13, hidden_dim=fc_dim_size) ->
-        Q-values of the 13 bids in env reward units (the BR's policy is the argmax over the cards in hand).
+    avg_policy: ActorDiscreteMLP(action_dim=N, hidden_dim=fc_dim_size) ->
+        logits over the N cards to bid;
+    br: QNetworkDiscreteMLP(action_dim=N, hidden_dim=fc_dim_size) ->
+        Q-values of the N bids in env reward units (the BR's policy is the argmax over the cards in hand).
 Mask the cards no longer in hand (env.get_avail_actions(state)[p]) before the
 softmax or argmax. Load a file with run_utils.load_params(path,
 network.init(rng, obs)), or both networks of a seed with
@@ -107,6 +115,7 @@ from bluffjax.examples.parallel_nfsp_common import (
     log_update,
     per_agent_q_lambda_targets,
     print_final_evals,
+    print_final_exact,
     reservoir_append,
     sample_logits,
     sample_random_legal,
@@ -126,12 +135,15 @@ from bluffjax.networks.mlp import (
     QNetworkDiscreteMLP,
 )
 from bluffjax.utils.jax_utils import pytree_norm
+from bluffjax.utils.game_utils import goofspiel_exploitability as GE
 from bluffjax.utils.paths import REPO_ROOT, register_resolvers
 
 # results.jsonl of the run and its wandb runs (one per vmapped seed), made in main()
 RESULTS_LOG: ResultsLog | None = None
 # EVALS[seed] = [(env_steps, {metric: value}), ...]
 EVALS: dict[int, list[tuple[int, dict[str, float]]]] = {}
+# EXACT[seed] = [(env_steps, {exact metric: value}), ...]
+EXACT: dict[int, list[tuple[int, dict[str, float]]]] = {}
 
 
 class Transition(NamedTuple):
@@ -287,10 +299,16 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         return metrics
 
     def train(
-        rng: PRNGKeyArray, seed: int, num_updates: int | None = None
+        rng: PRNGKeyArray,
+        seed: int,
+        num_updates: int | None = None,
+        exact_tables: GE.DeviceTables | None = None,
     ) -> RunnerState:
         """Runs num_updates updates (default: all of them) of one seed. The
-        schedules always span config["num_update_steps"] updates."""
+        schedules always span config["num_update_steps"] updates. With
+        exact_tables (GE.tables_for_training; an argument, not a closure, as
+        they are large) the exact metrics are computed every
+        exact_eval_interval updates and after the last one."""
         rng, rng_reset, rng_br_init, rng_avg_init, rng_mode = jax.random.split(rng, 5)
         state, obs = jax.vmap(env.reset)(jax.random.split(rng_reset, num_envs))
 
@@ -657,6 +675,31 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
             metric.update(pqn_loss_info)
             metric.update(sl_loss_info)
 
+            # Exact exploitability and value against random (small games).
+            if exact_tables is not None:
+                should_exact = (
+                    runner_state.update_step % config["exact_eval_interval"] == 0
+                ) | (runner_state.update_step == config["num_update_steps"] - 1)
+                metric["exact_evaluated"] = should_exact
+                metric.update(GE.maybe_exact_metrics(
+                    exact_tables,
+                    should_exact,
+                    lambda t: GE.policy_probs(
+                        GE.apply_in_chunks(
+                            lambda o: avg_network.apply(avg_train_state.params, o),
+                            t.obs,
+                        ),
+                        t.legal,
+                    ),
+                    lambda t: GE.greedy_probs(
+                        GE.apply_in_chunks(
+                            lambda o: br_network.apply(br_train_state.params, o),
+                            t.obs,
+                        ),
+                        t.legal,
+                    ),
+                ))
+
             # Game metrics of this rollout, credited to the players they
             # describe: game/ for the players following the average policy
             # (NFSP's output strategy) in that game, game_br/ for those
@@ -717,7 +760,9 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
 
 
 def logging_callback(seed_val, metric_dict, config) -> None:
-    log_update(RESULTS_LOG, EVALS, seed_val, metric_dict, config)
+    log_update(
+        RESULTS_LOG, EVALS, seed_val, metric_dict, config, EXACT, GE.EXACT_KEYS
+    )
 
 
 @hydra.main(version_base=None, config_path="./", config_name="config_pqn_nfsp")
@@ -773,12 +818,34 @@ def main(config: dict) -> None:
 
         print("Starting compile...")
         start = time.time()
-        train_vjit = jax.jit(jax.vmap(train)).lower(rng_seeds, exp_ids).compile()
+        exact_tables = GE.tables_for_training(
+            config, make("goofspiel", **config["env_kwargs"])
+        )
+        print(
+            "Exact exploitability: "
+            + (
+                f"{len(exact_tables.swap)} decision states, every "
+                f"{config['exact_eval_interval']} updates"
+                if exact_tables is not None
+                else "off"
+            )
+        )
+        train_vjit = (
+            jax.jit(
+                jax.vmap(
+                    lambda r, s, t: train(r, s, exact_tables=t), in_axes=(0, 0, None)
+                )
+            )
+            .lower(rng_seeds, exp_ids, exact_tables)
+            .compile()
+        )
         print(f"Compile finished in {time.time() - start:.1f} s")
 
         print("Running...")
         start = time.time()
-        final_runner_state = jax.block_until_ready(train_vjit(rng_seeds, exp_ids))
+        final_runner_state = jax.block_until_ready(
+            train_vjit(rng_seeds, exp_ids, exact_tables)
+        )
         jax.effects_barrier()  # every update's record is in results.jsonl
         run_time = time.time() - start
         print(
@@ -787,6 +854,7 @@ def main(config: dict) -> None:
             f"steps, all seeds in parallel)"
         )
         print_final_evals(EVALS)
+        print_final_exact(EXACT)
         if config["save_checkpoints"]:
             save_checkpoints(
                 run_dir,

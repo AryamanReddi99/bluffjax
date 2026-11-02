@@ -74,7 +74,7 @@ Click a game to play it.
 | Texas No-Limit Hold'em | `texas_nolimit_holdem` | 2–10 | 74+n | 5 | AEC | chips/hand |
 | 5-Card Draw 🆕 | `five_card_draw` | 2–10 | 67+7n | 37 | AEC | chips/hand |
 | 7-Card Stud 🆕 | `seven_card_stud` | 2–10 | 76+262n | 4 | AEC | chips/hand |
-| Goofspiel | `goofspiel` | ≥2 | 13(n+2)+n | 13 | Parallel | win rate |
+| Goofspiel | `goofspiel` | ≥2 | N(n+2)+n | N (13; `num_cards`) | Parallel | win rate; exploitability for n = 2, N ≤ 6 |
 | Bluff 🆕 | `bluff` | ≥2 | 270+54n | 13 | AEC | win rate |
 | Werewolf 🆕 | `werewolf` | ≥3, more humans than werewolves | 7+6n | n+1 | AEC | win rate |
 | Kemps 🆕 | `kemps` | 4, 6, 8, … | 104+n·c | (170+n/2)·c | Parallel | win rate |
@@ -235,7 +235,7 @@ uv run --extra baselines python bluffjax/examples/kuhn/kuhn_ppo_nfsp.py    # PPO
 
 `--extra baselines` adds the training dependencies: `distrax`, `optax`, `chex`, `hydra-core` and `wandb`. Each training script reads its `config_*.yaml` through Hydra, so you can override any key on the command line. A script trains `num_seeds` seeds in parallel on one GPU with `jax.vmap`. Add `wandb=true` to log them to [Weights & Biases](https://wandb.ai), one run per seed, grouped by job. Set `WANDB_MODE=offline` to keep the runs local. Wherever you launch from, scripts that save checkpoints write them to `checkpoints/<game>/`, and Hydra writes its config and log to `outputs/`, both at the repo root and gitignored.
 
-On the solved games, exploitability is measured exactly. The uniform random policy scores 0.4583 on Kuhn and 2.3736 on Leduc, matching OpenSpiel.
+On the solved games, exploitability is measured exactly. The uniform random policy scores 0.4583 on Kuhn and 2.3736 on Leduc, matching OpenSpiel. Two-player Goofspiel with `num_cards` N ≤ 6 also has an exact exploitability (in points, over every public state: 150 to 632,420 of them for N = 3 to 6), where uniform play scores (N² − 1) / 6.
 
 <table>
   <tr>

@@ -1,11 +1,14 @@
 """
 Goofspiel (Game of Pure Strategy) environment.
 
-A simultaneous-move bidding card game. Each player holds the cards 1-13, and a
-shuffled prize deck of the cards 1-13 is revealed one card per round. Every
+A simultaneous-move bidding card game. Each player holds the cards 1-N, and a
+shuffled prize deck of the cards 1-N is revealed one card per round. Every
 round all players bid one card from their hand at the same time; the unique
 highest bid wins the prize, worth its face value, and a tie for the highest
-bid discards the prize. Bid cards are used up. The game ends after 13 rounds.
+bid discards the prize. Bid cards are used up. The game ends after N rounds.
+N is num_cards, 13 by default (the full game). The small two-player games
+(N = 3..6) have an exact exploitability
+(bluffjax/utils/game_utils/goofspiel_exploitability.py).
 
 Rewards are zero-sum: each round the winner gets the prize value and every
 other player loses value / (n - 1) (with two players, -value). A player's
@@ -34,11 +37,11 @@ from bluffjax.environments.spaces import Discrete
 
 @struct.dataclass
 class GoofspielState:
-    """Goofspiel game state. Card or prize c (0..12) has value c + 1."""
+    """Goofspiel game state. Card or prize c (0..N-1) has value c + 1."""
 
-    player_hands: BoolArray  # (num_agents, 13) True while the card is in hand
-    deck: IntArray  # (13,) prizes in order of revelation
-    current_round: IntArray  # number of prizes already contested, 0..13
+    player_hands: BoolArray  # (num_agents, N) True while the card is in hand
+    deck: IntArray  # (N,) prizes in order of revelation
+    current_round: IntArray  # number of prizes already contested, 0..N
     points: FloatArray  # (num_agents,) cumulative prize points
     winners: BoolArray  # (num_agents,) at the end, True for the unique top scorer
     absorbing: BoolArray  # (num_agents,)
@@ -49,11 +52,20 @@ class GoofspielState:
 class Goofspiel(ParallelEnv):
     """Goofspiel parallel environment."""
 
-    def __init__(self, num_agents: int = 2, horizon: int = 14) -> None:
-        super().__init__(num_agents=num_agents, horizon=horizon)
+    def __init__(
+        self, num_agents: int = 2, num_cards: int = 13, horizon: int | None = None
+    ) -> None:
+        """num_cards: N, the cards in every hand and in the prize deck. horizon
+        defaults to N + 1: a game always lasts N steps and is never cut off."""
         if num_agents < 2:
             raise ValueError(f"Goofspiel needs at least 2 players, got {num_agents}")
-        self.deck_size = 13
+        if num_cards < 1:
+            raise ValueError(f"Goofspiel needs at least 1 card, got {num_cards}")
+        super().__init__(
+            num_agents=num_agents,
+            horizon=num_cards + 1 if horizon is None else horizon,
+        )
+        self.deck_size = num_cards
         self.total_points = self.deck_size * (self.deck_size + 1) / 2
         self.obs_dim = self.deck_size * (num_agents + 2) + num_agents
         self.num_actions = self.deck_size
@@ -62,11 +74,12 @@ class Goofspiel(ParallelEnv):
     def obs_from_state(self, state: GoofspielState) -> FloatArray:
         """
         Observation per agent: (num_agents, obs_dim), relative to the observer.
-        - Current prize card: one-hot (13), all zeros once the game is over
-        - Prize cards already contested: binary (13)
-        - Cards already bid: binary (num_agents, 13), row j is the player j
+        - Current prize card: one-hot (N), all zeros once the game is over
+        - Prize cards already contested: binary (N)
+        - Cards already bid: binary (num_agents, N), row j is the player j
           seats after the observer (row 0 is the observer)
-        - Points: (num_agents,), same order, divided by the 91 points in the deck
+        - Points: (num_agents,), same order, divided by the N (N + 1) / 2
+          points in the deck (91 with 13 cards)
         """
         in_play = state.current_round < self.deck_size
         prize = jax.nn.one_hot(
@@ -86,7 +99,7 @@ class Goofspiel(ParallelEnv):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_avail_actions(self, state: GoofspielState) -> BoolArray:
-        """Available actions: (num_agents, 13), True if the card is in hand."""
+        """Available actions: (num_agents, N), True if the card is in hand."""
         return state.player_hands & ~state.done
 
     @partial(jax.jit, static_argnums=(0,))
@@ -151,9 +164,10 @@ class Goofspiel(ParallelEnv):
         return next_state, self.obs_from_state(next_state), rewards, new_absorbing, game_done, info
 
     def observation_space(self) -> Discrete:
-        """Observation space: obs_dim floats per agent (54 with two players)."""
+        """Observation space: obs_dim = N (num_agents + 2) + num_agents floats
+        per agent (54 with two players and 13 cards)."""
         return Discrete(self.obs_dim)
 
     def action_space(self) -> Discrete:
-        """Action space: 13 discrete choices per agent (the card to bid)."""
+        """Action space: N discrete choices per agent (the card to bid)."""
         return Discrete(self.num_actions)

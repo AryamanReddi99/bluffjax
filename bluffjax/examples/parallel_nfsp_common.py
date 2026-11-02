@@ -569,20 +569,40 @@ def log_update(
     seed_val,
     metric_dict: dict,
     config: dict,
+    exact_by_seed: dict | None = None,
+    exact_keys: tuple[str, ...] = (),
 ) -> None:
     """Logs the metrics of one update of one seed to wandb and results.jsonl.
 
     metric_dict["evaluated"] says whether the evaluation metrics (keys with
     "_vs_") were computed in this update; they are logged, printed and kept in
     evals_by_seed[seed] = [(env_steps, {metric: value}), ...] only then.
+
+    Exact metrics (exact_keys, e.g. Goofspiel's exploitability, see
+    goofspiel_exploitability.EXACT_KEYS) are logged and printed only when
+    metric_dict["exact_evaluated"], and kept in exact_by_seed the same way.
     """
     seed = int(seed_val)
     metrics = {k: np.asarray(v) for k, v in metric_dict.items()}
     # On the host: the device counter is int32 and wraps past 2**31 steps.
     env_steps = env_steps_after(metrics["update_step"], config)
     metrics["env_steps"] = env_steps
+    exact_present = [k for k in exact_keys if k in metrics]
+    if bool(metrics.pop("exact_evaluated", False)):
+        exact = {k: float(metrics[k]) for k in exact_present}
+        if exact_by_seed is not None:
+            exact_by_seed.setdefault(seed, []).append((env_steps, exact))
+        print(
+            f"seed {seed} update {int(metrics['update_step'])} "
+            f"({env_steps} env steps): exact "
+            + ", ".join(f"{k} {v:+.4f}" for k, v in exact.items()),
+            flush=True,
+        )
+    else:
+        for k in exact_present:
+            del metrics[k]
     evaluated = bool(metrics.pop("evaluated"))
-    eval_keys = [k for k in metrics if "_vs_" in k]
+    eval_keys = [k for k in metrics if "_vs_" in k and k not in exact_keys]
     if evaluated:
         evals = {k: float(metrics[k]) for k in eval_keys}
         evals_by_seed.setdefault(seed, []).append((env_steps, evals))
@@ -611,6 +631,20 @@ def format_eval(evals: dict[str, float]) -> str:
         f"length {evals[f'avg_episode_length_{name}']:.1f}"
         for name in names
     )
+
+
+def print_final_exact(exact_by_seed: dict) -> None:
+    """The last exact evaluation of every seed and the mean and std over
+    seeds."""
+    if not exact_by_seed:
+        return
+    finals = [exact_by_seed[s][-1][1] for s in sorted(exact_by_seed)]
+    for key in finals[0]:
+        values = [f[key] for f in finals]
+        print(
+            f"final {key}: mean {np.mean(values):.4f} std {np.std(values):.4f} "
+            f"over {len(values)} seed(s): " + " ".join(f"{v:.4f}" for v in values)
+        )
 
 
 def print_final_evals(evals_by_seed: dict) -> None:
