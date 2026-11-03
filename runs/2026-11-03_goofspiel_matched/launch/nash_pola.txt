@@ -1,0 +1,1 @@
+m_pola_n4 | goofspiel_pola.py | env_kwargs.num_cards=4 inner_scale=16.0 beta_out=10.0 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true max_vmap_instances=3
