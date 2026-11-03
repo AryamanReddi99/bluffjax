@@ -36,16 +36,20 @@ Full budget (5e8 samples, 10 seeds), against POLA at the same backward passes:
 
 | N | Tuned ReMAPPO | POLA | ReMAPPO (s 1, no cap) |
 |---|---|---|---|
-| 4 | 0.105 ± 0.023 | 0.086 ± 0.013 (nash), 0.502 ± 0.115 (cluster rerun) | 0.394 |
+| 4 | 0.105 ± 0.023 | 0.086 ± 0.013 (nash), 0.083 ± 0.017 (cluster rerun) | 0.394 |
 | 5 | 0.379 ± 0.024 | 0.378 ± 0.019 | 0.627 |
 | 6 | 0.910 ± 0.036 | 0.924 ± 0.037 | 1.143 |
 
-**Runs are not reproducible across GPUs.** The same config and seeds start bit-identical: the update-0 loss matches to every printed digit. They differ by about 1e-6 at update 1, and the gap grows through the self-play dynamics. The reproducibility check (`launch/jobs_repro.txt`; N = 4, 3 seeds, short budget) gave:
+**Tuned ReMAPPO's runs are not reproducible across GPUs.** The same config and seeds start bit-identical: the update-0 loss matches to every printed digit. They differ by about 1e-6 at update 1, and the gap grows through the self-play dynamics.
+
+The reproducibility check (`launch/jobs_repro.txt`; N = 4, 3 seeds, short budget) gave:
 
 | Method | nash (RTX 3080) | cluster |
 |---|---|---|
 | Tuned ReMAPPO | 0.189 | 0.583 (A6000) |
 | POLA | 0.240 | 0.199 (A5000) |
+
+POLA reproduces: its two full-budget N = 4 runs give 0.086 and 0.083. An earlier note of 0.502 for the rerun was wrong; it was read from a partial summary taken shortly after the rerun started. Tuned ReMAPPO's screen point at forecast_scale 16 with cap 2 also gave 0.294 and 0.478 in two cluster jobs.
 
 Differences between methods smaller than this spread are not resolved by one 10-seed run.
 
