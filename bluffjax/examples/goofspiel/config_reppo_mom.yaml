@@ -10,7 +10,8 @@ defaults:
 
 nonself_weight: forecast  # forecast (SMAX) | current (gate forced to 0) | one (w = 1: PPO)
 clip_mode: product  # product (SMAX: clip the joint ratio) | self
-nonself_w_max: null  # null (SMAX), or truncate the other players' likelihood ratio here
+nonself_w_max: null  # null (SMAX; off), or truncate the other players' likelihood ratio here (sweepable)
+forecast_scale: 1.0  # the others at theta + forecast_scale * proxy; 1: SMAX (sweepable)
 reset_momentum_each_update: false  # SMAX RESET_MOMENTUM_EACH_UPDATE: zero the increments every update
 audit: false  # SMAX AUDIT: also compute the real level-1 step (one more backward pass) and score the proxy
 

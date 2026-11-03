@@ -40,7 +40,9 @@ Knobs (static, not sweepable):
   the others at theta) or one (w_i = 1: PPO; the gate is still logged).
 - clip_mode: product (clip the product of the self ratio and w_i, as SMAX
   does; default) or self (clip the self ratio only and multiply by w_i).
-- nonself_w_max: null (SMAX), or truncate w_i at this value.
+- nonself_w_max (sweepable): null (SMAX; off), or truncate w_i at this value.
+- forecast_scale (sweepable): the others are read at theta + forecast_scale *
+  proxy (1: SMAX), as goofspiel_reppo.py's forecast_scale stretches its forecast.
 - reset_momentum_each_update: zero u1 and u2 at the start of every update
   (SMAX RESET_MOMENTUM_EACH_UPDATE; default false).
 - audit: also take the real level-1 step (the PPO step from theta, one more
@@ -161,6 +163,8 @@ SWEEPABLE = (
     "clip_eps",
     "vf_coef",
     "max_grad_norm",
+    "forecast_scale",
+    "nonself_w_max",
 )
 
 RESULTS_LOG: ResultsLog | None = None
@@ -189,6 +193,8 @@ class HParams(NamedTuple):
     clip_eps: FloatArray
     vf_coef: FloatArray
     max_grad_norm: FloatArray
+    forecast_scale: FloatArray
+    nonself_w_max: FloatArray
 
 
 class Transition(NamedTuple):
@@ -411,9 +417,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                         adv_n = (adv_b - adv_mean) / (adv_std + 1e-8)
                         logratio = jnp.where(valid_b, logp - logp_old, 0.0)
                         ratio = jnp.exp(logratio)
-                        nonself = jnp.exp(jnp.where(valid_b, log_w, 0.0))
-                        if config["nonself_w_max"] is not None:
-                            nonself = jnp.minimum(nonself, config["nonself_w_max"])
+                        nonself = jnp.minimum(jnp.exp(jnp.where(valid_b, log_w, 0.0)), hp.nonself_w_max)
                         if config["clip_mode"] == "self":
                             actor = mean(-nonself * jnp.minimum(
                                 ratio * adv_n,
@@ -461,7 +465,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                         log_w = jnp.zeros_like(logp_old)
                     else:
                         log_w = nonself_log_weight(
-                            jax.tree_util.tree_map(lambda p, d: p + d, ts.params, proxy)
+                            jax.tree_util.tree_map(lambda p, d: p + hp.forecast_scale * d, ts.params, proxy)
                         )[idx_b]
 
                     # The one backward pass.
@@ -639,6 +643,8 @@ def main(config: dict) -> None:
             raise ValueError(f"unknown nonself_weight {config['nonself_weight']!r}")
         if config["clip_mode"] not in ("self", "product"):
             raise ValueError(f"unknown clip_mode {config['clip_mode']!r}")
+        if config["nonself_w_max"] is None:
+            config["nonself_w_max"] = float("inf")
         if config["audit"]:
             config["job_type"] += "_audit"  # as SMAX, so audit runs stay apart
         config["num_update_steps"] = int(
