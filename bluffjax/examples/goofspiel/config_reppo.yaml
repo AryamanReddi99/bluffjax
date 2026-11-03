@@ -1,0 +1,14 @@
+# Recursive self-play PPO (ReMAPPO) for Goofspiel (goofspiel_reppo.py): every
+# key of config_ppo.yaml, including its tuned lr and ent_coef, plus the
+# recursion knobs below (see the script docstring). reppo_k: 1 is
+# goofspiel_ppo.py.
+defaults:
+  - config_ppo
+  - _self_
+
+reppo_k: 2  # reasoning depth K
+nonself_weight: forecast  # forecast | current | one
+clip_mode: self  # self | product
+nonself_w_max: null  # null, or truncate the other players' likelihood ratio here
+
+job_type: goofspiel_reppo
