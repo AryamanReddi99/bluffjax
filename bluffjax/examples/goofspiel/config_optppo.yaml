@@ -1,0 +1,10 @@
+# Self-play PPO with optimistic Adam for Goofspiel (goofspiel_optppo.py): every
+# key of config_ppo.yaml plus the optimism coefficient (see the script
+# docstring). optimism: 0 is goofspiel_ppo.py.
+defaults:
+  - config_ppo
+  - _self_
+
+optimism: 1.0  # update -lr ((1 + optimism) r_t - optimism r_{t-1}), r = Adam's step; 1: 2 r_t - r_{t-1}
+
+job_type: goofspiel_optppo

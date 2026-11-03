@@ -1,0 +1,19 @@
+# Self-play magnetic mirror descent (MMD, Sokota et al. 2023) for Goofspiel
+# (goofspiel_mmd.py): every key of config_ppo.yaml plus the MMD knobs below
+# (see the script docstring). ent_coef is unused except as mmd_temp's default;
+# mmd_magnet_coef: 0 and mmd_prox_coef: 0 is goofspiel_ppo.py.
+defaults:
+  - config_ppo
+  - _self_
+
+# Defaults: the best of a small CPU screen at N = 4 (2e6 samples, 2 seeds, lr
+# 1e-3, ent_coef 0.1; outputs/smoke_n4_mmd_ema): final exploitability 0.28
+# (PPO 2.46), from mmd_magnet_coef {0.1, 0.3, 1} x magnet_rate {0.01, 0.1}.
+mmd_temp: ${ent_coef}  # tau: entropy bonus, on the ent_final_frac schedule
+mmd_magnet_coef: 1.0  # coefficient of KL(pi_theta || magnet)
+magnet_mode: ema  # ema | initial | uniform (static)
+magnet_rate: 0.01  # ema: phi <- phi + magnet_rate (theta - phi) once per update
+mmd_prox_coef: 0.0  # coefficient of an explicit KL to the rollout policy (0: PPO's clip alone)
+mmd_prox_kl: reverse  # reverse: KL(pi_theta || pi_old), forward: KL(pi_old || pi_theta) (static)
+
+job_type: goofspiel_mmd
