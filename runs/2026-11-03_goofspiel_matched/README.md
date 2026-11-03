@@ -23,3 +23,30 @@ Last-10% means are in `summary_nash.json` and `summary_cluster.json` (`launch/co
 - **POLA at N = 4 has no checkpoints in its main run.** `m_pola_n4` (nash) trained to the end and logged every result. It then failed while merging its unequal vmap chunks (3 + 3 + 3 + 1), which is now fixed in the branch's scripts; `goofspiel_ppo.py` keeps the old line. `m_pola_n4_ckpt` (cluster) reruns the same config for the checkpoints.
 - **Where jobs ran:** N = 4 PPO, ReMAPPO and POLA ran on nash (RTX 3080). Everything else ran on the cluster, on RTX 3090, A5000 or A6000 GPUs. Wall-clock times are therefore not comparable.
 - **Tuning is uneven:** POLA and MMD had two or three screening rounds; the PPO-family methods used fixed hyperparameters.
+
+## Tuned ReMAPPO (added 3 November 2026, evening)
+
+ReMAPPO K = 2 with its own knobs screened at N = 4, at the screens' budget (5e7 samples), 3 seeds, lr 1e-3 and ent 0.1:
+- the new `forecast_scale` s, under which the others are read at theta + s (theta^(1) - theta);
+- `nonself_w_max`.
+
+Round 1 tried s {1, 4, 16, 64} × cap {off, 2}; round 2 tried s {8, 16, 32} × cap {1.25, 1.5, 2, 3}. The best was s 16 with cap 1.25 (last-10% 0.190, against POLA's screen 0.217–0.248). Without a cap, s ≥ 16 diverges.
+
+Full budget (5e8 samples, 10 seeds), against POLA at the same backward passes:
+
+| N | Tuned ReMAPPO | POLA | ReMAPPO (s 1, no cap) |
+|---|---|---|---|
+| 4 | 0.105 ± 0.023 | 0.086 ± 0.013 (nash), 0.502 ± 0.115 (cluster rerun) | 0.394 |
+| 5 | 0.379 ± 0.024 | 0.378 ± 0.019 | 0.627 |
+| 6 | 0.910 ± 0.036 | 0.924 ± 0.037 | 1.143 |
+
+**Runs are not reproducible across GPUs.** The same config and seeds start bit-identical: the update-0 loss matches to every printed digit. They differ by about 1e-6 at update 1, and the gap grows through the self-play dynamics. The reproducibility check (`launch/jobs_repro.txt`; N = 4, 3 seeds, short budget) gave:
+
+| Method | nash (RTX 3080) | cluster |
+|---|---|---|
+| Tuned ReMAPPO | 0.189 | 0.583 (A6000) |
+| POLA | 0.240 | 0.199 (A5000) |
+
+Differences between methods smaller than this spread are not resolved by one 10-seed run.
+
+The `COMMIT` stamp in the cluster logs is stale: it was written once at `eb4368b`, and the jobs ran the synced, newer code.
