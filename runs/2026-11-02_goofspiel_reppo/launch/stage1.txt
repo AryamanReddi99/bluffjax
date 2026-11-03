@@ -10,3 +10,6 @@ s1_ppo_n5   | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=1 num_seeds=3 
 s1_reppo_n5 | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=2 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
 s1_ppo_n6   | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=1 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
 s1_reppo_n6 | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=2 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
+# N = 3 (solved by PPO at ent 0.3): a check that recursion does not hurt there.
+s1_ppo_n3   | goofspiel_reppo.py | env_kwargs.num_cards=3 reppo_k=1 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
+s1_reppo_n3 | goofspiel_reppo.py | env_kwargs.num_cards=3 reppo_k=2 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
