@@ -195,7 +195,7 @@ def test_sl_lr_anneal(monkeypatch, tmp_path, anneal):
         (tmp_path / "c").mkdir()
         constant = _train(
             monkeypatch, tmp_path / "c",
-            _config(sl_lr=1e-3, sl_num_steps_per_update=4), num_updates=3,
+            _config(sl_anneal_lr=False, sl_lr=1e-3, sl_num_steps_per_update=4), num_updates=3,
         )
         diff = jax.tree_util.tree_map(
             lambda a, b: float(jnp.abs(a - b).max()),

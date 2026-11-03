@@ -42,8 +42,10 @@ OpenSpiel's JAX and PyTorch versions skip training while a memory holds fewer
 samples than a batch; here the networks are trained on every iteration, with
 minibatches sampled with replacement.
 
-Defaults: 50 iterations of 100 traversals per player, 200 advantage-network
-steps and memories of 100,000 samples, as in the BluffJAX paper; 2 hidden
+Defaults (the best settings of the 31 Oct 2026 Leduc push): 1,000 iterations of
+1,500 traversals per player, 3,000 advantage-network steps, advantage memories
+of 2,000,000 and a strategy memory of 10,000,000 samples (the published Leduc
+scale), and Single Deep CFR's exact average strategy as well (--sd_cfr); 2 hidden
 layers of 128 units, the network size of every baseline; Adam with learning rate 1e-3 and gradient norms clipped to 1,
 as in the Deep CFR paper (Section 5.2); batches of 2048 and 5000
 policy-network steps, as in OpenSpiel's Deep CFR examples.
@@ -621,11 +623,11 @@ def run_deep_cfr(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deep CFR on Leduc Poker.")
-    parser.add_argument("--iterations", type=int, default=50, help="CFR iterations T")
+    parser.add_argument("--iterations", type=int, default=1000, help="CFR iterations T")
     parser.add_argument(
         "--eval_interval",
         type=int,
-        default=5,
+        default=250,
         help="evaluate after iteration 1, every this many iterations, after "
         "half of them and after the last",
     )
@@ -639,7 +641,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--traversals",
         type=int,
-        default=100,
+        default=1500,
         help="traversals K per player per iteration",
     )
     parser.add_argument("--hidden_sizes", type=int, nargs="+", default=[128, 128])
@@ -648,20 +650,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--max_grad_norm", type=float, default=1.0, help="0 disables clipping"
     )
     parser.add_argument("--batch_size", type=int, default=2048)
-    parser.add_argument("--advantage_train_steps", type=int, default=200)
+    parser.add_argument("--advantage_train_steps", type=int, default=3000)
     parser.add_argument("--policy_train_steps", type=int, default=5000)
     parser.add_argument(
         "--memory_capacity",
         type=int,
-        default=100_000,
+        default=2_000_000,
         help="size of each advantage memory (and of the strategy memory unless "
         "--strategy_memory_capacity is given)",
     )
-    parser.add_argument("--strategy_memory_capacity", type=int, default=None)
+    parser.add_argument("--strategy_memory_capacity", type=int, default=10_000_000)
     parser.add_argument(
         "--sd_cfr",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="also compute Single Deep CFR's average strategy (exact, every "
         "infoset) and log/save it",
     )

@@ -343,7 +343,7 @@ def test_rl_compare_off_and_interval(tmp_path, name):
 
 # ------------------------------------------------------------------ CFR
 def test_cfr_run(tmp_path):
-    assert kuhn_cfr.parse_args([]).iterations == 100
+    assert kuhn_cfr.parse_args([]).iterations == 2000
     args = [
         "--iterations", "10", "--eval_interval", "3", "--save_dir", str(tmp_path),
         "--save_checkpoints",
@@ -437,7 +437,7 @@ def test_cfr_flags_config_and_wandb(monkeypatch, tmp_path, name):
     assert defaults["job_type"] == name and defaults["project"] == "bluffjax"
     assert defaults["seed"] == 0 and defaults["wandb"] is False
     assert defaults["save_checkpoints"] is True
-    assert (defaults["iterations"], defaults["eval_interval"]) == ((50, 5) if deep else (100, 10))
+    assert (defaults["iterations"], defaults["eval_interval"]) == ((1000, 250) if deep else (2000, 100))
     assert defaults["save_dir"].endswith(os.path.join("checkpoints", "kuhn"))
     assert mod.parse_args(["--wandb"]).wandb and not mod.parse_args(["--no-wandb"]).wandb
     runs = []
@@ -473,6 +473,9 @@ def _deep_cfr_args(tmp_path, *extra):
             "--advantage_train_steps", "5",
             "--policy_train_steps", "10",
             "--memory_capacity", "500",
+            # small run without SD-CFR and the strategy memory as large as the
+            # advantage memories (the defaults are the Leduc push's full scale)
+            "--no-sd_cfr", "--strategy_memory_capacity", "500",
             "--save_dir", str(tmp_path),
             "--save_checkpoints",
             *extra,
@@ -562,6 +565,32 @@ def rebel_config(save_dir: str, num_update_steps: int) -> dict:
         job_type="kuhn_rebel",
         wandb=False,
     )
+
+
+def test_rebel_eval_cfr_iters(tmp_path):
+    """eval_cfr_iters and eval_matmul_precision set the test-time solve: the
+    logged exploitability is that of the trained network's policy with
+    eval_cfr_iters CFR iterations (self play keeps cfr_iters)."""
+    config = rebel_config(str(tmp_path), 2)
+    config.update(eval_cfr_iters=6, eval_matmul_precision="highest", num_seeds=1)
+    run_dir = kuhn_rebel.run(config)
+    final = [r for r in run_utils.read_results(run_dir) if "exploitability" in r][-1]
+    network = kuhn_rebel.ValueNetwork(hidden_dim=8)
+    template = network.init(jax.random.PRNGKey(0), jnp.zeros(kuhn_rebel.PBS_DIM))
+    params = run_utils.load_params(
+        run_utils.checkpoint_path(run_dir, "full", "value_net", 0), template
+    )
+    structure = kuhn_rebel.subgame_structure(1)
+    with jax.default_matmul_precision("highest"):
+        policies = {
+            n: np.asarray(jax.jit(lambda p, n=n: kuhn_rebel.test_time_policy(
+                kuhn_rebel.network_value_fn(network, p), structure, n))(params))
+            for n in (4, 6)
+        }
+    assert final["exploitability"] == pytest.approx(
+        kuhn_rebel.policy_exploitability(policies[6]), abs=1e-6
+    )
+    assert not np.allclose(policies[4], policies[6])
 
 
 def test_rebel_run(tmp_path):

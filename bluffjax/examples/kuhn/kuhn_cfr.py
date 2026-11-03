@@ -28,7 +28,7 @@ precision (VARIANTS; leduc_cfr.py describes them):
 CFR is deterministic, so a run is one solve (seed index 0, one wandb run
 "{seed}_0"; --seed only names it):
 
-    python bluffjax/examples/kuhn/kuhn_cfr.py --iterations 100 [--wandb]
+    python bluffjax/examples/kuhn/kuhn_cfr.py [--iterations 2000] [--variant cfr_plus] [--wandb]
 
 Flags (the same as leduc_cfr.py; kuhn_deep_cfr.py and leduc_deep_cfr.py add
 --num_seeds and their own hyperparameters): --variant, --iterations,
@@ -489,7 +489,7 @@ def run_cfr(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CFR on Kuhn Poker.")
-    parser.add_argument("--iterations", type=int, default=100, help="CFR iterations")
+    parser.add_argument("--iterations", type=int, default=2000, help="CFR iterations")
     parser.add_argument(
         "--variant",
         choices=sorted(VARIANTS),
@@ -499,7 +499,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--eval_interval",
         type=int,
-        default=10,
+        default=100,
         help="evaluate after iteration 1, every this many iterations, after "
         "half of them and after the last",
     )
