@@ -2,7 +2,7 @@
 #SBATCH -p main
 #SBATCH --gres=gpu:1
 #SBATCH -c 8
-#SBATCH --mem=48G
+#SBATCH --mem=8G  # MaxRSS of a job is about 1.5 GB
 #SBATCH --exclude=dgx-station,cn01,cn02,cn03,cn04,cn05,cn06,cn07,cn08,cn09,cn11,cn12
 #SBATCH -o /home/reddi/bluffjax-dev/reppo/runs/2026-11-02_goofspiel_reppo/logs/%x-%j.out
 # One ReMAPPO job on the cluster (code: ~/bluffjax-dev/reppo, the
