@@ -1,0 +1,82 @@
+# Goofspiel with the Leduc push's best PPO-NFSP settings
+# (bluffjax/examples/leduc/config_ppo_nfsp.yaml, G1: 0.0535 on Leduc; runs/2026-10-31_leduc_push),
+# 1e9 env samples per seed, 5 seeds. Leduc-only options (br-gap logging,
+# eval at 0/25/50/75/100%) are left out; vf_clip follows its rule, 0.2 x the std
+# of a game's return under random play, for the deck size.
+# 1e8 env samples per seed (1525 updates of 1024 envs x 64 steps), 5 seeds;
+# the half/ checkpoint is after 762 updates (~5e7 samples)
+# Every env step is one decision of each of the num_agents players.
+num_timesteps: 1e9  # Leduc best
+num_envs: 1024
+num_steps_per_env_per_update: 64
+num_epochs: 8  # Leduc best (with target_kl)
+num_minibatches: 4
+
+# BR (PPO), trained only on decisions made while following the BR
+lr: 1e-3  # Leduc best
+anneal_lr: false  # constant learning rate (best in the Kuhn/Leduc sweep, 14 Oct 2026)
+gamma: 1.0  # Leduc best: undiscounted, as in the NFSP paper
+gae_lambda: 0.95
+clip_eps: 0.2
+vf_clip: 1.15  # 0.2 x return std under random play at N = 6 (0.36 / 0.60 / 0.86 for N = 3 / 4 / 5)
+ent_coef: 0.1  # best in the Kuhn/Leduc sweep (14 Oct 2026)
+vf_coef: 1.0
+max_grad_norm: 0.5
+target_kl: 0.015  # Leduc best: CleanRL-style early stop of an update's epochs
+
+# Shared network architecture
+fc_dim_size: 128
+
+# NFSP-specific knobs
+anticipatory_eta: 0.1  # prob. a player follows the BR for a whole game
+# Algorithm R sample of all BR decisions (the same size in every game)
+sl_reservoir_capacity: 1000000
+sl_batch_size: 256
+sl_num_steps_per_update: 512  # 2 SL samples per env step, as in NFSP/OpenSpiel
+sl_lr: 3e-4
+sl_anneal_lr: true  # Leduc best: SL lr decays linearly to 0
+sl_target: sharpened  # Leduc best: the reservoir stores samples of softmax(BR logits / T)
+sl_target_temperature: 0.1  # Leduc best
+
+env_name: goofspiel
+seed: 0
+num_seeds: 5
+env_kwargs:
+  num_agents: 2
+  num_cards: 6  # N; run with 3..6
+
+# Exact evaluation (two players, num_cards <= 6; else ignored): exploitability
+# and exact value against random of the average policy and the BR, every
+# exact_eval_interval updates and after the last one (0 turns it off)
+exact_eval_interval: 50  # 305 exact evaluations over the 15,258 updates
+
+# comparison: win/loss/draw rates and return of the average and best-response
+# policies in compare_episodes games against the opponent, the learner in one
+# seat (alternating over the games) and the opponent in the other(s)
+compare: true
+compare_mode: random  # "random" or "checkpoint"
+# checkpoint opponent: a .msgpack file written by save_checkpoints, e.g.
+# ${repo_root:}/checkpoints/goofspiel/<run>/full/avg_policy_0.msgpack; use
+# actor_critic for PPO-NFSP files, actor for PQN-NFSP avg_policy files and
+# q_network for PQN-NFSP br files
+compare_with: ""
+compare_network_type: actor_critic  # "actor_critic", "q_network", or "actor"
+compare_episodes: 10  # complete games against random, for each policy
+compare_interval: 1  # updates between evaluations (and after the last)
+
+# wandb
+project: bluffjax
+job_type: goofspiel_ppo_nfsp_leduc_best  # run name prefix
+wandb: false
+
+# networks after half and all of the updates (see save_checkpoints in
+# parallel_nfsp_common.py)
+save_checkpoints: true
+save_dir: ${repo_root:}/checkpoints/goofspiel
+
+# Hydra configs and logs go to outputs/ at the repo root
+hydra:
+  run:
+    dir: ${repo_root:}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: ${repo_root:}/outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}

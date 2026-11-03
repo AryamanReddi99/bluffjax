@@ -23,6 +23,17 @@ every step, so every player makes a decision at every step of the game.
 - Average policy: every BR decision (obs, action) is added to a reservoir
   buffer (Algorithm R) and the average policy is fit to it by cross-entropy.
   The average policy is NFSP's output strategy; the BR is a training device.
+  sl_target chooses the action stored for a BR decision (as the Leduc
+  PPO-NFSP script): "sampled" (default, the action played), "greedy" (the
+  argmax of the BR's masked logits) or "sharpened" (a sample of
+  softmax(masked logits / sl_target_temperature)). The BR always plays and
+  trains on the sampled action; only the reservoir's target changes.
+- SL learning rate (sl_anneal_lr, default false: constant sl_lr): linear
+  decay from sl_lr to 0 over all SL steps; logged as sl_lr.
+- Target KL (target_kl, default null: off): as in CleanRL, the PPO epochs of
+  an update stop after the first epoch whose mean approximate KL
+  (kl_backward over its minibatches) exceeds target_kl; ppo_epochs_run logs
+  how many ran.
 - Evaluation: the average policy and the BR each play compare_episodes games
   against a baseline (uniformly random legal bids or a checkpoint) in every
   other seat, the learner's seat rotating over the games; wins (unique top
@@ -154,6 +165,7 @@ class Transition(NamedTuple):
     game_return: FloatArray  # env rewards of the game so far, this step included
     game_length: IntArray  # (num_envs,) steps of the game so far, this one included
     game_counts: Counts  # game metrics of the step, credited per agent
+    sl_action: IntArray  # the reservoir's target for a BR decision (sl_target)
 
 
 class RunnerState(NamedTuple):
@@ -178,6 +190,7 @@ class PPOUpdateState(NamedTuple):
     targets: FloatArray
     train_mask: BoolArray
     rng: PRNGKeyArray
+    stopped: BoolArray = False  # target_kl reached: skip the remaining epochs
 
 
 class SLUpdateState(NamedTuple):
@@ -260,6 +273,17 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         )
     baseline_name = "random" if compare_against_random else "baseline"
 
+    sl_target = config.get("sl_target", "sampled")
+    if sl_target not in ("sampled", "greedy", "sharpened"):
+        raise ValueError(f"unknown sl_target {sl_target!r}")
+    sl_temperature = config.get("sl_target_temperature", 0.1)
+    target_kl = config.get("target_kl")
+    sl_anneal_lr = config.get("sl_anneal_lr", False)
+    num_sl_steps = config["num_update_steps"] * config["sl_num_steps_per_update"]
+
+    def sl_linear_decay(count: int) -> float:
+        return config["sl_lr"] * jnp.maximum(1.0 - count / num_sl_steps, 0.0)
+
     def linear_decay(count: int) -> float:
         frac = 1.0 - count / config["num_gradient_steps"]
         return config["lr"] * frac
@@ -312,7 +336,10 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         )
         avg_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adam(learning_rate=config["sl_lr"], eps=1e-5),
+            optax.adam(
+                learning_rate=sl_linear_decay if sl_anneal_lr else config["sl_lr"],
+                eps=1e-5,
+            ),
         )
         br_train_state = TrainState.create(
             apply_fn=network.apply, params=br_params, tx=br_tx
@@ -365,6 +392,16 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     distrax.Categorical(logits=br_logits_masked).log_prob(action),
                     0.0,
                 )
+                # The reservoir's target for a BR decision (sl_target); the
+                # default keeps the played action and the original streams.
+                if sl_target == "greedy":
+                    sl_action = jnp.argmax(br_logits_masked, axis=-1)
+                elif sl_target == "sharpened":
+                    sl_action = distrax.Categorical(
+                        logits=br_logits_masked / sl_temperature
+                    ).sample(seed=jax.random.fold_in(rng_action, 1))
+                else:
+                    sl_action = action
 
                 next_state, next_obs, reward, absorbing, done, info = jax.vmap(
                     env.step
@@ -400,6 +437,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     game_return=game_return,
                     game_length=game_length,
                     game_counts=game_counts,
+                    sl_action=sl_action,
                 )
                 runner_state_inner = runner_state_inner._replace(
                     state=next_state,
@@ -445,7 +483,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 sl_buffer,
                 transitions.obs.reshape(-1, env.obs_dim),
                 transitions.action_mask.reshape(-1, action_dim),
-                transitions.action.reshape(-1),
+                transitions.sl_action.reshape(-1),
                 transitions.is_br.reshape(-1),
                 rng_sl_append,
             )
@@ -583,7 +621,21 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     ppo_state.train_state,
                     minibatches,
                 )
-                ppo_state = ppo_state._replace(train_state=final_train_state, rng=rng_s)
+                stopped = ppo_state.stopped
+                if target_kl is not None:
+                    # An epoch after the target KL was reached changes nothing.
+                    final_train_state = jax.tree_util.tree_map(
+                        lambda new, old: jnp.where(ppo_state.stopped, old, new),
+                        final_train_state,
+                        ppo_state.train_state,
+                    )
+                    batch_stats["epoch_ran"] = jnp.broadcast_to(
+                        ~ppo_state.stopped, batch_stats["kl_backward"].shape
+                    ).astype(jnp.float32)
+                    stopped = stopped | (batch_stats["kl_backward"].mean() > target_kl)
+                ppo_state = ppo_state._replace(
+                    train_state=final_train_state, rng=rng_s, stopped=stopped
+                )
                 return ppo_state, batch_stats
 
             ppo_state = PPOUpdateState(
@@ -593,6 +645,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 targets=targets,
                 train_mask=train_mask,
                 rng=rng_ppo_update,
+                stopped=jnp.array(False),
             )
             final_ppo_state, ppo_loss_info = lax.scan(
                 update_ppo_epoch,
@@ -601,7 +654,16 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 config["num_epochs"],
             )
             br_train_state = final_ppo_state.train_state
-            ppo_loss_info = jax.tree_util.tree_map(lambda x: x.mean(), ppo_loss_info)
+            if target_kl is None:
+                ppo_loss_info = jax.tree_util.tree_map(lambda x: x.mean(), ppo_loss_info)
+            else:
+                # statistics of the epochs that ran
+                ran = ppo_loss_info.pop("epoch_ran")
+                ppo_loss_info = jax.tree_util.tree_map(
+                    lambda x: jnp.where(ran > 0, x, 0.0).sum() / jnp.maximum(ran.sum(), 1.0),
+                    ppo_loss_info,
+                )
+                ppo_loss_info["ppo_epochs_run"] = ran[:, 0].sum()
 
             def update_sl_step(
                 sl_state: SLUpdateState,
@@ -709,6 +771,17 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                 "ppo_sample_frac": train_mask.mean(),
                 "sl_buffer_size": sl_buffer.size.astype(jnp.float32),
                 "sl_buffer_seen": sl_buffer.seen.astype(jnp.float32),
+                "sl_lr": (
+                    sl_linear_decay(avg_train_state.step)
+                    if sl_anneal_lr
+                    else jnp.asarray(config["sl_lr"])
+                ),
+                # share of BR decisions whose reservoir target is not the
+                # action played (0 with sl_target sampled)
+                "sl_target_differs_frac": (
+                    (transitions.sl_action != transitions.action) & transitions.is_br
+                ).sum()
+                / jnp.maximum(transitions.is_br.sum(), 1),
                 "br_lr": (
                     linear_decay(br_train_state.step)
                     if config["anneal_lr"]

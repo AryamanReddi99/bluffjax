@@ -21,6 +21,9 @@ game.
   Q(lambda), as in PQN) and is cut at average-policy decisions, so those give
   one-step Q-learning targets (see
   parallel_nfsp_common.per_agent_q_lambda_targets).
+- Optimiser and schedule (as the Leduc PQN-NFSP script): br_optimizer adam
+  (default) or radam (as in purejaxql's PQN) for the Q-network; with
+  anneal_lr its lr decays linearly from lr to lr * lr_final_frac (default 0).
 - Truncation: a game the env cuts off without ending it (done without
   absorbing; Goofspiel always ends after N rounds, so this doesn't happen
   with the current env) would not be treated as terminal: the decisions at
@@ -264,9 +267,16 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         )
     baseline_name = "random" if compare_against_random else "baseline"
 
+    # With anneal_lr the lr decays linearly from lr to lr * lr_final_frac
+    # over the run (lr_final_frac 0, the default, decays to 0).
+    lr_final_frac = config.get("lr_final_frac", 0.0)
+    br_optimizer = config.get("br_optimizer", "adam")
+    if br_optimizer not in ("adam", "radam"):
+        raise ValueError(f"br_optimizer must be 'adam' or 'radam', got {br_optimizer!r}")
+
     def linear_decay(count: int) -> float:
         frac = 1.0 - count / config["num_gradient_steps"]
-        return config["lr"] * frac
+        return config["lr"] * (lr_final_frac + (1.0 - lr_final_frac) * frac)
 
     def epsilon_schedule(update_step: FloatArray) -> FloatArray:
         decay_steps = max(
@@ -315,9 +325,11 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
         br_params = br_network.init(rng_br_init, obs)
         avg_params = avg_network.init(rng_avg_init, obs)
         br_lr = linear_decay if config["anneal_lr"] else config["lr"]
+        # br_optimizer: adam (default) or radam (purejaxql's PQN)
+        br_opt = optax.radam if br_optimizer == "radam" else optax.adam
         br_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
-            optax.adam(learning_rate=br_lr),
+            br_opt(learning_rate=br_lr),
         )
         avg_tx = optax.chain(
             optax.clip_by_global_norm(config["max_grad_norm"]),
