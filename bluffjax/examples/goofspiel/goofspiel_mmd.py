@@ -656,7 +656,12 @@ def main(config: dict) -> None:
             jax.effects_barrier()
             print(f"Chunk {c + 1}/{num_chunks} (instances {sl.start}..{sl.stop - 1}) "
                   f"done after {time.time() - start:.1f} s", flush=True)
-        final = jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs), *finals)
+        # Chunks of unequal size compile separately, so their static fields (the optimizer's
+        # functions) differ: merge the arrays under the first chunk's structure.
+        final = jax.tree_util.tree_unflatten(
+            jax.tree_util.tree_structure(finals[0]),
+            [jnp.concatenate(xs) for xs in zip(*(jax.tree_util.tree_leaves(f) for f in finals))],
+        )
         env_steps = config["num_update_steps"] * config["num_envs"] * config["num_steps_per_env_per_update"]
         print(f"Trained {len(insts)} instance(s) x {env_steps} env steps in {time.time() - start:.1f} s")
         print_final_evals(EVALS)
