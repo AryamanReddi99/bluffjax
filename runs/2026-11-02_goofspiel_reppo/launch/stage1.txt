@@ -1,0 +1,12 @@
+# Stage 1: lr x ent_coef, constant schedules, 3 seeds, 1e8 env steps, N = 4..6.
+# PPO is goofspiel_reppo.py with reppo_k=1 (identical to goofspiel_ppo.py, same
+# code version); ReMAPPO is reppo_k=2, nonself_weight=forecast, clip_mode=self.
+# Hypothesis: PPO is stable only with a strong entropy bonus (0.3; collapse at
+# <= 0.1 in the earlier sweep), ReMAPPO stays stable at lower entropy and so
+# reaches a lower exploitability.
+s1_ppo_n4   | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=1 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
+s1_reppo_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=2 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
+s1_ppo_n5   | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=1 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
+s1_reppo_n5 | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=2 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
+s1_ppo_n6   | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=1 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
+s1_reppo_n6 | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=2 num_seeds=3 save_checkpoints=false 'sweep={lr:[1e-4,3e-4,1e-3],ent_coef:[0.01,0.03,0.1,0.3]}'
