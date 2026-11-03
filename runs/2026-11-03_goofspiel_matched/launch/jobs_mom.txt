@@ -1,0 +1,5 @@
+# ReppoMomentum (the SMAX ReMAPPO-Momentum as is: gated momentum forecast, product clip), 1 backward pass per
+# minibatch step: 1e9 samples, lr 1e-3, ent 0.1, 10 seeds.
+m_mom_n4 | goofspiel_reppo_mom.py | env_kwargs.num_cards=4 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_mom_n5 | goofspiel_reppo_mom.py | env_kwargs.num_cards=5 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_mom_n6 | goofspiel_reppo_mom.py | env_kwargs.num_cards=6 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true

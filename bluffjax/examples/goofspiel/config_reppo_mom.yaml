@@ -1,0 +1,17 @@
+# ReMAPPO-Momentum for Goofspiel (goofspiel_reppo_mom.py): every key of
+# config_ppo.yaml, including its tuned lr and ent_coef, plus the momentum
+# knobs below (see the script docstring). The port of the SMAX
+# ReMAPPO-Momentum (recursive-reasoning-marl, smax/ppo/remappo_momentum):
+# one backward pass per minibatch step, the forecast of the other players'
+# update being the gated previous increment.
+defaults:
+  - config_ppo
+  - _self_
+
+nonself_weight: forecast  # forecast (SMAX) | current (gate forced to 0) | one (w = 1: PPO)
+clip_mode: product  # product (SMAX: clip the joint ratio) | self
+nonself_w_max: null  # null (SMAX), or truncate the other players' likelihood ratio here
+reset_momentum_each_update: false  # SMAX RESET_MOMENTUM_EACH_UPDATE: zero the increments every update
+audit: false  # SMAX AUDIT: also compute the real level-1 step (one more backward pass) and score the proxy
+
+job_type: goofspiel_reppo_mom
