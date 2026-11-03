@@ -1,0 +1,3 @@
+# POLA screen, round 2: the round-1 optimum (inner_scale 16, beta_out 3; last-10% 0.222 at ent 0.3, 0.667 at ent
+# 0.1) sat at the grid edge in both knobs. N = 4, 1e8 samples, 3 seeds, lr 1e-3.
+scr2_pola_n4 | goofspiel_pola.py | env_kwargs.num_cards=4 num_timesteps=1e8 num_seeds=3 lr=1e-3 max_vmap_instances=12 save_checkpoints=false 'sweep={inner_scale:[16.0,64.0],beta_out:[3.0,10.0],ent_coef:[0.1,0.3]}'
