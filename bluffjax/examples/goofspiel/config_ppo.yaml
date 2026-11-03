@@ -6,14 +6,18 @@ num_steps_per_env_per_update: 64
 num_epochs: 4
 num_minibatches: 4
 
-# Defaults: the Kuhn/Leduc self-play PPO settings (bluffjax/examples/leduc/config_ppo.yaml)
-lr: 2.5e-4
-lr_final_frac: 0.0  # linear decay to lr * lr_final_frac over all gradient steps (1.0: constant)
+# Tuned on N = 3..6 (runs/2026-11-02_goofspiel_exploitability, stages s1 and s2):
+# constant lr 3e-4 and a strong constant entropy bonus (0.3; the advantages
+# are normalised). With ent_coef <= 0.1, or the bonus annealed, the policy
+# collapses to deterministic bids and exploitability returns to near uniform.
+# The Kuhn/Leduc self-play defaults were lr 2.5e-4 annealed to 0, ent_coef 0.
+lr: 3.0e-4
+lr_final_frac: 1.0  # linear decay to lr * lr_final_frac over all gradient steps (1.0: constant)
 gamma: 0.99
 gae_lambda: 0.95
 clip_eps: 0.2
 vf_clip: 4.0  # 0.2 x the std of a game's return under random play (reward units)
-ent_coef: 0.0
+ent_coef: 0.3
 ent_final_frac: 1.0  # entropy coefficient decays linearly to ent_coef * ent_final_frac (1.0: constant)
 vf_coef: 1.0
 max_grad_norm: 0.5
