@@ -1,0 +1,27 @@
+# ReMAPPO+MMD for Goofspiel (goofspiel_reppo_mmd.py): every key of
+# config_ppo.yaml plus goofspiel_reppo.py's recursion knobs and
+# goofspiel_mmd.py's MMD knobs, with their defaults (see the script
+# docstring). reppo_k: 1 is goofspiel_mmd.py; mmd_magnet_coef: 0,
+# mmd_prox_coef: 0 and mmd_temp: ${ent_coef} is goofspiel_reppo.py. K
+# backward passes per minibatch step: at reppo_k 2 the matched budget is 5e8
+# samples.
+defaults:
+  - config_ppo
+  - _self_
+
+# Recursion (config_reppo.yaml)
+reppo_k: 2  # reasoning depth K
+nonself_weight: forecast  # forecast | current | one
+clip_mode: self  # self | product
+nonself_w_max: null  # null (off), or truncate the other players' likelihood ratio here (sweepable)
+forecast_scale: 1.0  # the others at theta + s (theta^(k-1) - theta); 1: the plain forecast (sweepable)
+
+# MMD (config_mmd.yaml)
+mmd_temp: ${ent_coef}  # tau: entropy bonus, on the ent_final_frac schedule
+mmd_magnet_coef: 1.0  # coefficient of KL(pi_theta || magnet)
+magnet_mode: ema  # ema | initial | uniform (static)
+magnet_rate: 0.01  # ema: phi <- phi + magnet_rate (theta - phi) once per update
+mmd_prox_coef: 0.0  # coefficient of an explicit KL to the rollout policy (0: PPO's clip alone)
+mmd_prox_kl: reverse  # reverse: KL(pi_theta || pi_old), forward: KL(pi_old || pi_theta) (static)
+
+job_type: goofspiel_reppo_mmd
