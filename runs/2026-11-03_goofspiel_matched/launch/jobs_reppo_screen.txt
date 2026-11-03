@@ -1,0 +1,4 @@
+# ReMAPPO K = 2 screen of its own knobs, at the screens' budget (5e7 samples = 762 updates x 32 backward passes,
+# as POLA's and MMD's screens), N = 4, 3 seeds, lr 1e-3, ent 0.1. forecast_scale stretches the forecast step;
+# nonself_w_max 1e30 is no truncation. POLA's screen at the same budget and ent: last-10% 0.217-0.248.
+scr_reppo_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=2 num_timesteps=5e7 num_seeds=3 lr=1e-3 ent_coef=0.1 save_checkpoints=false 'sweep={forecast_scale:[1.0,4.0,16.0,64.0],nonself_w_max:[1e30,2.0]}'

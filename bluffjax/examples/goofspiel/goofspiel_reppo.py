@@ -34,7 +34,14 @@ Knobs (static, not sweepable):
 - clip_mode: self (clip the self ratio only and multiply by w_i, so the
   anticipation signal is not clipped away; bridge.tex rem:clip) or product
   (clip the product of the self ratio and w_i, as the SMAX ReMAPPO does).
-- nonself_w_max: null, or truncate w_i at this value (as V-trace's c-bar).
+
+Knobs (scalar, sweepable):
+- forecast_scale s: the others are read at theta + s (theta^(k-1) - theta)
+  instead of theta^(k-1), i.e. the forecast update is stretched s-fold along
+  the level-(k-1) step (1: the plain forecast; 0: the others at theta, as
+  nonself_weight: current). No extra backward pass.
+- nonself_w_max: truncate w_i at this value (as V-trace's c-bar); null or .inf
+  turns it off.
 
 All players share one actor-critic (the observation is relative to the
 observer) and every player's every decision trains it: Goofspiel is a
@@ -141,6 +148,8 @@ SWEEPABLE = (
     "clip_eps",
     "vf_coef",
     "max_grad_norm",
+    "forecast_scale",
+    "nonself_w_max",
 )
 
 RESULTS_LOG: ResultsLog | None = None
@@ -159,6 +168,8 @@ class HParams(NamedTuple):
     clip_eps: FloatArray
     vf_coef: FloatArray
     max_grad_norm: FloatArray
+    forecast_scale: FloatArray
+    nonself_w_max: FloatArray
 
 
 class Transition(NamedTuple):
@@ -361,9 +372,7 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                         adv_n = (adv_b - adv_mean) / (adv_std + 1e-8)
                         logratio = jnp.where(valid_b, logp - logp_old, 0.0)
                         ratio = jnp.exp(logratio)
-                        nonself = jnp.exp(jnp.where(valid_b, log_w, 0.0))
-                        if config["nonself_w_max"] is not None:
-                            nonself = jnp.minimum(nonself, config["nonself_w_max"])
+                        nonself = jnp.minimum(jnp.exp(jnp.where(valid_b, log_w, 0.0)), hp.nonself_w_max)
                         if config["clip_mode"] == "self":
                             actor = mean(-nonself * jnp.minimum(
                                 ratio * adv_n,
@@ -409,7 +418,12 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                     ts_k, aux = level(jnp.zeros_like(logp_old))
                     for _ in range(config["reppo_k"] - 1):
                         if config["nonself_weight"] == "forecast":
-                            log_w = nonself_log_weight(ts_k.params)[idx_b]
+                            # theta^(k-1) + (s - 1) (theta^(k-1) - theta): exactly theta^(k-1) at s = 1
+                            forecast = jax.tree_util.tree_map(
+                                lambda p0, pk: pk + (hp.forecast_scale - 1.0) * (pk - p0),
+                                ts.params, ts_k.params,
+                            )
+                            log_w = nonself_log_weight(forecast)[idx_b]
                         elif config["nonself_weight"] == "current":
                             log_w = nonself_log_weight(ts.params)[idx_b]
                         else:  # one
@@ -551,6 +565,8 @@ def main(config: dict) -> None:
             raise ValueError(f"unknown nonself_weight {config['nonself_weight']!r}")
         if config["clip_mode"] not in ("self", "product"):
             raise ValueError(f"unknown clip_mode {config['clip_mode']!r}")
+        if config["nonself_w_max"] is None:
+            config["nonself_w_max"] = float("inf")
         config["num_update_steps"] = int(
             config["num_timesteps"] // config["num_envs"] // config["num_steps_per_env_per_update"]
         )

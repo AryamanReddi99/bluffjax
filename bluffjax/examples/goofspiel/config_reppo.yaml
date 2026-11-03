@@ -9,6 +9,7 @@ defaults:
 reppo_k: 2  # reasoning depth K
 nonself_weight: forecast  # forecast | current | one
 clip_mode: self  # self | product
-nonself_w_max: null  # null, or truncate the other players' likelihood ratio here
+nonself_w_max: null  # null (off), or truncate the other players' likelihood ratio here (sweepable)
+forecast_scale: 1.0  # the others at theta + s (theta^(k-1) - theta); 1: the plain forecast (sweepable)
 
 job_type: goofspiel_reppo
