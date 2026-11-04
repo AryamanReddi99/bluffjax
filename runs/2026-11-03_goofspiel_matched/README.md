@@ -54,3 +54,29 @@ POLA reproduces: its two full-budget N = 4 runs give 0.086 and 0.083. An earlier
 Differences between methods smaller than this spread are not resolved by one 10-seed run.
 
 The `COMMIT` stamp in the cluster logs is stale: it was written once at `eb4368b`, and the jobs ran the synced, newer code.
+
+## MMD combinations and tuned ReppoMomentum (added 4 November 2026)
+
+Every run below used 10 seeds, lr 1e-3 and ran on A5000s. Each uses the base methods' final configs, with no new tuning.
+- **ReMAPPO+MMD** (`goofspiel_reppo_mmd.py`, 5e8 samples): tuned ReMAPPO's levels with MMD's loss. Every level, the forecast included, is an MMD step.
+- **POLA+MMD** (`goofspiel_pola_mmd.py`, 1e9 samples): POLA with MMD's temperature and magnet KL in the outer objective, and in the opponent's lookahead (`inner_mmd`). POLA's `beta_out` stays the step-size control, with no clip.
+- **Tuned ReppoMomentum** (1e9 samples): the momentum forecast with tuned ReMAPPO's settings: forecast_scale 16, cap 1.25, clip_mode self.
+
+Final exploitability (mean ± std over 10 seeds):
+
+| N | MMD | ReMAPPO+MMD | POLA+MMD | Tuned ReppoMomentum | Tuned ReMAPPO | POLA |
+|---|---|---|---|---|---|---|
+| 4 | 0.045 ± 0.017 | 0.050 ± 0.017 | **0.041 ± 0.005** | 0.104 ± 0.029 | 0.105 ± 0.023 | 0.086 / 0.083 |
+| 5 | **0.162 ± 0.005** | 0.165 ± 0.003 | 0.176 ± 0.006 | 0.384 ± 0.022 | 0.379 ± 0.024 | 0.378 ± 0.019 |
+| 6 | **0.472 ± 0.014** | 0.520 ± 0.010 | 0.605 ± 0.019 | 0.901 ± 0.043 | 0.910 ± 0.036 | 0.924 ± 0.037 |
+
+Magnets (MMD / ReMAPPO+MMD / POLA+MMD):
+
+| N | MMD | ReMAPPO+MMD | POLA+MMD |
+|---|---|---|---|
+| 4 | 0.040 | 0.047 | 0.039 |
+| 5 | 0.148 | 0.149 | 0.163 |
+| 6 | 0.445 | 0.493 | 0.585 |
+
+- **Neither opponent-aware addition improves MMD.** At N = 4 all three are within noise; POLA+MMD has the lowest mean and the smallest seed spread. At N = 5 and 6 both additions are worse, more so the larger the game. At N = 6, ReMAPPO+MMD is 10% worse and POLA+MMD 28% worse.
+- **Tuned ReppoMomentum matches tuned ReMAPPO at every N with one backward pass per step.** It ties POLA at N = 5 and 6. With the SMAX defaults it collapsed at N = 4 (2.36).
