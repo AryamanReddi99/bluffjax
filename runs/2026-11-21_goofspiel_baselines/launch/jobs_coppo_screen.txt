@@ -1,0 +1,4 @@
+# CoPPO screen (goofspiel_reppo.py with reppo_k 1, level1_weight current, clip_mode product): its inner clip epsilon_2
+# on the other player's ratio. One backward pass per minibatch step, so the screens' budget is 1e8 samples. N = 4,
+# 3 seeds, lr 1e-3, ent 0.1 (as every method). nonself_eps2 0 is PPO.
+scr_coppo_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=1 level1_weight=current clip_mode=product num_timesteps=1e8 num_seeds=3 lr=1e-3 ent_coef=0.1 save_checkpoints=false 'sweep={nonself_eps2:[0.05,0.1,0.2,0.4]}'
