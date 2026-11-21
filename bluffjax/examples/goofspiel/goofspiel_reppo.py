@@ -34,8 +34,17 @@ Knobs (static, not sweepable):
 - clip_mode: self (clip the self ratio only and multiply by w_i, so the
   anticipation signal is not clipped away; bridge.tex rem:clip) or product
   (clip the product of the self ratio and w_i, as the SMAX ReMAPPO does).
+- level1_weight: one (level 1 is the plain PPO step, w_i = 1) or current (level 1
+  weights the others by their likelihood ratio at theta, as nonself_weight:
+  current does at the later levels). With reppo_k: 1, level1_weight: current,
+  clip_mode: product and a finite nonself_eps2 this is CoPPO (Wu et al., 2021,
+  "Coordinated Proximal Policy Optimization", their Eq. 10): one backward pass
+  per minibatch step.
 
 Knobs (scalar, sweepable):
+- nonself_eps2: null (off), or clip w_i to [1 - nonself_eps2, 1 + nonself_eps2]
+  before it multiplies the self ratio (CoPPO's inner clip epsilon_2; 0 gives
+  w_i = 1, i.e. PPO).
 - forecast_scale s: the others are read at theta + s (theta^(k-1) - theta)
   instead of theta^(k-1), i.e. the forecast update is stretched s-fold along
   the level-(k-1) step (1: the plain forecast; 0: the others at theta, as
@@ -150,6 +159,7 @@ SWEEPABLE = (
     "max_grad_norm",
     "forecast_scale",
     "nonself_w_max",
+    "nonself_eps2",
 )
 
 RESULTS_LOG: ResultsLog | None = None
@@ -170,6 +180,7 @@ class HParams(NamedTuple):
     max_grad_norm: FloatArray
     forecast_scale: FloatArray
     nonself_w_max: FloatArray
+    nonself_eps2: FloatArray
 
 
 class Transition(NamedTuple):
@@ -372,7 +383,10 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                         adv_n = (adv_b - adv_mean) / (adv_std + 1e-8)
                         logratio = jnp.where(valid_b, logp - logp_old, 0.0)
                         ratio = jnp.exp(logratio)
-                        nonself = jnp.minimum(jnp.exp(jnp.where(valid_b, log_w, 0.0)), hp.nonself_w_max)
+                        nonself = jnp.exp(jnp.where(valid_b, log_w, 0.0))
+                        if config["nonself_clip"]:  # CoPPO's inner clip (static, so other configs compile as before)
+                            nonself = jnp.clip(nonself, 1.0 - hp.nonself_eps2, 1.0 + hp.nonself_eps2)
+                        nonself = jnp.minimum(nonself, hp.nonself_w_max)
                         if config["clip_mode"] == "self":
                             actor = mean(-nonself * jnp.minimum(
                                 ratio * adv_n,
@@ -415,7 +429,10 @@ def make_train(config: dict) -> Callable[..., RunnerState]:
                         aux["grad_norm"] = pytree_norm(grads)
                         return ts.apply_gradients(grads=grads), aux
 
-                    ts_k, aux = level(jnp.zeros_like(logp_old))
+                    if config["level1_weight"] == "current":
+                        ts_k, aux = level(nonself_log_weight(ts.params)[idx_b])
+                    else:  # one
+                        ts_k, aux = level(jnp.zeros_like(logp_old))
                     for _ in range(config["reppo_k"] - 1):
                         if config["nonself_weight"] == "forecast":
                             # theta^(k-1) + (s - 1) (theta^(k-1) - theta): exactly theta^(k-1) at s = 1
@@ -565,8 +582,13 @@ def main(config: dict) -> None:
             raise ValueError(f"unknown nonself_weight {config['nonself_weight']!r}")
         if config["clip_mode"] not in ("self", "product"):
             raise ValueError(f"unknown clip_mode {config['clip_mode']!r}")
+        if config["level1_weight"] not in ("one", "current"):
+            raise ValueError(f"unknown level1_weight {config['level1_weight']!r}")
         if config["nonself_w_max"] is None:
             config["nonself_w_max"] = float("inf")
+        config["nonself_clip"] = config["nonself_eps2"] is not None or "nonself_eps2" in (config.get("sweep") or {})
+        if config["nonself_eps2"] is None:
+            config["nonself_eps2"] = float("inf")
         config["num_update_steps"] = int(
             config["num_timesteps"] // config["num_envs"] // config["num_steps_per_env_per_update"]
         )
