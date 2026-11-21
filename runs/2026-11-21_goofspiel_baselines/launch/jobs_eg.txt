@@ -1,0 +1,9 @@
+# Extragradient PPO (goofspiel_egppo.py) at the full budget: two backward passes per minibatch step (probe and
+# update), so 5e8 samples. lr 1e-3, ent 0.1, 10 seeds, A5000s, eg_probe_scale 16 (the probe at theta + 16 times
+# the Adam step). Screens (N = 4, 5e7, 3 seeds, Determined A100s; last-10%):
+#   scr_eg_n4   0.1 / 0.25 / 0.5 / 1 / 2: 3.019 / 2.768 / 2.774 / 2.694 / 2.494
+#   scr2_eg_n4  2 / 4 / 8 / 16:          1.839 / 2.169 / 1.746 / 1.333
+#   scr3_eg_n4  16 / 32 / 64 / 128:      0.936 / 2.202 / 1.356 / 1.482
+m_eg_n4 | goofspiel_egppo.py | env_kwargs.num_cards=4 eg_probe_scale=16.0 num_timesteps=5e8 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_eg_n5 | goofspiel_egppo.py | env_kwargs.num_cards=5 eg_probe_scale=16.0 num_timesteps=5e8 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_eg_n6 | goofspiel_egppo.py | env_kwargs.num_cards=6 eg_probe_scale=16.0 num_timesteps=5e8 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true

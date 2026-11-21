@@ -11,7 +11,7 @@
 set -euo pipefail
 CODE=~/bluffjax-dev/reppo-baselines
 RUN=$CODE/runs/2026-11-21_goofspiel_baselines
-PY=~/bluffjax-dev/ppo/.venv/bin/python  # jax 0.7.2 + CUDA 12
+PY=$CODE/.venv/bin/python  # uv sync --extra cuda --extra baselines (jax 0.7.2 + CUDA 12)
 cd "$CODE"
 export PYTHONPATH=$CODE XLA_PYTHON_CLIENT_PREALLOCATE=false WANDB_MODE=disabled
 NAME=$SLURM_JOB_NAME

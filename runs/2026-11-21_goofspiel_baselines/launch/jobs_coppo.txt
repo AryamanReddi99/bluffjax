@@ -1,0 +1,8 @@
+# CoPPO (goofspiel_reppo.py with reppo_k 1, level1_weight current, clip_mode product: the others' ratio at the
+# current parameters, inner-clipped to [1 - eps2, 1 + eps2], times the self ratio, the joint ratio clipped) at the
+# full budget: one backward pass per minibatch step, so 1e9 samples. lr 1e-3, ent 0.1, 10 seeds, A5000s.
+# Screen (scr_coppo_n4: N = 4, 1e8, 3 seeds): last-10% 2.342 / 2.070 / 2.505 / 2.459 at eps2 0.05 / 0.1 / 0.2 / 0.4;
+# every point collapsed to a near-deterministic policy (entropy < 0.005).
+m_coppo_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=1 level1_weight=current clip_mode=product nonself_eps2=0.1 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_coppo_n5 | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=1 level1_weight=current clip_mode=product nonself_eps2=0.1 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_coppo_n6 | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=1 level1_weight=current clip_mode=product nonself_eps2=0.1 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
