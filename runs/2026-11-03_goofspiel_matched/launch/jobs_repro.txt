@@ -1,0 +1,5 @@
+# Reproducibility check: the same configs and seeds on nash (RTX 3080) and the cluster, N = 4, 1e8 samples, 3 seeds.
+# POLA at its full-run knobs (m_pola_n4 gave 0.086 on nash, its rerun m_pola_n4_ckpt 0.502 on a cluster A5000), and
+# tuned ReMAPPO (screen point forecast_scale 16 / cap 2 gave 0.294 and 0.478 in two cluster jobs).
+rep_pola_n4  | goofspiel_pola.py  | env_kwargs.num_cards=4 inner_scale=16.0 beta_out=10.0 num_timesteps=1e8 num_seeds=3 lr=1e-3 ent_coef=0.1 max_vmap_instances=3 save_checkpoints=false
+rep_reppo_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=2 forecast_scale=16.0 nonself_w_max=1.25 num_timesteps=5e7 num_seeds=3 lr=1e-3 ent_coef=0.1 save_checkpoints=false

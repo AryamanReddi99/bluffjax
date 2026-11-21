@@ -1,0 +1,5 @@
+# ReppoMomentum with tuned ReMAPPO's settings: forecast_scale 16 (the others at theta + 16 * proxy), nonself_w_max
+# 1.25, clip_mode self. One backward pass per minibatch step, so 1e9 samples. lr 1e-3, ent 0.1, 10 seeds, A5000s.
+m_momt_n4 | goofspiel_reppo_mom.py | env_kwargs.num_cards=4 forecast_scale=16.0 nonself_w_max=1.25 clip_mode=self num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_momt_n5 | goofspiel_reppo_mom.py | env_kwargs.num_cards=5 forecast_scale=16.0 nonself_w_max=1.25 clip_mode=self num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_momt_n6 | goofspiel_reppo_mom.py | env_kwargs.num_cards=6 forecast_scale=16.0 nonself_w_max=1.25 clip_mode=self num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true

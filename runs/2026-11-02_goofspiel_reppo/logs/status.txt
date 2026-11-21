@@ -1,0 +1,19 @@
+s1_ppo_n4 start 2026-11-03_02:13:50
+s1_ppo_n4 done 2026-11-03_02:32:28
+s1_reppo_n4 start 2026-11-03_02:32:28
+s1_reppo_n4 done 2026-11-03_03:08:30 (finished after the queue loop was stopped)
+s1_ppo_n3 start 2026-11-03_03:12:04
+s1_ppo_n3 done 2026-11-03_03:30:37
+s1_reppo_n3 start 2026-11-03_03:30:37
+s1_reppo_n3 done 2026-11-03_04:05:50
+c_ppo_ep8_n4 start 2026-11-03_04:05:50
+c_ppo_ep8_n4 done 2026-11-03_04:23:00
+c_current_n4 start 2026-11-03_04:23:00
+c_current_n4 done 2026-11-03_04:38:56
+c_product_n4 start 2026-11-03_04:38:56
+c_product_n4 done 2026-11-03_04:57:01
+c_k3_n4 start 2026-11-03_04:57:01
+c_k3_n4 done 2026-11-03_05:23:36
+c_k4_n4 start 2026-11-03_05:23:36
+c_k4_n4 done 2026-11-03_05:58:37
+QUEUE_FINISHED /home/aryaman/bluffjax-dev/reppo/runs/2026-11-02_goofspiel_reppo/launch/nash_n3_n4.txt 2026-11-03_05:58:37

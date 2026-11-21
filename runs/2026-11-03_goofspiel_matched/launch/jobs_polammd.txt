@@ -1,0 +1,7 @@
+# POLA+MMD (goofspiel_pola_mmd.py) at the full budget: POLA (inner_scale 16, beta_out 10, inner_steps 1, dice_lambda
+# 0.9; no clip, beta_out the proximal term) with MMD's terms (ema magnet, coef 3, rate 0.03, temp 0.1) in the outer
+# objective and in the opponent's lookahead (inner_mmd true). num_timesteps counts both rollouts: 1e9 = 7,629 updates
+# x 16 minibatch steps x 2 backward passes, as PPO. lr 1e-3, 10 seeds, A5000s.
+m_polammd_n4 | goofspiel_pola_mmd.py | env_kwargs.num_cards=4 inner_scale=16.0 beta_out=10.0 inner_steps=1 dice_lambda=0.9 inner_mmd=true magnet_mode=ema mmd_magnet_coef=3.0 magnet_rate=0.03 mmd_temp=0.1 ent_coef=0.1 lr=1e-3 num_timesteps=1e9 num_seeds=10 exact_eval_interval=50 save_checkpoints=true max_vmap_instances=5
+m_polammd_n5 | goofspiel_pola_mmd.py | env_kwargs.num_cards=5 inner_scale=16.0 beta_out=10.0 inner_steps=1 dice_lambda=0.9 inner_mmd=true magnet_mode=ema mmd_magnet_coef=3.0 magnet_rate=0.03 mmd_temp=0.1 ent_coef=0.1 lr=1e-3 num_timesteps=1e9 num_seeds=10 exact_eval_interval=50 save_checkpoints=true max_vmap_instances=5
+m_polammd_n6 | goofspiel_pola_mmd.py | env_kwargs.num_cards=6 inner_scale=16.0 beta_out=10.0 inner_steps=1 dice_lambda=0.9 inner_mmd=true magnet_mode=ema mmd_magnet_coef=3.0 magnet_rate=0.03 mmd_temp=0.1 ent_coef=0.1 lr=1e-3 num_timesteps=1e9 num_seeds=10 exact_eval_interval=50 save_checkpoints=true max_vmap_instances=5

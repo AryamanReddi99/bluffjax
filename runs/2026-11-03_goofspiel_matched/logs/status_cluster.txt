@@ -1,0 +1,76 @@
+m_reppo_n5 start 2026-11-03_07:56:05 job 189665 gn06
+m_ppo_n5 start 2026-11-03_07:56:05 job 189664 gn07
+m_reppo_n6 start 2026-11-03_07:56:05 job 189667 gn10
+m_ppo_n6 start 2026-11-03_07:56:05 job 189666 gn09
+m_opt_n4 start 2026-11-03_08:15:55 job 189668 gn03
+m_opt_n5 start 2026-11-03_08:15:55 job 189669 gn09
+m_opt_n6 start 2026-11-03_08:15:55 job 189670 gn10
+scr_mmd_ema_n4 start 2026-11-03_08:15:55 job 189671 gn11
+scr_mmd_uni_n4 start 2026-11-03_08:15:55 job 189672 gn11
+m_mom_n4 start 2026-11-03_08:19:50 job 189673 gn02
+scr_mmd_uni_n4 done 2026-11-03_08:22:38
+m_mom_n5 start 2026-11-03_08:22:38 job 189674 gn11
+m_reppo_n5 done 2026-11-03_08:54:09
+m_mom_n6 start 2026-11-03_08:54:09 job 189675 gn06
+m_reppo_n6 done 2026-11-03_08:54:54
+scr_pola_e01_n4 start 2026-11-03_08:54:54 job 189676 gn10
+scr_mmd_ema_n4 done 2026-11-03_08:55:37
+scr_pola_e03_n4 start 2026-11-03_08:55:38 job 189677 gn08
+m_ppo_n5 done 2026-11-03_09:01:38
+scr2_mmd_ema_n4 start 2026-11-03_09:01:38 job 189690 gn11
+m_ppo_n6 done 2026-11-03_09:07:40
+m_opt_n4 done 2026-11-03_09:09:35
+scr2_mmd_ema_n4 done 2026-11-03_09:19:41
+m_opt_n6 done 2026-11-03_09:22:07
+scr_pola_e01_n4 done 2026-11-03_09:33:49
+m_opt_n5 done 2026-11-03_09:33:58
+scr_pola_e03_n4 done 2026-11-03_09:34:52
+scr2_pola_n4 start 2026-11-03_09:39:19 job 189738 gn09
+m_mmd_n4 start 2026-11-03_09:40:45 job 189741 gn09
+m_mmd_n5 start 2026-11-03_09:40:45 job 189742 gn10
+m_mmd_n6 start 2026-11-03_09:40:45 job 189743 gn10
+m_mom_n4 done 2026-11-03_09:46:56
+m_mom_n5 done 2026-11-03_10:06:22
+scr2_pola_n4 done 2026-11-03_10:08:58
+m_pola_n6 start 2026-11-03_10:27:46 job 189809 gn09
+m_pola_n5 start 2026-11-03_10:27:46 job 189808 gn06
+m_mom_n6 done 2026-11-03_10:40:25
+m_mmd_n6 done 2026-11-03_10:58:02
+m_mmd_n5 done 2026-11-03_10:58:04
+m_mmd_n4 done 2026-11-03_11:01:33
+m_pola_n5 done 2026-11-03_12:27:58
+m_pola_n6 done 2026-11-03_12:40:07
+m_pola_n4_ckpt start 2026-11-03_12:41:51 job 190054 gn07
+m_pola_n4_ckpt done 2026-11-03_14:39:51
+scr_reppo_n4 start 2026-11-03_20:30:39 job 190580 gn05
+scr_reppo_n4 done 2026-11-03_20:42:50
+scr2_reppo_n4 start 2026-11-03_20:45:31 job 190589 gn08
+scr2_reppo_n4 done 2026-11-03_21:06:51
+m_reppot_n4 start 2026-11-03_21:10:20 job 190676 gn05
+m_reppot_n5 start 2026-11-03_21:10:29 job 190677 gn07
+m_reppot_n6 start 2026-11-03_21:10:44 job 190678 gn08
+rep_cl_pola_n4 start 2026-11-03_21:11:24 job 190679 gn09
+rep_cl_reppo_n4 start 2026-11-03_21:12:03 job 190680 gn11
+rep_cl_reppo_n4 done 2026-11-03_21:14:48
+rep_cl_pola_n4 done 2026-11-03_21:17:11
+m_reppot_n4 done 2026-11-03_21:57:31
+m_reppot_n6 done 2026-11-03_22:08:58
+m_reppot_n5 done 2026-11-03_22:09:03
+m_momt_n4 start 2026-11-04_00:37:49 job 190942 gn08
+m_momt_n5 start 2026-11-04_00:39:04 job 190943 gn09
+m_momt_n6 start 2026-11-04_00:39:10 job 190944 gn10
+m_remmd_n4 start 2026-11-04_01:01:42 job 190945 gn07
+m_remmd_n5 start 2026-11-04_01:55:00 job 190946 gn10
+m_remmd_n4 done 2026-11-04_02:03:07
+m_remmd_n6 start 2026-11-04_02:03:07 job 190947 gn07
+m_momt_n4 done 2026-11-04_02:19:37
+m_polammd_n4 start 2026-11-04_02:19:38 job 190948 gn08
+m_momt_n6 done 2026-11-04_02:24:16
+m_polammd_n5 start 2026-11-04_02:24:16 job 190949 gn10
+m_momt_n5 done 2026-11-04_02:47:58
+m_polammd_n6 start 2026-11-04_02:47:58 job 190950 gn09
+m_remmd_n5 done 2026-11-04_02:59:25
+m_remmd_n6 done 2026-11-04_03:07:08
+m_polammd_n4 done 2026-11-04_04:19:11
+m_polammd_n5 done 2026-11-04_04:26:01
+m_polammd_n6 done 2026-11-04_05:09:14

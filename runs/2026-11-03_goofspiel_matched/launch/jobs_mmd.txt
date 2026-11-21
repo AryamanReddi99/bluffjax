@@ -1,0 +1,6 @@
+# MMD at the full budget (1 backward pass per minibatch step: 1e9 samples), lr 1e-3, 10 seeds, with the screened
+# knobs: ema magnet, mmd_magnet_coef 3, magnet_rate 0.03, mmd_temp 0.1 (the same entropy as the other methods).
+# Screens (N = 4, 1e8, 3 seeds): last-10% 0.072 (round 1) and 0.070 (round 2) at this point.
+m_mmd_n4 | goofspiel_mmd.py | env_kwargs.num_cards=4 magnet_mode=ema mmd_magnet_coef=3.0 magnet_rate=0.03 mmd_temp=0.1 ent_coef=0.1 num_timesteps=1e9 num_seeds=10 lr=1e-3 exact_eval_interval=50 save_checkpoints=true
+m_mmd_n5 | goofspiel_mmd.py | env_kwargs.num_cards=5 magnet_mode=ema mmd_magnet_coef=3.0 magnet_rate=0.03 mmd_temp=0.1 ent_coef=0.1 num_timesteps=1e9 num_seeds=10 lr=1e-3 exact_eval_interval=50 save_checkpoints=true
+m_mmd_n6 | goofspiel_mmd.py | env_kwargs.num_cards=6 magnet_mode=ema mmd_magnet_coef=3.0 magnet_rate=0.03 mmd_temp=0.1 ent_coef=0.1 num_timesteps=1e9 num_seeds=10 lr=1e-3 exact_eval_interval=50 save_checkpoints=true

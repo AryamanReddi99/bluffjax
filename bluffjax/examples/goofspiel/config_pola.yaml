@@ -1,0 +1,18 @@
+# POLA-DiCE self-play for Goofspiel (goofspiel_pola.py): every key of
+# config_ppo.yaml (clip_eps is unused: no ratio clipping), plus the POLA knobs
+# below (see the script docstring). num_timesteps counts every env sample,
+# fresh rollouts included: num_update_steps = num_timesteps // (num_envs *
+# num_steps_per_env_per_update * (inner_steps + 1)).
+defaults:
+  - config_ppo
+  - _self_
+
+inner_steps: 1  # opponent lookahead steps M (static; M + 1 rollouts per update)
+inner_scale: 0.5  # lookahead step as a multiple of one actor Adam step (0: PPO with a KL penalty)
+beta_in: 1.0  # opponent's proximal KL coefficient
+beta_out: 1.0  # self proximal KL coefficient
+dice_lambda: 0.9  # DiCE's discount on dependence on earlier actions (1: unbiased)
+fresh_self_seats: both  # both | sampled: the self seats averaged over in the fresh rollouts
+shaping_diagnostics: true  # also compute the direct gradient, to log the shaping gradient
+
+job_type: goofspiel_pola

@@ -1,0 +1,20 @@
+# Controls and depth, N = 4..6, lr {3e-4, 1e-3} x ent_coef {0.03, 0.1, 0.3},
+# 3 seeds, 1e8 env steps. Compare with the matching stage-1 points.
+# - ppo_ep8: PPO with 8 epochs, the gradient computations of ReMAPPO K = 2.
+# - current: K = 2 with the other players at the minibatch's start (the
+#   importance correction for the drift since the rollout, no forecast).
+# - product: K = 2 with the product of the ratios clipped (the SMAX ReMAPPO).
+# - k3, k4: deeper forecasts.
+c_ppo_ep8_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=1 num_epochs=8 num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_current_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=2 nonself_weight=current num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_product_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=2 clip_mode=product num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_k3_n4      | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=3 num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_k4_n4      | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=4 num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_ppo_ep8_n5 | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=1 num_epochs=8 num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_current_n5 | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=2 nonself_weight=current num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_product_n5 | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=2 clip_mode=product num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_k3_n5      | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=3 num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_ppo_ep8_n6 | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=1 num_epochs=8 num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_current_n6 | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=2 nonself_weight=current num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_product_n6 | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=2 clip_mode=product num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'
+c_k3_n6      | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=3 num_seeds=3 save_checkpoints=false 'sweep={lr:[3e-4,1e-3],ent_coef:[0.03,0.1,0.3]}'

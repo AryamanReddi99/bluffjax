@@ -1,0 +1,7 @@
+# POLA-DiCE (fresh rollouts) at the full budget: num_timesteps counts both rollouts, so 1e9 samples = 7,629 updates x
+# 16 minibatch steps x 2 backward passes = 244,128, matching PPO. lr 1e-3, ent 0.1 (as the other methods), 10 seeds,
+# with the screened knobs inner_scale 16, beta_out 10, inner_steps 1, dice_lambda 0.9 (screens at N = 4, 1e8,
+# 3 seeds, ent 0.1: last-10% 0.248 in round 2 and 0.217 in round 3).
+m_pola_n4 | goofspiel_pola.py | env_kwargs.num_cards=4 inner_scale=16.0 beta_out=10.0 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true max_vmap_instances=3
+m_pola_n5 | goofspiel_pola.py | env_kwargs.num_cards=5 inner_scale=16.0 beta_out=10.0 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true max_vmap_instances=5
+m_pola_n6 | goofspiel_pola.py | env_kwargs.num_cards=6 inner_scale=16.0 beta_out=10.0 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true max_vmap_instances=5

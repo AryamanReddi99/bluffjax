@@ -1,0 +1,7 @@
+# Optimistic-Adam PPO at the full budget (1 backward pass per minibatch step: 1e9 samples), lr 1e-3, ent 0.1, 10 seeds.
+m_opt_n4 | goofspiel_optppo.py | env_kwargs.num_cards=4 optimism=1.0 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_opt_n5 | goofspiel_optppo.py | env_kwargs.num_cards=5 optimism=1.0 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_opt_n6 | goofspiel_optppo.py | env_kwargs.num_cards=6 optimism=1.0 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+# MMD knob screen, N = 4, 1e8 samples, 3 seeds, lr 1e-3 (the MMD-specific knobs only).
+scr_mmd_ema_n4 | goofspiel_mmd.py | env_kwargs.num_cards=4 magnet_mode=ema num_timesteps=1e8 num_seeds=3 lr=1e-3 save_checkpoints=false 'sweep={mmd_magnet_coef:[0.3,1.0,3.0],magnet_rate:[0.003,0.01,0.03],mmd_temp:[0.03,0.1]}'
+scr_mmd_uni_n4 | goofspiel_mmd.py | env_kwargs.num_cards=4 magnet_mode=uniform num_timesteps=1e8 num_seeds=3 lr=1e-3 save_checkpoints=false 'sweep={mmd_magnet_coef:[0.1,0.2,0.4],mmd_temp:[0.1]}'

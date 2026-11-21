@@ -1,0 +1,4 @@
+# POLA-DiCE knob screen, N = 4, 1e8 env samples (counting the fresh rollouts: 762 updates), 3 seeds, lr 1e-3,
+# inner_steps 1, dice_lambda 0.9. inner_scale 0 is PPO with a KL penalty (no shaping).
+scr_pola_e01_n4 | goofspiel_pola.py | env_kwargs.num_cards=4 num_timesteps=1e8 num_seeds=3 lr=1e-3 ent_coef=0.1 max_vmap_instances=12 save_checkpoints=false 'sweep={inner_scale:[0.0,1.0,4.0,16.0],beta_out:[0.3,1.0,3.0]}'
+scr_pola_e03_n4 | goofspiel_pola.py | env_kwargs.num_cards=4 num_timesteps=1e8 num_seeds=3 lr=1e-3 ent_coef=0.3 max_vmap_instances=12 save_checkpoints=false 'sweep={inner_scale:[0.0,1.0,4.0,16.0],beta_out:[0.3,1.0,3.0]}'

@@ -1,0 +1,3 @@
+# MMD screen, round 2: the round-1 optimum (ema magnet, coef 3, rate 0.03, temp 0.1; last-10% 0.072) sat at the
+# grid edge in coef and rate. N = 4, 1e8 samples, 3 seeds, lr 1e-3.
+scr2_mmd_ema_n4 | goofspiel_mmd.py | env_kwargs.num_cards=4 magnet_mode=ema num_timesteps=1e8 num_seeds=3 lr=1e-3 save_checkpoints=false 'sweep={mmd_magnet_coef:[3.0,10.0],magnet_rate:[0.03,0.1],mmd_temp:[0.1,0.3]}'

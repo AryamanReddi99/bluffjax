@@ -1,0 +1,33 @@
+# POLA+MMD self-play for Goofspiel (goofspiel_pola_mmd.py): POLA-DiCE with
+# fresh rollouts (goofspiel_pola.py) plus MMD's entropy and magnet terms
+# (goofspiel_mmd.py) in the outer objective and, with inner_mmd, in the
+# opponent's lookahead (see the script docstring). Every key of
+# config_ppo.yaml (clip_eps is unused: no ratio clipping, beta_out is the
+# proximal term; ent_coef is unused except as mmd_temp's default), plus the
+# knobs below. num_timesteps counts every env sample, fresh rollouts included:
+# num_update_steps = num_timesteps // (num_envs * num_steps_per_env_per_update
+# * (inner_steps + 1)); with inner_steps 1 a minibatch step is 2 backward
+# passes, so 1e9 samples are 7,629 updates, the backward passes of PPO.
+# inner_mmd: false, mmd_magnet_coef: 0 and mmd_temp: ${ent_coef} is
+# goofspiel_pola.py.
+defaults:
+  - config_ppo
+  - _self_
+
+# POLA (goofspiel_pola.py); inner_scale and beta_out: its full-run values
+inner_steps: 1  # opponent lookahead steps M (static; M + 1 rollouts per update)
+inner_scale: 16.0  # lookahead step as a multiple of one actor Adam step (0: no lookahead)
+beta_in: 1.0  # opponent's proximal KL coefficient (no effect at inner_steps 1)
+beta_out: 10.0  # self proximal KL coefficient
+dice_lambda: 0.9  # DiCE's discount on dependence on earlier actions (1: unbiased)
+fresh_self_seats: both  # both | sampled: the self seats averaged over in the fresh rollouts
+shaping_diagnostics: true  # also compute the direct gradient, to log the shaping gradient
+
+# MMD (goofspiel_mmd.py); magnet values: its full-run values
+mmd_temp: ${ent_coef}  # tau: entropy bonus (outer, and inner with inner_mmd), on the ent_final_frac schedule
+mmd_magnet_coef: 3.0  # coefficient of KL(pi || magnet) (outer, and inner with inner_mmd)
+magnet_mode: ema  # ema | initial | uniform (static)
+magnet_rate: 0.03  # ema: m <- m + magnet_rate (theta - m) once per update
+inner_mmd: true  # the opponent's lookahead also runs MMD (static; false: POLA's inner objective)
+
+job_type: goofspiel_pola_mmd

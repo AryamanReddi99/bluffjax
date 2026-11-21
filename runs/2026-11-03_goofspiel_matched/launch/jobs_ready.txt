@@ -1,0 +1,10 @@
+# Matched backward passes (base: PPO at 1e9 env samples = 15,258 updates x 4 epochs x 4 minibatches
+# = 244,128 backward passes), lr 1e-3, ent_coef 0.1 constant, 10 seeds, exact evaluation every 50
+# updates, checkpoints at half and full budget. ReMAPPO K = 2 (forecast, self clip) makes 2 backward
+# passes per minibatch step, so 5e8 samples (7,629 updates).
+m_ppo_n4   | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=1 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_reppo_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=2 num_timesteps=5e8 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_ppo_n5   | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=1 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_reppo_n5 | goofspiel_reppo.py | env_kwargs.num_cards=5 reppo_k=2 num_timesteps=5e8 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_ppo_n6   | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=1 num_timesteps=1e9 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true
+m_reppo_n6 | goofspiel_reppo.py | env_kwargs.num_cards=6 reppo_k=2 num_timesteps=5e8 num_seeds=10 lr=1e-3 ent_coef=0.1 exact_eval_interval=50 save_checkpoints=true

@@ -1,0 +1,3 @@
+# ReMAPPO K = 2 screen, round 2, around round 1's best (forecast_scale 16, nonself_w_max 2: last-10% 0.294; without
+# a cap, scales of 16 and more diverge). N = 4, 5e7 samples, 3 seeds, lr 1e-3, ent 0.1.
+scr2_reppo_n4 | goofspiel_reppo.py | env_kwargs.num_cards=4 reppo_k=2 num_timesteps=5e7 num_seeds=3 lr=1e-3 ent_coef=0.1 save_checkpoints=false 'sweep={forecast_scale:[8.0,16.0,32.0],nonself_w_max:[1.25,1.5,2.0,3.0]}'
