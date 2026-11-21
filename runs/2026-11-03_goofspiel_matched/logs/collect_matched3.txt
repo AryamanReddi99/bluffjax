@@ -1,0 +1,28 @@
+m_mmd_n4     final 0.045 ± 0.017  last 10% 0.044  magnet 0.040
+m_mmd_n5     final 0.162 ± 0.005  last 10% 0.161  magnet 0.148
+m_mmd_n6     final 0.472 ± 0.014  last 10% 0.476  magnet 0.445
+m_mom_n4     final 2.365 ± 0.527  last 10% 2.377
+m_mom_n5     final 0.708 ± 0.064  last 10% 0.711
+m_mom_n6     final 1.112 ± 0.073  last 10% 1.131
+m_momt_n4    final 0.104 ± 0.029  last 10% 0.108
+m_momt_n5    final 0.384 ± 0.022  last 10% 0.385
+m_momt_n6    final 0.901 ± 0.043  last 10% 0.898
+m_opt_n4     final 2.727 ± 0.462  last 10% 2.736
+m_opt_n5     final 3.203 ± 0.987  last 10% 2.858
+m_opt_n6     final 2.587 ± 0.104  last 10% 2.646
+m_pola_n4_ckpt final 0.083 ± 0.017  last 10% 0.082
+m_pola_n5    final 0.378 ± 0.019  last 10% 0.374
+m_pola_n6    final 0.924 ± 0.037  last 10% 0.923
+m_polammd_n4 final 0.041 ± 0.005  last 10% 0.041  magnet 0.039
+m_polammd_n5 final 0.176 ± 0.006  last 10% 0.177  magnet 0.163
+m_polammd_n6 final 0.605 ± 0.019  last 10% 0.605  magnet 0.585
+m_ppo_n5     final 4.517 ± 1.524  last 10% 4.252
+m_ppo_n6     final 2.574 ± 0.303  last 10% 2.600
+m_remmd_n4   final 0.050 ± 0.017  last 10% 0.051  magnet 0.047
+m_remmd_n5   final 0.165 ± 0.003  last 10% 0.166  magnet 0.149
+m_remmd_n6   final 0.520 ± 0.010  last 10% 0.522  magnet 0.493
+m_reppo_n5   final 0.627 ± 0.071  last 10% 0.642
+m_reppo_n6   final 1.143 ± 0.045  last 10% 1.158
+m_reppot_n4  final 0.105 ± 0.023  last 10% 0.103
+m_reppot_n5  final 0.379 ± 0.024  last 10% 0.392
+m_reppot_n6  final 0.910 ± 0.036  last 10% 0.928

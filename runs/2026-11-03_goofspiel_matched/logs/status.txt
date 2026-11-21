@@ -1,0 +1,19 @@
+m_ppo_n4 start 2026-11-03_07:56:04
+m_ppo_n4 done 2026-11-03_08:48:27
+m_reppo_n4 start 2026-11-03_08:48:27
+m_reppo_n4 done 2026-11-03_09:38:41
+QUEUE_FINISHED /home/aryaman/bluffjax-dev/reppo/runs/2026-11-03_goofspiel_matched/launch/nash_ready.txt 2026-11-03_09:38:41
+scr3_pola_n4 start 2026-11-03_10:10:16
+scr3_pola_n4 FAILED rc=1 2026-11-03_10:10:59
+QUEUE_FINISHED /home/aryaman/bluffjax-dev/reppo/runs/2026-11-03_goofspiel_matched/launch/jobs_pola_screen3.txt 2026-11-03_10:10:59
+scr3_pola_n4 start 2026-11-03_10:13:45
+scr3_pola_n4 done 2026-11-03_10:25:03
+QUEUE_FINISHED /home/aryaman/bluffjax-dev/reppo/runs/2026-11-03_goofspiel_matched/launch/jobs_pola_screen3.txt 2026-11-03_10:25:03
+m_pola_n4 start 2026-11-03_10:27:45
+m_pola_n4 FAILED rc=1 2026-11-03_12:35:19
+QUEUE_FINISHED /home/aryaman/bluffjax-dev/reppo/runs/2026-11-03_goofspiel_matched/launch/nash_pola.txt 2026-11-03_12:35:19
+rep_nash_pola_n4 start 2026-11-03_21:10:09
+rep_nash_pola_n4 done 2026-11-03_21:14:15
+rep_nash_reppo_n4 start 2026-11-03_21:14:15
+rep_nash_reppo_n4 done 2026-11-03_21:16:09
+QUEUE_FINISHED /home/aryaman/bluffjax-dev/reppo/runs/2026-11-03_goofspiel_matched/launch/jobs_repro_nash.txt 2026-11-03_21:16:09

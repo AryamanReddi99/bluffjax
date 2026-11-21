@@ -1,0 +1,42 @@
+num_timesteps: 1000000000.0
+num_envs: 1024
+num_steps_per_env_per_update: 64
+num_epochs: 4
+num_minibatches: 4
+lr: 0.001
+lr_final_frac: 1.0
+gamma: 0.99
+gae_lambda: 0.95
+clip_eps: 0.2
+vf_clip: 4.0
+ent_coef: 0.1
+ent_final_frac: 1.0
+vf_coef: 1.0
+max_grad_norm: 0.5
+fc_dim_size: 128
+sweep: null
+max_vmap_instances: 24
+env_name: goofspiel
+seed: 0
+num_seeds: 10
+env_kwargs:
+  num_agents: 2
+  num_cards: 5
+exact_eval_interval: 50
+compare: true
+compare_episodes: 10
+compare_interval: 1
+project: bluffjax
+job_type: m_momt_n5
+wandb: false
+save_checkpoints: true
+save_dir: /home/reddi/bluffjax-dev/reppo/runs/2026-11-03_goofspiel_matched/jobs/m_momt_n5
+nonself_weight: forecast
+clip_mode: self
+nonself_w_max: 1.25
+forecast_scale: 16.0
+reset_momentum_each_update: false
+audit: false
+num_update_steps: 15258
+half_update_steps: 7629
+run_dir: /home/reddi/bluffjax-dev/reppo/runs/2026-11-03_goofspiel_matched/jobs/m_momt_n5/m_momt_n5_2026-11-04_00-39-38
