@@ -1,0 +1,11 @@
+# Self-play extragradient PPO for Goofspiel (goofspiel_egppo.py): every key of
+# config_ppo.yaml plus the probe scale (see the script docstring).
+# eg_probe_scale: 0 is goofspiel_ppo.py. Two backward passes per minibatch
+# step: the gradient-matched budget is 5e8 env samples (half PPO's 1e9).
+defaults:
+  - config_ppo
+  - _self_
+
+eg_probe_scale: 1.0  # probe = theta + eg_probe_scale (AdamStep(theta, g0) - theta); 1: textbook extragradient
+
+job_type: goofspiel_egppo
