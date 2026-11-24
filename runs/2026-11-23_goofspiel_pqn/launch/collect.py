@@ -24,7 +24,7 @@ def collect(job_dir):
     with open(runs[-1]) as f:
         for line in f:
             r = json.loads(line)
-            if r.get("exact_evaluated") and "exploitability" in r:
+            if "exploitability" in r:  # exact metrics are logged only at exact evaluations
                 curves[int(r["seed_index"])].append(r["exploitability"])
     if not curves:
         return None

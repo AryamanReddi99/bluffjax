@@ -1,0 +1,8 @@
+# Plain PQN at the matched comparison's settings (config_pqn.yaml defaults: PQN-NFSP's best-response settings,
+# 1e9 env samples, 10 seeds, exact exploitability every 50 updates, half/full checkpoints), SLURM A5000.
+# Exploration: the screen (jobs_screen.txt, N = 4, 3 seeds, 1e8) gave last-10% 2.629 / 2.686 / 2.672 / 2.672 for
+# start_e 0.06 -> 0 over the run / 0.2 -> 0 / 1.0 -> 0.005 over 10% / constant 0.06: all within noise and near
+# uniform play (2.50), so the default (PQN-NFSP's schedule, the lowest) is kept.
+m_pqn_n4 | goofspiel_pqn.py | env_kwargs.num_cards=4
+m_pqn_n5 | goofspiel_pqn.py | env_kwargs.num_cards=5
+m_pqn_n6 | goofspiel_pqn.py | env_kwargs.num_cards=6
