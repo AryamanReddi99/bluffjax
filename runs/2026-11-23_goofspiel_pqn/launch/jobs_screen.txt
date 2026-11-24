@@ -1,0 +1,7 @@
+# Plain PQN (goofspiel_pqn.py, config_pqn.yaml: PQN-NFSP's best-response settings) screen of the exploration
+# schedule at N = 4, 3 seeds, the screens' budget (1e8 samples), on nash. Ranked by the mean of each run's last 10%
+# of exact evaluations (collect_screen.py).
+scr_pqn_e006 | goofspiel_pqn.py | env_kwargs.num_cards=4 num_timesteps=1e8 num_seeds=3 exact_eval_interval=10 save_checkpoints=false
+scr_pqn_e02 | goofspiel_pqn.py | env_kwargs.num_cards=4 num_timesteps=1e8 num_seeds=3 exact_eval_interval=10 save_checkpoints=false start_e=0.2
+scr_pqn_e1 | goofspiel_pqn.py | env_kwargs.num_cards=4 num_timesteps=1e8 num_seeds=3 exact_eval_interval=10 save_checkpoints=false start_e=1.0 end_e=0.005 exploration_fraction=0.1
+scr_pqn_c006 | goofspiel_pqn.py | env_kwargs.num_cards=4 num_timesteps=1e8 num_seeds=3 exact_eval_interval=10 save_checkpoints=false end_e=0.06
