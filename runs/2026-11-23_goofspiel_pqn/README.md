@@ -27,11 +27,11 @@ on nash as a cross-check (final 2.767 ± 0.324; N = 5 was stopped).
 
 Final exploitability of the greedy policy, mean ± std over 10 seeds:
 
-| N (uniform) | PQN | PQN-NFSP (average policy) |
+| N (uniform) | PQN (10 seeds) | PQN-NFSP, average policy (5 seeds, `2026-11-02_goofspiel_exploitability`) |
 |---|---|---|
-| 4 (2.50) | 2.704 ± 0.280 | see `2026-11-02_goofspiel_exploitability` |
-| 5 (4.00) | 5.919 ± 0.124 | |
-| 6 (5.83) | 10.545 ± 0.612 | |
+| 4 (2.50) | 2.704 ± 0.280 | 0.093 ± 0.004 |
+| 5 (4.00) | 5.919 ± 0.124 | 0.506 ± 0.057 |
+| 6 (5.83) | 10.545 ± 0.612 | 1.401 ± 0.022 |
 
 The greedy policy is deterministic, and a deterministic strategy in Goofspiel is exploitable by more than uniform
 play from N = 5 on. Its exploitability barely moves after the first ~1% of training. The data is in
